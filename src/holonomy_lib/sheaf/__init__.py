@@ -51,15 +51,21 @@ References:
 
 from holonomy_lib.sheaf.graph_sheaf import GraphSheaf, HeterogeneousGraphSheaf
 from holonomy_lib.sheaf.laplacian import (
+    sheaf_bottom_spectrum,
     sheaf_coboundary,
+    sheaf_coboundary_sparse,
     sheaf_dirichlet_energy,
     sheaf_laplacian,
+    sheaf_laplacian_sparse,
 )
 
 __all__ = [
     "GraphSheaf",
     "HeterogeneousGraphSheaf",
+    "sheaf_bottom_spectrum",
     "sheaf_coboundary",
+    "sheaf_coboundary_sparse",
     "sheaf_dirichlet_energy",
     "sheaf_laplacian",
+    "sheaf_laplacian_sparse",
 ]

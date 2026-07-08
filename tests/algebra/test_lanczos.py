@@ -233,12 +233,17 @@ class TestShiftInvertValidation:
         with pytest.raises(ValueError, match="sigma"):
             lanczos_eigsh(A, k=2, which="LA", sigma=1.5)
 
-    def test_rejects_sparse_input_in_SA(self):
-        n = 5
+    def test_sparse_input_in_SA_dispatches_to_sparse_backend(self):
+        # Sparse SA used to raise NotImplementedError; it now dispatches
+        # to algebra.eigsh_sparse (full coverage in test_eigsh_sparse.py).
+        # Here: the dispatch itself works and matches dense eigh.
+        n = 8
         A_dense = _random_spd(n).squeeze(0)
         A_sparse = A_dense.to_sparse_csr()
-        with pytest.raises(NotImplementedError, match="dense"):
-            lanczos_eigsh(A_sparse, k=2, which="SA")
+        vals, vecs = lanczos_eigsh(A_sparse, k=2, which="SA")
+        ref = torch.linalg.eigvalsh(A_dense)[:2]
+        torch.testing.assert_close(vals, ref, atol=1e-8, rtol=0)
+        assert vecs.shape == (n, 2)
 
 
 class TestShiftInvertConvergence:
