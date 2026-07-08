@@ -20,6 +20,7 @@ import torch
 from holonomy_lib.sheaf import (
     GraphSheaf,
     HeterogeneousGraphSheaf,
+    sheaf_coboundary,
     sheaf_dirichlet_energy,
     sheaf_laplacian,
 )
@@ -152,3 +153,60 @@ def test_zero_edges_gives_zero_laplacian():
     L = sheaf_laplacian(het)
     assert L.shape == (5, 5)
     assert torch.allclose(L, torch.zeros(5, 5, dtype=DT))
+
+
+# --------------------------------------------------------------------
+# Regression: vectorized COO coboundary == reference per-edge loop
+# --------------------------------------------------------------------
+
+
+def _reference_coboundary(sheaf: HeterogeneousGraphSheaf) -> torch.Tensor:
+    """The pre-vectorization per-edge slice-write loop, kept as the
+    regression oracle for the COO-based assembly in `_coboundary_coo`."""
+    node_dims = sheaf.node_stalk_dims.tolist()
+    edge_dims = sheaf.edge_stalk_dims.tolist()
+    uv = sheaf.edges.tolist()
+    delta = torch.zeros(
+        sum(edge_dims), sum(node_dims), dtype=sheaf.dtype, device=sheaf.device,
+    )
+    node_off, acc = [], 0
+    for d in node_dims:
+        node_off.append(acc)
+        acc += d
+    row = 0
+    for e in range(sheaf.n_edges):
+        u, v = uv[e]
+        d_e = edge_dims[e]
+        delta[row:row + d_e, node_off[u]:node_off[u] + node_dims[u]] = sheaf.F_left[e]
+        delta[row:row + d_e, node_off[v]:node_off[v] + node_dims[v]] = -sheaf.F_right[e]
+        row += d_e
+    return delta
+
+
+def test_vectorized_coboundary_matches_reference_loop():
+    het = _het(
+        [2, 3, 1, 4, 2],
+        [[0, 1], [1, 2], [2, 3], [0, 3], [3, 4], [1, 4]],
+        edge_dims=[2, 1, 3, 2, 1, 4],
+        seed=7,
+    )
+    # atol=0: the assembly places values, no arithmetic happens.
+    torch.testing.assert_close(
+        sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
+    )
+
+
+def test_vectorized_coboundary_single_edge():
+    het = _het([3, 2], [[0, 1]], edge_dims=[2], seed=1)
+    torch.testing.assert_close(
+        sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
+    )
+
+
+def test_vectorized_coboundary_reversed_edge_pair():
+    # (u, v) and (v, u) are distinct edges (both allowed); their row blocks
+    # stay disjoint so plain index assignment is exact.
+    het = _het([2, 3], [[0, 1], [1, 0]], edge_dims=[2, 1], seed=3)
+    torch.testing.assert_close(
+        sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
+    )

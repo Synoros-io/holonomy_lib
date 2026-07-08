@@ -80,7 +80,7 @@ _SPARSE_LAYOUTS = (
 
 
 @with_provenance(
-    "holonomy_lib.algebra.lanczos_eigsh", op_version="0.3",
+    "holonomy_lib.algebra.lanczos_eigsh", op_version="0.4",
 )
 def lanczos_eigsh(
     A: torch.Tensor,
@@ -90,6 +90,7 @@ def lanczos_eigsh(
     generator: Optional[torch.Generator] = None,
     which: Literal["LA", "SA"] = "LA",
     sigma: Optional[float] = None,
+    solver: Literal["auto", "eigsh", "lobpcg", "torch_lobpcg"] = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Top-k symmetric eigenpairs via Lanczos (LA) or shift-invert (SA).
 
@@ -113,11 +114,22 @@ def lanczos_eigsh(
       which: `"LA"` for largest-algebraic (default), or `"SA"` for
         smallest-algebraic via shift-and-invert. SA mode runs Lanczos
         on `(A − σ·I)^{−1}` whose dominant Ritz values converge to
-        the eigenvalues of `A` closest to σ. Currently dense-only.
-      sigma: shift used in SA mode. Default `0.0` (finds smallest |λ|,
-        which is exactly the smallest λ on positive-semidefinite `A`).
+        the eigenvalues of `A` closest to σ. Dense input runs the
+        in-house shift-invert Lanczos; sparse input dispatches to
+        `algebra.eigsh_sparse.eigsh_sparse_sa` (hybrid SciPy
+        shift-invert / SciPy LOBPCG+spilu / `torch.lobpcg` backends,
+        selected by `solver`).
+      sigma: shift used in SA mode. Default `0.0` for dense input
+        (finds smallest |λ|, which is exactly the smallest λ on
+        positive-semidefinite `A`); sparse input defaults to the
+        cataloged `SPARSE_SA_SHIFT_INVERT_POLE` (just below a PSD
+        spectrum, so a Laplacian's λ=0 kernel stays factorable).
         For indefinite `A` set σ below the smallest eigenvalue, or set
         it close to whichever interior eigenvalues you want.
+      solver: sparse-SA backend selection; `"auto"` picks by device
+        and size. Ignored for dense input and for `which="LA"`. See
+        `algebra.eigsh_sparse` for the dispatch rule and the
+        scale-of-validity notes.
 
     Returns:
       Dense input  → `(eigvals: (B, k), eigvecs: (B, n, k))`.
@@ -153,10 +165,10 @@ def lanczos_eigsh(
     # Shift-invert path (SA mode).
     if which == "SA":
         if A.layout in _SPARSE_LAYOUTS:
-            raise NotImplementedError(
-                "Shift-invert mode (which='SA') currently requires "
-                "dense A. Sparse SA needs an iterative solver "
-                "(CG/MINRES); planned as future work."
+            from holonomy_lib.algebra.eigsh_sparse import eigsh_sparse_sa
+
+            return eigsh_sparse_sa(
+                A, k, sigma=sigma, solver=solver, generator=generator,
             )
         return _lanczos_shift_invert_dense(
             A, k,

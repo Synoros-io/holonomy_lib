@@ -37,7 +37,8 @@ from holonomy_lib.manifolds import (
 )
 from holonomy_lib.algebra import truncated_svd
 from holonomy_lib.tensor_calculus import hosvd, mode_product, mode_unfolding
-from holonomy_lib.algebra import lanczos_eigsh
+from holonomy_lib.algebra import cg, eigsh_sparse_sa, lanczos_eigsh, lsqr
+from holonomy_lib.convex import regularized_lstsq
 from holonomy_lib.spectral import (
     laplacian, magnetic, laplacian_eigenmaps, heat_kernel_chebyshev,
     effective_resistance, commute_time, diffusion_map,
@@ -420,14 +421,59 @@ Batched top-r SVD of `M: (..., m, n) → (U: (..., m, r), S: (..., r), Vt: (...,
 
 Refs: Eckart-Young (1936), Halko-Martinsson-Tropp (2011).
 
-### `lanczos_eigsh(A, k, n_iter=None, oversample=10, generator=None)`
-Top-k largest-algebraic eigenpairs of a batched symmetric `A: (B, n, n)`
-via Lanczos iteration with full reorthogonalization (Paige 1972). Cost
-`O(B · n_iter · n²)`, vs `O(B · n³)` for dense `torch.linalg.eigh` — the
-right tool when `n_iter ≪ n` and only the extreme eigenpairs matter.
-For smallest-k, call on `λ_max · I − A` with a known spectrum upper
-bound and recover by subtraction.
-Refs: Lanczos (1950), Paige (1972), Saad (2011) §6.5.
+### `lanczos_eigsh(A, k, n_iter=None, oversample=10, generator=None, which="LA", sigma=None, solver="auto")`
+Extreme-k eigenpairs of symmetric `A`. `which="LA"` (default): top-k
+largest-algebraic of batched dense `(B, n, n)` or sparse `(n, n)` via
+Lanczos with full reorthogonalization (Paige 1972); cost
+`O(B · n_iter · n²)`, vs `O(B · n³)` for dense `torch.linalg.eigh`.
+`which="SA"`: smallest-k via shift-and-invert; dense runs the in-house
+shift-invert Lanczos, sparse dispatches to `eigsh_sparse_sa` (below)
+selected by `solver`.
+Refs: Lanczos (1950), Paige (1972), Saad (2011) §6.5, Ericsson-Ruhe (1980).
+
+### `eigsh_sparse_sa(A, k, sigma=None, solver="auto", generator=None)`
+Bottom-k eigenpairs `(eigvals (k,), eigvecs (n, k))` of sparse symmetric
+`A: (n, n)` (COO/CSR/CSC, 2-D single-instance). Hybrid backends:
+SciPy `eigsh` shift-invert (CPU, `n ≤ 8000`), SciPy LOBPCG + `spilu`
+preconditioner (CPU, larger), `torch.lobpcg` (CUDA, device-preserving,
+unpreconditioned). The two SciPy branches compute the same modes
+(verified ~1e-14); the size threshold is throughput-only.
+Refs: Ericsson-Ruhe (1980), Knyazev (2001), Saad (2003) §10.3-10.4.
+
+### `cg(A, b, M=None, x0=None, rtol=None, atol=0.0, maxiter=None, sync_every=8)`
+Conjugate gradient for symmetric positive-definite `A x = b`. `A` is a
+dense `(n, n)` / `(B, n, n)` tensor, a sparse `(n, n)` tensor (applied
+to the whole batch in one sparse matmul), or a callable matvec (for
+never-materialized operators, e.g. normal equations or `δᵀ(δx)`).
+`b: (B, n)` or `(n,)`. Tolerances default to `sqrt(eps(dtype))`
+(derived); `maxiter` defaults to `n` (finite-termination bound).
+Warns on non-convergence. Refs: Hestenes-Stiefel (1952), Saad (2003) §6.7.
+
+### `lsqr(A, b, damp=0.0, atol=None, btol=None, maxiter=None, sync_every=8)`
+Iterative least squares `min ‖Ax − b‖² + damp²·‖x‖²` via Golub-Kahan
+bidiagonalization — never forms `AᵀA`, so conditioning is `cond(A)`,
+not squared; converges to the minimum-norm solution on rank-deficient
+systems. `A` dense `(m, n)` / `(B, m, n)` or sparse 2-D; per-element
+convergence is frozen on device (safe past Krylov breakdown).
+Refs: Paige-Saunders (1982) Alg. LSQR + §6.
+
+---
+
+## §Convex: `holonomy_lib.convex`
+
+Problem-level convex optimization interfaces ("minimize this
+objective"), as opposed to the raw Krylov solvers in `algebra.solvers`.
+Primitives enter only with a named downstream consumer.
+
+### `regularized_lstsq(A, b, lam, method="auto", rtol=None, maxiter=None)`
+The ridge problem `min ‖Ax − b‖² + λ‖x‖²`. Methods: `"cholesky"`
+(normal equations, CONVENTIONS §3.3 pattern; exact, dense-only),
+`"cg"` (CG on the never-materialized normal operator `v ↦ Aᵀ(Av)+λv`),
+`"lsqr"` (`damp = √λ`; conditioning not squared, handles sparse and
+rank-deficient `A`). `"auto"`: dense → cholesky, sparse → lsqr
+(benchmark-derived, `notes/benchmark_2026-07-08_solvers.md`).
+Refs: Tikhonov (1963), Björck (1996) §2.7, Paige-Saunders (1982) §1,
+Boyd-Vandenberghe (2004) §6.3.2.
 
 ---
 
@@ -792,9 +838,11 @@ Cellular sheaves on graphs and their Laplacians. A cellular sheaf
 attaches a finite-dim vector space (a "stalk") to each simplex of a
 graph and a linear restriction map for each face relation; the sheaf
 Laplacian generalizes the graph Laplacian to track disagreement of
-node-stalk values pushed up to each incident edge stalk. v1 is
-dense-only with a `SHEAF_DENSE_BYTES_CAP = 2 GiB` pre-flight guard;
-restricted to node-edge sheaves (no 2-cells yet).
+node-stalk values pushed up to each incident edge stalk. The dense
+path carries a `SHEAF_DENSE_BYTES_CAP = 2 GiB` pre-flight guard;
+past it, use the sparse path (`sheaf_coboundary_sparse`,
+`sheaf_laplacian_sparse`, `sheaf_bottom_spectrum`). Restricted to
+node-edge sheaves (no 2-cells yet).
 
 ### `GraphSheaf(edges, stalk_dim, restrictions_u, restrictions_v, n_nodes, ...)`
 Dataclass holding edge list `(n_e, 2)`, per-edge restriction maps
@@ -825,6 +873,21 @@ sheaf; orientation-flip on a 3-cycle drops kernel dim from 1 to 0
 
 ### `sheaf_dirichlet_energy(sheaf, x) → (B,)`
 Quadratic form `x^T L_F x`, batched-first over `x: (B, n_v·d_v)`.
+
+### `sheaf_coboundary_sparse(sheaf) → sparse COO`
+Same operator as `sheaf_coboundary` as a coalesced sparse-COO
+`(Σd_e, Σd_v)`; nnz scales with edges, not with `Σd_e · Σd_v`. For
+sheaves past the dense byte cap.
+
+### `sheaf_laplacian_sparse(sheaf) → sparse COO`
+`L_F = δ^T δ` assembled sparsely; block-sparsity of the graph
+adjacency, symmetric PSD, matches the dense `sheaf_laplacian`.
+
+### `sheaf_bottom_spectrum(sheaf, k, drop_kernel=True, kernel_headroom=16, solver="auto", generator=None)`
+The `k` smallest NONZERO eigenpairs of the sparse `L_F` plus node
+offsets `(eigvals (k,), eigvecs (Σd_v, k), offsets (n_nodes+1,))` —
+the scalable spectral read (the kernel = global sections is dropped
+at threshold `max(diag L)·1e-9`). Backends via `algebra.eigsh_sparse`.
 
 Refs: Hansen-Ghrist (2019) *Toward a spectral theory of cellular
 sheaves* (J. Appl. Comput. Topol. 3); Bodnar et al. (2022) *Neural
@@ -957,8 +1020,6 @@ Open frontiers the library does not yet cover:
 - GPU-resident custom CUDA kernel for the Z/2 PH boundary-matrix
   reduction (current torch path is a same-algorithm port that's
   ~21× slower than CPython sets at n=80; the win is a future kernel).
-- Sparse-input shift-and-invert via iterative solver (CG/MINRES) for
-  sparse SA Lanczos.
 - Further manifolds: sphere, Stiefel, Grassmann.
 (`ProductManifold` and `HeterogeneousKappaManifold` now ship;
 `KappaStereographicManifold` supports κ-sign crossing during

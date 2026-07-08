@@ -47,8 +47,8 @@ from __future__ import annotations
 import math
 
 import torch
-from scipy.special import roots_legendre
 
+from holonomy_lib._quadrature import gauss_legendre_nodes
 from holonomy_lib.provenance import with_provenance
 
 # Default Gauss-Legendre node count for the model ball-volume integral
@@ -184,9 +184,9 @@ def model_ball_volume(
     kappa, N, r = _prepare(kappa, N, r)
     _validate(kappa, N, r)
 
-    nodes_np, weights_np = roots_legendre(n_quad)
-    nodes = torch.as_tensor(nodes_np, dtype=kappa.dtype, device=kappa.device)
-    weights = torch.as_tensor(weights_np, dtype=kappa.dtype, device=kappa.device)
+    nodes, weights = gauss_legendre_nodes(
+        n_quad, dtype=kappa.dtype, device=kappa.device,
+    )
 
     # Map nodes ∈ (-1, 1) → t ∈ (0, r): t = ½·r·(node + 1), Jacobian = ½·r.
     half_r = 0.5 * r.unsqueeze(-1)                          # (..., 1)

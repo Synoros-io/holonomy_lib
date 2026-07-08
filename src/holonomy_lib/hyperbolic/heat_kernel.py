@@ -72,8 +72,8 @@ from __future__ import annotations
 import math
 
 import torch
-from scipy.special import roots_legendre
 
+from holonomy_lib._quadrature import gauss_legendre_nodes
 from holonomy_lib.provenance import with_provenance
 
 
@@ -277,15 +277,14 @@ def _heat_kernel_unit_n2(
     and `√(cosh(d + u²) − cosh d) ≈ u · √sinh(d)` near u = 0, so the
     transformed integrand is bounded (Atkinson 1989, §5.6).
     """
-    # Build the Gauss–Legendre nodes / weights ONCE per call (n_quad
-    # is typically 32; the cost is negligible vs the integrand
-    # evaluation). Cached at the SciPy level across repeated calls.
-    nodes_np, weights_np = roots_legendre(n_quad)
-    # `nodes_np ∈ (-1, 1)`; rescale to `(0, sqrt_S)` per element.
-    # Per-batch upper limit is `sqrt(tail_budget · t)`, t may be
-    # batched, so we rescale per element after broadcasting.
-    nodes = torch.as_tensor(nodes_np, dtype=d.dtype, device=d.device)
-    weights = torch.as_tensor(weights_np, dtype=d.dtype, device=d.device)
+    # Gauss–Legendre nodes/weights come from the library-wide cache
+    # (`_quadrature.gauss_legendre_nodes`): computed once per n_quad,
+    # cast per call. `nodes ∈ (-1, 1)`; rescale to `(0, sqrt_S)` per
+    # element. Per-batch upper limit is `sqrt(tail_budget · t)`, t may
+    # be batched, so we rescale per element after broadcasting.
+    nodes, weights = gauss_legendre_nodes(
+        n_quad, dtype=d.dtype, device=d.device,
+    )
 
     # Broadcast t and d to a common shape and add a quadrature-node axis.
     t_b, d_b = torch.broadcast_tensors(t, d)

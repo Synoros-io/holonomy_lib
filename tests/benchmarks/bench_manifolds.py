@@ -22,6 +22,7 @@ from __future__ import annotations
 import torch
 
 from holonomy_lib.manifolds import FixedRankManifold, SPDManifold
+from holonomy_lib.manifolds.comparison import model_ball_volume
 from tests.benchmarks.harness import Bench
 
 
@@ -187,4 +188,31 @@ bench.case(
 bench.case(
     "SPD.inner", _setup_spd_inner, _spd_sizes,
     notes="Affine-invariant inner; two linear solves.",
+)
+
+
+# ----------------- comparison (model-space volumes) -----------------
+
+def _setup_ball_volume(size, device, dtype):
+    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    # kappa in [-1, 1] keeps the spherical diameter bound pi/sqrt(kappa)
+    # above the r < 1 samples for every element.
+    kappa = (2.0 * torch.rand(size["B"], generator=g, dtype=dtype) - 1.0).to(device)
+    N = torch.full((size["B"],), 5.0, dtype=dtype, device=device)
+    r = torch.rand(size["B"], generator=g, dtype=dtype).to(device)
+    def fn():
+        return model_ball_volume(kappa, N, r)
+    return fn
+
+
+_ball_sizes = [
+    {"B": 1},
+    {"B": 1024},
+    {"B": 65536},
+]
+
+bench.case(
+    "comparison.model_ball_volume", _setup_ball_volume, _ball_sizes,
+    notes="Gauss-Legendre quadrature; nodes served from the _quadrature cache "
+          "(previously recomputed via scipy on every call).",
 )

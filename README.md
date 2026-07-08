@@ -11,7 +11,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.x](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
-[![tests: 1187 passing](https://img.shields.io/badge/tests-1187%20passing-brightgreen.svg)](#testing)
+[![tests: 1220 passing](https://img.shields.io/badge/tests-1220%20passing-brightgreen.svg)](#testing)
 [![audit: clean](https://img.shields.io/badge/audit-clean-brightgreen.svg)](#audit-discipline)
 
 ---
@@ -21,7 +21,7 @@
 A consolidated PyTorch math library for research at the intersection of
 **differential geometry**, **spectral graph theory**, **computational
 topology**, and **mechanistic interpretability**: the mathematics that
-modern ML keeps reinventing project by project. Twelve modules, 1179
+modern ML keeps reinventing project by project. Fourteen modules, 1220
 tests, every numerical constant derived or cataloged with a
 scale-of-validity, every primitive cited to the paper that defines it.
 
@@ -34,7 +34,8 @@ its inputs through a content-addressable provenance DAG.
 | Module | Primitives | What it gives you |
 |---|---|---|
 | `manifolds` | `FixedRankManifold`, `SPDManifold`, `LorentzManifold`, `KappaStereographicManifold`, `LorentzianManifold`, **`ProductManifold`**, **`HeterogeneousKappaManifold`**, **`comparison.*`** | Riemannian geometry on low-rank matrices, SPD cones, the hyperboloid model of hyperbolic space at curvature `k < 0`, the κ-stereographic model with parametric κ ∈ R interpolating spherical / Euclidean / hyperbolic, the pseudo-Riemannian (1, n-1)-signature Minkowski spacetime, mixed-curvature product manifolds, and per-point-κ heterogeneous geometry for substrate-style embeddings (Vandereycken 2013; Pennec et al. 2006; Nickel-Kiela 2018; Bachmann-Bécigneul-Ganea 2020; MTW 1973; O'Neill 1983; Gu-Sala et al. 2019; Skopek et al. 2019; Di Giovanni et al. 2022; Guo et al. AAAI 2025 GraphMoRE), plus Bishop-Gromov model-space sphere-area / ball-volume comparison references at real (non-integer) dimension and signed curvature |
-| `algebra` | `truncated_svd` (exact + randomized), **`lanczos_eigsh`** | Halko-Martinsson-Tropp randomized SVD; Eckart-Young exact; Lanczos top-k eigensolver with full reorthogonalization (Paige 1972) |
+| `algebra` | `truncated_svd` (exact + randomized), `lanczos_eigsh` (dense + sparse, LA/SA), **`eigsh_sparse_sa`**, **`cg`**, **`lsqr`** | Halko-Martinsson-Tropp randomized SVD; Eckart-Young exact; Lanczos top-k eigensolver with full reorthogonalization (Paige 1972); sparse bottom-k via hybrid shift-invert / LOBPCG+ILU backends (Ericsson-Ruhe 1980; Knyazev 2001); conjugate gradient (Hestenes-Stiefel 1952) and LSQR (Paige-Saunders 1982) iterative solvers |
+| **`convex`** | **`regularized_lstsq`** | Problem-level convex optimization interfaces gated on named downstream consumers; ridge/Tikhonov least squares dispatching to Cholesky normal equations, CG on the normal operator, or LSQR with damping (Tikhonov 1963; Paige-Saunders 1982; Boyd-Vandenberghe 2004 §6.3.2) |
 | `tensor_calculus` | `hosvd`, `mode_product`, `mode_unfolding` | Truncated HOSVD with Kolda-Bader n-mode product |
 | `spectral` | `combinatorial`/`symmetric_normalized`/`random_walk`/`signed` Laplacians, `laplacian_eigenmaps`, `magnetic.*` (directed), `heat_kernel_chebyshev`, **`effective_resistance`**, **`commute_time`**, **`diffusion_map`**, **`spectral_dimension`** | Chung; von Luxburg; Kunegis (signed); Furutani 2020 (magnetic Hermitian); Hammond-Vandergheynst-Gribonval 2011 (Chebyshev heat kernel); Klein-Randić 1993 (resistance); Coifman-Lafon 2006 (diffusion maps); Rammal-Toulouse 1983 (spectral dimension) |
 | `discrete_geometry` | `ollivier_ricci_curvature`, `discrete_ricci_flow`, `ricci_flow_with_surgery`, `forman_ricci_simple`, `forman_ricci_augmented` | Sinkhorn-W₁ Ollivier on graphs (Ollivier 2009; Cuturi 2013; Sia/Ni-Lin-Luo-Gao 2019), the **Perelman-on-networks** flow + surgery primitive, and the cheap combinatorial Forman alternative (Sreejith et al. 2016; Samal et al. 2018) |
@@ -42,7 +43,7 @@ its inputs through a content-addressable provenance DAG.
 | **`optimization`** | **`RiemannianSGD`** | Steepest descent on `FixedRankManifold` / `SPDManifold` / `LorentzManifold` via the existing projection + retraction API (Absil-Mahony-Sepulchre 2008, §4.1) |
 | **`simplicial`** | **`DenseSimplicialComplex`**, **`SparseSimplicialComplex`**, **`vietoris_rips_*`** | Simplicial complex data structures + boundary operators + Vietoris-Rips construction; foundation for Hodge + persistent homology (Munkres 1984; Hausmann 1995; Bauer 2021) |
 | **`topology`** | **`hodge_laplacian`**, **`betti_numbers`**, **`persistence_diagrams`** | Hodge Laplacians + Betti numbers on simplicial complexes (Eckmann 1944; Lim 2020), plus batched persistent homology H₀+H₁+H₂ of Vietoris-Rips filtrations via union-find + Z/2 matrix reduction (Edelsbrunner-Letscher-Zomorodian 2002; Cohen-Steiner-Edelsbrunner-Harer 2007 stability) |
-| **`sheaf`** | **`GraphSheaf`**, **`HeterogeneousGraphSheaf`**, **`sheaf_coboundary`**, **`sheaf_laplacian`**, **`sheaf_dirichlet_energy`** | Cellular sheaves on graphs and their Laplacians, uniform or per-node (heterogeneous) stalk dims (Hansen-Ghrist 2019); reduces to the standard graph Laplacian under trivial stalks; the spectral foundation behind Neural Sheaf Diffusion (Bodnar et al. 2022) |
+| **`sheaf`** | **`GraphSheaf`**, **`HeterogeneousGraphSheaf`**, **`sheaf_coboundary`**/**`sheaf_coboundary_sparse`**, **`sheaf_laplacian`**/**`sheaf_laplacian_sparse`**, **`sheaf_dirichlet_energy`**, **`sheaf_bottom_spectrum`** | Cellular sheaves on graphs and their Laplacians, uniform or per-node (heterogeneous) stalk dims (Hansen-Ghrist 2019); reduces to the standard graph Laplacian under trivial stalks; sparse-COO coboundary/Laplacian plus bottom-k-nonzero spectral read past the dense byte cap; the spectral foundation behind Neural Sheaf Diffusion (Bodnar et al. 2022) |
 | **`lie`** | **`so3.{exp,log,axis_angle,random_so3,compose}`**, **`real_spherical_harmonics`** | SO(3) primitives: Rodrigues / matrix log with empirically-calibrated near-π branch, Haar-uniform sampling (Shoemake 1992), composition; real spherical harmonics Y_lm for l ≤ 4 (Edmonds 1957), the natural basis for SO(3)-equivariant functions on the sphere |
 | `provenance` | `@with_provenance`, `record()`, `ProvenanceRegistry` | Content-addressable Merkle DAG of math primitives; substitution / replay / SAELens emission for mech interp |
 | **`hyperbolic`** | **`frechet_mean`**, **`hyperbolic_laplacian_eigenmaps`**, **`manifold_aware_inner`**, **`hyperbolic_heat_kernel`** | Manifold-aware graph operations: Karcher (1977) intrinsic mean, RSGD-based hyperbolic Laplacian eigenmaps (Belkin-Niyogi + Nickel-Kiela 2017), tangent-at-origin inner product (Pennec 2006), and the dimension-dispatched H^n heat kernel (closed forms: Davies-Mandouvalos 1988 at n=3, hand-derived operator-chain at n=5 and n=7; Grigor'yan-Noguchi recursion above, seeded from n=7) |
@@ -218,9 +219,12 @@ and citations.
 ## Performance
 
 Benchmarks: `notes/benchmark_baseline.md` (before optimization),
-`notes/benchmark_optimized.md` (post-Phase-3 fixes), and
-`notes/benchmark_2026-05-26_roadmap_sweep.md` (v0.1 roadmap items).
-All times CPU, single-thread, PyTorch 2.12, float64.
+`notes/benchmark_optimized.md` (post-Phase-3 fixes),
+`notes/benchmark_2026-05-26_roadmap_sweep.md` (v0.1 roadmap items),
+`notes/benchmark_2026-07-08_pr1_quadrature_coboundary.md` (quadrature
+cache + vectorized heterogeneous coboundary), and
+`notes/benchmark_2026-07-08_solvers.md` (`regularized_lstsq` method
+dispatch). All times CPU, single-thread, PyTorch 2.12, float64.
 
 ### Highlight: discrete Ricci curvature
 
@@ -289,8 +293,23 @@ end of the spectrum) and dense `eigvalsh` (which always pays `O(n³)`):
 | **1024** | **80.9 ms** | 24.5 ms | **18.9 ms** |
 
 SA mode raises `RuntimeError("shift-invert breakdown")` if σ coincides
-with an eigenvalue of `A` — for graph Laplacians (which have 0 in
+with an eigenvalue of `A`; for graph Laplacians (which have 0 in
 spectrum) use a small negative shift.
+
+### Highlight: sparse smallest-algebraic eigensolver
+
+The table above is the dense in-house SA path. Sparse `A`
+(COO/CSR/CSC) dispatches instead to `algebra.eigsh_sparse_sa`, wired
+automatically into `lanczos_eigsh(which="SA")`: SciPy `eigsh`
+shift-invert (CPU, `n ≤ SPARSE_SA_ITER_SOLVER_N`), SciPy `lobpcg` +
+`spilu` preconditioning (CPU, larger `n`), or `torch.lobpcg` (CUDA,
+unpreconditioned; validated at test scale only). Verified to ~1e-8
+against the dense SA path and ~1e-10 against dense `eigvalsh`. On a
+sparse sheaf Laplacian too large for the dense path (10,000 nodes,
+Σd_e = 35,868, dense δ would be 5.4 GiB), the sparse assembly (nnz =
+192,329) takes 0.12 s and the bottom-16 nonzero modes converge via
+LOBPCG+spilu in ~126 s
+(`notes/validation/sparse_sheaf_spectral_results.md`).
 
 ### Highlight: sparse Laplacian backend
 
@@ -308,6 +327,28 @@ dense scales `O(n²)`:
 | 1024 | 0.01 | 3.2 ms | **0.23 ms** (14×) |
 | 4096 | 0.003 | n/a (16 GB) | **0.30 ms** |
 
+### Highlight: iterative Krylov solvers
+
+`algebra.cg` (Hestenes-Stiefel 1952) and `algebra.lsqr`
+(Paige-Saunders 1982) back `convex.regularized_lstsq`'s `method="auto"`
+dispatch. Dense ridge problems on well-conditioned Gaussian `A` (CPU,
+float64, `λ = 0.1`):
+
+| m×n | cholesky | cg (normal op) | lsqr |
+|---|---:|---:|---:|
+| 128×64 | 0.1 ms | 2.4 ms | 7.5 ms |
+| 512×256 | 1.5 ms | 4.9 ms | 11.1 ms |
+| **2048×1024** | 40.6 ms | 36.9 ms | 41.4 ms |
+
+Cholesky dominates through `n=256` and reaches rough parity by
+`n≈1024-2048` (run-to-run noise territory); the iterative timings are
+best-case here since Gaussian `A` is well-conditioned, and the gap
+would widen back in Cholesky's favor on ill-conditioned problems (in
+wall time; LSQR wins there on accuracy). `method="auto"` picks
+`"cholesky"` for dense `A` (no benchmarked crossover to threshold on)
+and `"lsqr"` for sparse `A` (Cholesky would need the dense Gram
+matrix); full read in `notes/benchmark_2026-07-08_solvers.md`.
+
 ### Highlight: Batched persistent homology
 
 `topology.persistence_diagrams` computes H₀ + H₁ + H₂ for a batch of
@@ -323,7 +364,7 @@ the default `max_radius` range; the bottleneck stability theorem
 ε-perturbation in the test suite.
 
 The `reduction_backend="torch"` path runs end-to-end on the
-filtration's device (CPU or GPU) — but is **not yet a custom CUDA
+filtration's device (CPU or GPU), but is **not yet a custom CUDA
 kernel**, just a torch-tensor port of the same sequential algorithm.
 For small inputs CPython sets are faster (43 ms vs 903 ms on an
 80-point circle); the torch path is a foundation for the v0.2 GPU
@@ -437,7 +478,8 @@ holonomy_lib/
 ├── src/holonomy_lib/          # the library
 │   ├── manifolds/             # FixedRank, SPD, Lorentz, κ-stereographic, Lorentzian, Product, heterogeneous-κ
 │   ├── hyperbolic/            # manifold-aware graph ops: Fréchet mean, eigenmaps, heat kernel
-│   ├── algebra/               # truncated_svd, lanczos_eigsh (LA + shift-invert SA)
+│   ├── algebra/               # truncated_svd, lanczos_eigsh (dense + sparse, LA/SA), eigsh_sparse_sa, cg, lsqr
+│   ├── convex/                # regularized_lstsq (Tikhonov/ridge least squares)
 │   ├── tensor_calculus/       # hosvd, mode_product, mode_unfolding
 │   ├── spectral/              # 4 Laplacians (incl. magnetic + sign-magnetic), eigenmaps, heat kernel, resistance, diffusion maps
 │   ├── discrete_geometry/     # Ollivier-Ricci, discrete Ricci flow, surgery, Forman-Ricci
@@ -445,11 +487,11 @@ holonomy_lib/
 │   ├── optimization/          # RiemannianSGD on FixedRank / SPD
 │   ├── simplicial/            # Dense + Sparse complexes, Vietoris-Rips
 │   ├── topology/              # Hodge Laplacians, Betti, persistence diagrams (H₀+H₁+H₂)
-│   ├── sheaf/                 # cellular sheaves on graphs, sheaf Laplacians
+│   ├── sheaf/                 # cellular sheaves on graphs, sheaf Laplacians (dense + sparse), sparse bottom-k spectrum
 │   ├── lie/                   # SO(3) primitives, real spherical harmonics (l ≤ 4)
 │   ├── provenance/            # content-addressable hex protocol
 │   └── audit.py               # audit gate: no magic numbers
-├── tests/                     # 1179 tests across all modules
+├── tests/                     # 1220 tests across all modules
 │   └── benchmarks/            # device-agnostic timing harness
 ├── notes/
 │   ├── magic_numbers.md       # cataloged constants with scale-of-validity
@@ -466,13 +508,37 @@ holonomy_lib/
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
-**v0.5.2** (current): measurement + structure primitives.
+**v0.7.0** (current): sparse spectral scale-out + iterative solvers.
 
-- `manifolds.comparison` — Bishop-Gromov model-space sphere area / ball
+- `sheaf.sheaf_coboundary_sparse` / `sheaf.sheaf_laplacian_sparse` /
+  `sheaf.sheaf_bottom_spectrum`: sparse-COO sheaf coboundary and
+  Laplacian, plus a bottom-k-nonzero spectral read, for sheaves past
+  the dense `SHEAF_DENSE_BYTES_CAP = 2 GiB` guard.
+- `algebra.lanczos_eigsh(which="SA")` now accepts sparse input,
+  dispatching to the new `algebra.eigsh_sparse_sa` hybrid backend
+  (SciPy `eigsh` shift-invert / SciPy `lobpcg` + `spilu` / `torch.lobpcg`).
+- `algebra.cg` / `algebra.lsqr`: iterative Krylov solvers
+  (Hestenes-Stiefel 1952; Paige-Saunders 1982), dense, sparse, or
+  callable-operator form.
+- New `convex` package, seeded with `convex.regularized_lstsq`
+  (Tikhonov/ridge least squares, `method="auto"` dispatch).
+- `manifolds.sn_kappa` exposed as a public per-direction
+  generalized-sine primitive (was internal `_sn_kappa`).
+- Perf: cached Gauss-Legendre quadrature nodes, vectorized
+  heterogeneous sheaf coboundary assembly.
+- Test count 1187 (v0.6.0) → 1220; audit clean.
+
+**v0.6.0**: public preprint release milestone ("Meaning on a Video
+Card: Scalable, Lossless Geometric Primitives", Vaught 2026); no
+committed API changes since v0.5.2.
+
+**v0.5.2**: measurement + structure primitives.
+
+- `manifolds.comparison`: Bishop-Gromov model-space sphere area / ball
   volume at real (non-integer) dimension and signed curvature.
-- `spectral.spectral_dimension` — spectral dimension `d_s` from a
+- `spectral.spectral_dimension`: spectral dimension `d_s` from a
   Laplacian spectrum (non-integer / fractal dimensions supported).
-- `sheaf.HeterogeneousGraphSheaf` — cellular sheaf with per-node
+- `sheaf.HeterogeneousGraphSheaf`: cellular sheaf with per-node
   (heterogeneous) stalk dimensions; reduces to `GraphSheaf` under
   uniform dims.
 - Closed-form `H^7` heat kernel, one operator-chain step beyond `H^5`;
@@ -513,7 +579,7 @@ manifold pass.
 - List-returning tools wrap their return in `{"results": [...]}`
   on the MCP transport so FastMCP serializes a single JSON content
   item instead of one per element. Python callers still see the
-  underlying list via the unwrapped function — normalization is
+  underlying list via the unwrapped function; normalization is
   transport-only.
 
 **v0.4.0**: provenance agent-API redesign.
@@ -577,16 +643,18 @@ the v0.1.0 seed.
 `tensor_calculus`, `spectral` (4 Laplacians + eigenmaps),
 `discrete_geometry` (Ollivier-Ricci + flow + surgery), `provenance`.
 
-**Frontiers** (v0.6+): Wigner-D matrices (real basis) to complete the
+**Frontiers**: Wigner-D matrices (real basis) to complete the
 SO(3) equivariance story so spherical-harmonic features mix
 correctly under rotation; optimal transport extensions
 (Gromov-Wasserstein for metric-measure-space comparison, Sinkhorn
 divergences for de-biased OT); GPU-resident custom CUDA kernel for
 the Z/2 PH reduction (current torch path is sequential with a
-per-column CPU sync); sparse-input shift-and-invert via iterative
-solver (CG/MINRES); higher-dim cellular sheaves on simplicial
-complexes; further manifolds (sphere, Stiefel, Grassmann);
+per-column CPU sync); higher-dim cellular sheaves on simplicial
+complexes (2-cells / faces and the ∂₁∘∂₂ = 0 chain identity);
+further manifolds (sphere, Stiefel, Grassmann);
 SE(3) / SU(2) / SL(n) Lie group primitives.
+(Sparse-input shift-and-invert for smallest-algebraic eigenpairs
+shipped in v0.7.0 as `algebra.eigsh_sparse_sa`.)
 Contributions welcome via PR.
 
 ---
@@ -641,4 +709,4 @@ holonomy_lib is free software under the **GNU Affero General Public License v3.0
 
 Copyright © 2026 Synoros.
 
-**Commercial licensing.** The AGPL is not the only option. The copyright holder offers holonomy_lib under separate commercial terms for uses the AGPL does not permit — for example, embedding it in a proprietary product or network service without the AGPL's source-disclosure obligations. For a commercial license, contact [contact@synoros.io](mailto:contact@synoros.io).
+**Commercial licensing.** The AGPL is not the only option. The copyright holder offers holonomy_lib under separate commercial terms for uses the AGPL does not permit, for example embedding it in a proprietary product or network service without the AGPL's source-disclosure obligations. For a commercial license, contact [contact@synoros.io](mailto:contact@synoros.io).

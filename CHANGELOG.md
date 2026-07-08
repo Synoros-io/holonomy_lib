@@ -4,6 +4,58 @@ All notable changes to `holonomy_lib` are documented here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 version numbers follow [Semantic Versioning](https://semver.org).
 
+## [0.7.0] - 2026-07-08
+
+### Added
+
+- `manifolds.comparison.sn_kappa(kappa, t)`: the generalized sine `sn_κ`
+  exposed as a public per-direction primitive (previously internal), for
+  callers building sign-split / masked anisotropic fluxes from per-direction
+  curvatures. Petersen (2016) §7.1.
+- `sheaf.sheaf_coboundary_sparse` / `sheaf.sheaf_laplacian_sparse`: the sheaf
+  coboundary `δ` and Laplacian `L_F = δᵀδ` as coalesced sparse-COO tensors —
+  nnz scales with the edge count, covering sheaves past the dense 2 GiB cap.
+  Backport of synoros-substrate's validated `sheaf_scale.py` (generic parts);
+  Laplacian verified bit-identical against substrate's scipy assembly.
+- `sheaf.sheaf_bottom_spectrum(sheaf, k, ...)`: the `k` smallest NONZERO
+  eigenpairs of the sparse `L_F` plus node offsets — the scalable spectral
+  read. Kernel (global sections) dropped at `max(diag L)·1e-9`; new cataloged
+  constant `SHEAF_KERNEL_HEADROOM = 16`.
+- `algebra.lanczos_eigsh(which="SA")` now accepts sparse input (was
+  `NotImplementedError`), dispatching to new `algebra.eigsh_sparse.
+  eigsh_sparse_sa`: hybrid backends — SciPy `eigsh` shift-invert (CPU,
+  `n ≤ 8000`), SciPy LOBPCG + `spilu` (CPU, larger), `torch.lobpcg` (CUDA).
+  New `solver=` parameter; `lanczos_eigsh` op_version 0.3 → 0.4. New cataloged
+  constants `SPARSE_SA_ITER_SOLVER_N`, `SPARSE_SA_SHIFT_INVERT_POLE`,
+  `SPARSE_SA_SPILU_LOBPCG_KNOBS`.
+- `algebra.solvers.cg`: conjugate gradient for SPD systems — batched dense,
+  sparse (whole batch in one sparse matmul), or callable-operator form;
+  derived defaults (`rtol = √eps(dtype)`, `maxiter = n`); optional
+  preconditioner. Hestenes-Stiefel (1952).
+- `algebra.solvers.lsqr`: batched damped least squares via Golub-Kahan
+  bidiagonalization (Paige-Saunders 1982); per-element convergence frozen on
+  device every iteration (required for correctness past Krylov breakdown on
+  inconsistent systems), host sync on the `SOLVER_SYNC_EVERY_DEFAULT = 8`
+  cadence (new cataloged constant).
+- `convex` (new package): problem-level convex optimization interfaces,
+  entry gated on named consumers. Seeded with
+  `convex.regularized_lstsq(A, b, lam, method=...)` — Tikhonov/ridge least
+  squares via `"cholesky"` / `"cg"` / `"lsqr"`, `method="auto"` dispatch
+  benchmark-derived (dense → cholesky, sparse → lsqr; no size threshold —
+  see `notes/benchmark_2026-07-08_solvers.md`).
+
+### Changed
+
+- `sheaf`: the heterogeneous coboundary assembly is vectorized (COO index
+  arithmetic + one `index_put_`) instead of a Python loop over edges; outputs
+  bit-identical, the old loop kept in tests as the regression oracle. The
+  shared `_coboundary_coo` builder also feeds the sparse path.
+- `manifolds.comparison.model_ball_volume` and `hyperbolic.heat_kernel` now
+  draw Gauss-Legendre nodes from a cached master copy
+  (`_quadrature.gauss_legendre_nodes`) instead of recomputing via scipy on
+  every call (scipy's `roots_legendre` does not cache; the "cached at the
+  SciPy level" comment was incorrect).
+
 ## [0.6.0] - 2026-05-29
 
 ### Changed
