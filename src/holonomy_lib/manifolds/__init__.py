@@ -37,6 +37,7 @@ from holonomy_lib.manifolds.comparison import (
     model_anisotropic_flux,
     model_ball_volume,
     model_sphere_area,
+    sn_kappa,
 )
 from holonomy_lib.manifolds.fixed_rank import FixedRankManifold
 from holonomy_lib.manifolds.heterogeneous_kappa import (
@@ -59,4 +60,5 @@ __all__ = [
     "model_anisotropic_flux",
     "model_ball_volume",
     "model_sphere_area",
+    "sn_kappa",
 ]

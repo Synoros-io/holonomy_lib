@@ -120,6 +120,13 @@ def _sn_kappa(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     )
 
 
+# Public alias: the generalized sine is a reusable primitive. A caller may need the
+# PER-DIRECTION `sn_{κ_i}(r)` (not just the product) to build sign-split / masked
+# anisotropic fluxes -- e.g. routing spherical (κ>0) vs hyperbolic (κ<0) directions to
+# different force terms. Batched `(B, K)` kappa, `(B, 1)` r -> `(B, K)`.
+sn_kappa = _sn_kappa
+
+
 def _unit_sphere_surface_area(N: torch.Tensor) -> torch.Tensor:
     """`ω_{N-1} = 2 π^{N/2} / Γ(N/2)`, surface area of the unit `(N-1)`-sphere
     in `R^N`. Computed in log space via `lgamma` for real `N`."""
