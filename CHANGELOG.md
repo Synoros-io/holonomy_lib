@@ -8,6 +8,10 @@ version numbers follow [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- `manifolds.comparison.sn_kappa(kappa, t)`: the generalized sine `sn_κ`
+  exposed as a public per-direction primitive (previously internal), for
+  callers building sign-split / masked anisotropic fluxes from per-direction
+  curvatures. Petersen (2016) §7.1.
 - `sheaf.sheaf_coboundary_sparse` / `sheaf.sheaf_laplacian_sparse`: the sheaf
   coboundary `δ` and Laplacian `L_F = δᵀδ` as coalesced sparse-COO tensors —
   nnz scales with the edge count, covering sheaves past the dense 2 GiB cap.
