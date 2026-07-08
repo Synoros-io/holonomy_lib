@@ -1020,8 +1020,6 @@ Open frontiers the library does not yet cover:
 - GPU-resident custom CUDA kernel for the Z/2 PH boundary-matrix
   reduction (current torch path is a same-algorithm port that's
   ~21× slower than CPython sets at n=80; the win is a future kernel).
-- Sparse-input shift-and-invert via iterative solver (CG/MINRES) for
-  sparse SA Lanczos.
 - Further manifolds: sphere, Stiefel, Grassmann.
 (`ProductManifold` and `HeterogeneousKappaManifold` now ship;
 `KappaStereographicManifold` supports κ-sign crossing during

@@ -1,6 +1,6 @@
 [project]
 name = "holonomy-lib"
-version = "0.6.0"
+version = "0.7.0"
 description = "Research-grade PyTorch math: hyperbolic + spherical + Euclidean + pseudo-Riemannian + mixed-curvature + heterogeneous-κ manifolds with full autograd; differentiable hyperbolic heat kernels; spectral graph theory; discrete Ricci flow; simplicial topology; persistent homology; cellular sheaves; SO(3) Lie primitives; information geometry; tensor decompositions; content-addressable provenance. GPU-native, batched-first, audit-clean, cited."
 readme = "README.md"
 license = { file = "LICENSE" }
