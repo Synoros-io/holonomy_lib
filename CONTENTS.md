@@ -37,7 +37,8 @@ from holonomy_lib.manifolds import (
 )
 from holonomy_lib.algebra import truncated_svd
 from holonomy_lib.tensor_calculus import hosvd, mode_product, mode_unfolding
-from holonomy_lib.algebra import lanczos_eigsh
+from holonomy_lib.algebra import cg, eigsh_sparse_sa, lanczos_eigsh, lsqr
+from holonomy_lib.convex import regularized_lstsq
 from holonomy_lib.spectral import (
     laplacian, magnetic, laplacian_eigenmaps, heat_kernel_chebyshev,
     effective_resistance, commute_time, diffusion_map,
@@ -438,6 +439,41 @@ preconditioner (CPU, larger), `torch.lobpcg` (CUDA, device-preserving,
 unpreconditioned). The two SciPy branches compute the same modes
 (verified ~1e-14); the size threshold is throughput-only.
 Refs: Ericsson-Ruhe (1980), Knyazev (2001), Saad (2003) §10.3-10.4.
+
+### `cg(A, b, M=None, x0=None, rtol=None, atol=0.0, maxiter=None, sync_every=8)`
+Conjugate gradient for symmetric positive-definite `A x = b`. `A` is a
+dense `(n, n)` / `(B, n, n)` tensor, a sparse `(n, n)` tensor (applied
+to the whole batch in one sparse matmul), or a callable matvec (for
+never-materialized operators, e.g. normal equations or `δᵀ(δx)`).
+`b: (B, n)` or `(n,)`. Tolerances default to `sqrt(eps(dtype))`
+(derived); `maxiter` defaults to `n` (finite-termination bound).
+Warns on non-convergence. Refs: Hestenes-Stiefel (1952), Saad (2003) §6.7.
+
+### `lsqr(A, b, damp=0.0, atol=None, btol=None, maxiter=None, sync_every=8)`
+Iterative least squares `min ‖Ax − b‖² + damp²·‖x‖²` via Golub-Kahan
+bidiagonalization — never forms `AᵀA`, so conditioning is `cond(A)`,
+not squared; converges to the minimum-norm solution on rank-deficient
+systems. `A` dense `(m, n)` / `(B, m, n)` or sparse 2-D; per-element
+convergence is frozen on device (safe past Krylov breakdown).
+Refs: Paige-Saunders (1982) Alg. LSQR + §6.
+
+---
+
+## §Convex: `holonomy_lib.convex`
+
+Problem-level convex optimization interfaces ("minimize this
+objective"), as opposed to the raw Krylov solvers in `algebra.solvers`.
+Primitives enter only with a named downstream consumer.
+
+### `regularized_lstsq(A, b, lam, method="auto", rtol=None, maxiter=None)`
+The ridge problem `min ‖Ax − b‖² + λ‖x‖²`. Methods: `"cholesky"`
+(normal equations, CONVENTIONS §3.3 pattern; exact, dense-only),
+`"cg"` (CG on the never-materialized normal operator `v ↦ Aᵀ(Av)+λv`),
+`"lsqr"` (`damp = √λ`; conditioning not squared, handles sparse and
+rank-deficient `A`). `"auto"`: dense → cholesky, sparse → lsqr
+(benchmark-derived, `notes/benchmark_2026-07-08_solvers.md`).
+Refs: Tikhonov (1963), Björck (1996) §2.7, Paige-Saunders (1982) §1,
+Boyd-Vandenberghe (2004) §6.3.2.
 
 ---
 

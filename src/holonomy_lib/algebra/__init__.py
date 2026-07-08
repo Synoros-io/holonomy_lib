@@ -12,6 +12,10 @@ Currently implemented:
                          LOBPCG+spilu / torch.lobpcg).
   eigsh_sparse.eigsh_sparse_sa: the sparse smallest-k backend, callable
                          directly for backend control.
+  solvers.cg:            conjugate gradient for SPD systems — batched
+                         dense, sparse, or callable-operator form.
+  solvers.lsqr:          iterative (damped) least squares via
+                         Golub-Kahan bidiagonalization.
 
 Planned:
   Einstein notation helpers, group representations (cyclic, dihedral),
@@ -21,5 +25,6 @@ Planned:
 from holonomy_lib.algebra.eigsh_sparse import eigsh_sparse_sa
 from holonomy_lib.algebra.lanczos import lanczos_eigsh
 from holonomy_lib.algebra.linear import truncated_svd
+from holonomy_lib.algebra.solvers import cg, lsqr
 
-__all__ = ["eigsh_sparse_sa", "lanczos_eigsh", "truncated_svd"]
+__all__ = ["cg", "eigsh_sparse_sa", "lanczos_eigsh", "lsqr", "truncated_svd"]
