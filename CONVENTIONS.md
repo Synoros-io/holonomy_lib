@@ -380,6 +380,11 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 ### 10.4 No internal-only files in the public tree
 
-Files like `CLAUDE.md` (Claude Code's operating constraints) and
-`HANDOFF.md` (build-plan from the seeding session) belong on local
-disk only. They're listed in `.gitignore`.
+`AGENTS.md` is the canonical agent instruction file and **is** tracked:
+it carries this library's operating constraints and points here for the
+coding standard. `CLAUDE.md` is a symlink to it.
+
+Working-state files stay on local disk only, because they can name
+private sibling repos: `CLAUDE.md` (the symlink), `direction.md`
+(current goal), `ledger.md` (session log), and `archive/` (superseded
+docs plus their tombstones). All are listed in `.gitignore`.
