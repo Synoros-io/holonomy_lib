@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Heat kernel on hyperbolic space H^n_k.
 
@@ -75,7 +75,6 @@ import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
 from holonomy_lib.provenance import with_provenance
-
 
 # Dimensions with dedicated closed-form / quadrature routines. Above
 # these we fall back to the Grigor'yan–Noguchi recursion. Documented

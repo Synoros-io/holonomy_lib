@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """κ-stereographic projection model — constant curvature manifold
 that interpolates spherical (κ > 0), Euclidean (κ = 0), and
@@ -58,7 +58,7 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
@@ -168,7 +168,7 @@ class KappaStereographicManifold:
       (torch.Size([4, 3]), True)
     """
 
-    def __init__(self, n: int, kappa: "float | torch.Tensor" = -1.0,
+    def __init__(self, n: int, kappa: float | torch.Tensor = -1.0,
                  device: str | torch.device = "cpu",
                  dtype: torch.dtype = torch.float64):
         if n <= 0:
@@ -188,7 +188,7 @@ class KappaStereographicManifold:
                     f"got shape {tuple(kappa.shape)}"
                 )
             self._kappa_init = float(kappa.item())
-            self.kappa: "float | torch.Tensor" = kappa
+            self.kappa: float | torch.Tensor = kappa
             self._kappa_is_tensor = True
         elif isinstance(kappa, (int, float)):
             self._kappa_init = float(kappa)
@@ -276,7 +276,7 @@ class KappaStereographicManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "KappaStereographicManifold":
+    def _from_signature(cls, sig: dict) -> KappaStereographicManifold:
         dtype_name = sig["dtype"].split(".")[-1]
         return cls(
             n=sig["n"],
@@ -369,7 +369,7 @@ class KappaStereographicManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample B random points on the manifold via `exp_0` of a
         Gaussian tangent.

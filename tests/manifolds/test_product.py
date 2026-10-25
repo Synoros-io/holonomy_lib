@@ -1,11 +1,9 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.manifolds.product.ProductManifold."""
 
 from __future__ import annotations
-
-import math
 
 import pytest
 import torch

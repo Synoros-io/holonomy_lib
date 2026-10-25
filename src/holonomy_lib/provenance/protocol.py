@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Content-addressable provenance protocol for math primitives.
 
@@ -35,11 +35,12 @@ import threading
 import warnings
 import weakref
 from collections import OrderedDict, deque
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal, Optional
+from typing import Any, Literal
 
 import torch
 
@@ -125,7 +126,7 @@ OP_REGISTRY: dict[str, tuple[Callable, str]] = {}
 _CLASS_REGISTRY: dict[str, Callable[[dict], Any]] = {}
 
 
-def register_provenance_class(class_name: Optional[str] = None) -> Callable:
+def register_provenance_class(class_name: str | None = None) -> Callable:
     """Decorator: opt a class into class-method replay.
 
     The class must define a classmethod `_from_signature(cls, sig: dict)`
@@ -213,28 +214,28 @@ class ProvenanceRegistry:
         self,
         cache_tensors: bool = False,
         hash_algorithm: str = _DEFAULT_HASHER_NAME,
-        max_cache_size: Optional[int] = None,
-        cache_ops: Optional[Iterable[str]] = None,
+        max_cache_size: int | None = None,
+        cache_ops: Iterable[str] | None = None,
         hash_mode: HashMode = "full",
-        cache_to_disk: Optional[str | Path] = None,
+        cache_to_disk: str | Path | None = None,
     ):
         self._nodes: dict[str, ProvenanceNode] = {}
         # OrderedDict so we can evict in insertion order ("oldest first")
         # when `max_cache_size` is enforced. Mech-interp users typically
         # want recent intermediates around; if a workload needs LRU-by-
         # access, swap to `move_to_end` on read here.
-        self._tensor_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+        self._tensor_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         # Setting cache_to_disk implies caching is on — there's no point
         # configuring a disk path if nothing is being cached. Make this
         # implicit so users only need the one kwarg.
         if cache_to_disk is not None:
             cache_tensors = True
         self._cache_tensors: bool = cache_tensors
-        self._max_cache_size: Optional[int] = max_cache_size
+        self._max_cache_size: int | None = max_cache_size
         # Selective caching: if set, only outputs from these op_ids are
         # cached. Implies caching is on for those ops regardless of
         # `cache_tensors`. None means "cache all when cache_tensors=True".
-        self._cache_ops: Optional[set[str]] = (
+        self._cache_ops: set[str] | None = (
             set(cache_ops) if cache_ops is not None else None
         )
         if max_cache_size is not None and max_cache_size <= 0:
@@ -272,7 +273,7 @@ class ProvenanceRegistry:
         # disk; memory eviction (via max_cache_size) drops the in-memory
         # copy but the disk copy persists and is reloaded on demand.
         # Use an absolute path so a registry survives a chdir.
-        self._disk_cache_dir: Optional[Path] = (
+        self._disk_cache_dir: Path | None = (
             Path(cache_to_disk).expanduser().resolve()
             if cache_to_disk is not None else None
         )
@@ -369,7 +370,7 @@ class ProvenanceRegistry:
         """Tag a tensor with its hex so downstream ops can chain."""
         self._tensor_id_to_hex[id(t)] = (weakref.ref(t), hex_id)
 
-    def _lookup_tensor_hex(self, t: torch.Tensor) -> Optional[str]:
+    def _lookup_tensor_hex(self, t: torch.Tensor) -> str | None:
         """Return the stored hex for `t`, or None if no live entry exists.
 
         The stored weakref must still resolve to the same tensor object;
@@ -402,7 +403,7 @@ class ProvenanceRegistry:
         return len(self._nodes)
 
     def where(
-        self, op_id: Optional[str] = None, op_version: Optional[str] = None,
+        self, op_id: str | None = None, op_version: str | None = None,
     ) -> list[ProvenanceNode]:
         """Filter nodes by op_id and/or op_version."""
         out = list(self)
@@ -412,7 +413,7 @@ class ProvenanceRegistry:
             out = [n for n in out if n.op_version == op_version]
         return out
 
-    def get_tensor(self, hex_id: str) -> Optional[torch.Tensor]:
+    def get_tensor(self, hex_id: str) -> torch.Tensor | None:
         """Retrieve a cached tensor by hex (requires cache_tensors=True).
 
         Looks in three places:
@@ -484,7 +485,7 @@ class ProvenanceRegistry:
 
     def ancestors_with_tensors(
         self, hex_id: str,
-    ) -> dict[str, tuple[ProvenanceNode, Optional[torch.Tensor]]]:
+    ) -> dict[str, tuple[ProvenanceNode, torch.Tensor | None]]:
         """Ancestor subgraph paired with cached output tensors.
 
         One call instead of `ancestors()` plus N `get_tensor()` calls —
@@ -497,7 +498,7 @@ class ProvenanceRegistry:
           the recording ran without `cache_tensors=True`, or the
           tensor was evicted under `max_cache_size`).
         """
-        result: dict[str, tuple[ProvenanceNode, Optional[torch.Tensor]]] = {}
+        result: dict[str, tuple[ProvenanceNode, torch.Tensor | None]] = {}
         for h in self.ancestors(hex_id):
             node = self._nodes[h]
             result[h] = (node, self.get_tensor(h))
@@ -529,7 +530,7 @@ class ProvenanceRegistry:
         """
         self._hooks.setdefault(op_id, []).append(callback)
 
-    def clear_hooks(self, op_id: Optional[str] = None) -> None:
+    def clear_hooks(self, op_id: str | None = None) -> None:
         """Remove all hooks (or just for one op_id)."""
         if op_id is None:
             self._hooks.clear()
@@ -539,7 +540,7 @@ class ProvenanceRegistry:
     # ----- substitution / activation patching -----
 
     @contextmanager
-    def substitute(self, mapping: dict[str, Any]) -> Iterator["ProvenanceRegistry"]:
+    def substitute(self, mapping: dict[str, Any]) -> Iterator[ProvenanceRegistry]:
         """Within this context, decorated primitives that *would* produce a
         hex in `mapping` instead return the mapped value.
 
@@ -758,7 +759,7 @@ class ProvenanceRegistry:
         return "\n".join(lines)
 
     def to_sae_dataset(
-        self, op_id: Optional[str] = None,
+        self, op_id: str | None = None,
     ) -> Iterator[tuple[torch.Tensor, dict[str, Any]]]:
         """Yield `(tensor, metadata)` pairs from cached outputs, in registration
         order. Useful as input to SAELens-style training where you want a
@@ -800,7 +801,7 @@ class ProvenanceRegistry:
 
     # ----- diff -----
 
-    def diff(self, other: "ProvenanceRegistry") -> dict[str, Any]:
+    def diff(self, other: ProvenanceRegistry) -> dict[str, Any]:
         """Compare two recordings and return a structured diff.
 
         Useful for "did my refactor preserve semantics?" or "what changed
@@ -849,7 +850,7 @@ class ProvenanceRegistry:
             ),
         }
 
-    def diff_summary(self, other: "ProvenanceRegistry") -> str:
+    def diff_summary(self, other: ProvenanceRegistry) -> str:
         """Human-readable rendering of `diff()`.
 
         Buckets the result into four categories:
@@ -925,7 +926,7 @@ class ProvenanceRegistry:
     def replay(
         self,
         substitutions: dict[str, torch.Tensor],
-        final_hex: Optional[str] = None,
+        final_hex: str | None = None,
     ) -> dict[str, torch.Tensor]:
         """Re-execute the downstream DAG with substitutions propagating.
 
@@ -1130,7 +1131,7 @@ class ProvenanceRegistry:
     @classmethod
     def load(
         cls, path: str | Path, strict: bool = False,
-    ) -> "ProvenanceRegistry":
+    ) -> ProvenanceRegistry:
         """Load a registry's metadata from a JSON file written by save().
 
         The loaded registry has no tensor cache (tensors aren't persisted
@@ -1241,10 +1242,10 @@ class ProvenanceRegistry:
 def record(
     cache_tensors: bool = False,
     hash_algorithm: str = _DEFAULT_HASHER_NAME,
-    max_cache_size: Optional[int] = None,
-    cache_ops: Optional[Iterable[str]] = None,
+    max_cache_size: int | None = None,
+    cache_ops: Iterable[str] | None = None,
     hash_mode: HashMode = "full",
-    cache_to_disk: Optional[str | Path] = None,
+    cache_to_disk: str | Path | None = None,
 ) -> Iterator[ProvenanceRegistry]:
     """Activate provenance recording for decorated primitives.
 
@@ -1300,7 +1301,7 @@ def record(
         _local.context = prev
 
 
-def _current_context() -> Optional[ProvenanceRegistry]:
+def _current_context() -> ProvenanceRegistry | None:
     return getattr(_local, "context", None)
 
 

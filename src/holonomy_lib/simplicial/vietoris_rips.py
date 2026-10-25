@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Vietoris-Rips complex from a point cloud or distance matrix.
 
@@ -26,8 +26,6 @@ References:
 """
 
 from __future__ import annotations
-
-from itertools import combinations
 
 import torch
 

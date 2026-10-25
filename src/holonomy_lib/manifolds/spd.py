@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """SPD (symmetric positive definite) matrix manifold, GPU-native, batched-first.
 
@@ -41,8 +41,6 @@ References:
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 
@@ -95,7 +93,7 @@ class SPDManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "SPDManifold":
+    def _from_signature(cls, sig: dict) -> SPDManifold:
         """Inverse of `_provenance_signature` — reconstruct an instance
         with the same parameters. Used by `ProvenanceRegistry.replay`
         to rebuild the bound `self` of recorded class-method calls.
@@ -114,7 +112,7 @@ class SPDManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample B SPD matrices via the Wishart-like construction A Aᵀ.
 
@@ -290,7 +288,7 @@ class SPDManifold:
     )
     def exp(
         self, S: torch.Tensor, V: torch.Tensor,
-        whitening: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        whitening: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Exponential map exp_S(V) = S^{1/2} expm(S^{−1/2} V S^{−1/2}) S^{1/2}.
 
@@ -323,7 +321,7 @@ class SPDManifold:
     )
     def log(
         self, S: torch.Tensor, T: torch.Tensor,
-        whitening: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        whitening: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Logarithm map log_S(T) = S^{1/2} logm(S^{−1/2} T S^{−1/2}) S^{1/2}.
 
@@ -356,7 +354,7 @@ class SPDManifold:
     )
     def distance(
         self, S: torch.Tensor, T: torch.Tensor,
-        whitening: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        whitening: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Geodesic distance d(S, T) = ‖log(S^{−1/2} T S^{−1/2})‖_F.
 
@@ -398,7 +396,7 @@ class SPDManifold:
     )
     def retraction(
         self, S: torch.Tensor, V: torch.Tensor,
-        whitening: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        whitening: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Retraction = exponential map.
 

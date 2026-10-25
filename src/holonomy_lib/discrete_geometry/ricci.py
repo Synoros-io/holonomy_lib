@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Ollivier-Ricci curvature on graphs, GPU-batched, Sinkhorn-based.
 
@@ -63,13 +63,11 @@ References:
 from __future__ import annotations
 
 import warnings
-from typing import Optional
 
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 from holonomy_lib.provenance import with_provenance
-
 
 # Default regularization for entropic Sinkhorn, per Cuturi (2013) §4.
 # A regularization of 0.01 is a common middle-ground: small enough that

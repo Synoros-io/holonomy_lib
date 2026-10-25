@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.hyperbolic.hyperbolic_heat_kernel.
 
@@ -20,7 +20,6 @@ import torch
 
 from holonomy_lib.hyperbolic import hyperbolic_heat_kernel
 from holonomy_lib.manifolds import LorentzManifold
-
 
 # --------------------------------------------------------------------
 # Sanity at boundary / closed-form values
@@ -252,7 +251,9 @@ def test_n7_closed_form_matches_recursion():
     closed form (mirrors test_recursion_identity_n5_to_n7 at the unit-function
     level, to machine precision rather than finite-difference)."""
     from holonomy_lib.hyperbolic.heat_kernel import (
-        _apply_one_recursion, _heat_kernel_unit_n5, _heat_kernel_unit_n7,
+        _apply_one_recursion,
+        _heat_kernel_unit_n5,
+        _heat_kernel_unit_n7,
     )
     t = torch.tensor(0.5, dtype=torch.float64)
     d = torch.linspace(0.1, 3.0, 7, dtype=torch.float64)

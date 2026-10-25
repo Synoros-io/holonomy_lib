@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """SparseSimplicialComplex — single-instance simplicial complex with
 sparse-CSC boundary operators.
@@ -135,7 +135,7 @@ class SparseSimplicialComplex:
 
     def to_dense(
         self, dtype: torch.dtype = torch.float64,
-    ) -> "DenseSimplicialComplex":
+    ) -> DenseSimplicialComplex:
         """Convert to a batched-with-B=1 dense complex.
 
         Args:

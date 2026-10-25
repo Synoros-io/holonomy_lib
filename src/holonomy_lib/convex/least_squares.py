@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Regularized (Tikhonov / ridge) least squares with solver dispatch.
 
@@ -48,7 +48,7 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
@@ -70,8 +70,8 @@ def regularized_lstsq(
     b: torch.Tensor,
     lam: float,
     method: Method = "auto",
-    rtol: Optional[float] = None,
-    maxiter: Optional[int] = None,
+    rtol: float | None = None,
+    maxiter: int | None = None,
 ) -> torch.Tensor:
     """Solve the ridge problem `min_x ‖A x − b‖² + λ ‖x‖²`.
 

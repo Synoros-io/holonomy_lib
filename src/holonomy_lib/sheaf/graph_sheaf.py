@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """GraphSheaf dataclass — the data of a cellular sheaf on a graph.
 
@@ -179,7 +179,7 @@ class GraphSheaf:
         stalk_dim: int = 1,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float64,
-    ) -> "GraphSheaf":
+    ) -> GraphSheaf:
         """Construct the *trivial* sheaf: identity restriction maps on
         every edge, uniform stalk dimension on nodes and edges.
 

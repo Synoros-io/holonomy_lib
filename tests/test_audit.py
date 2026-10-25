@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Smoke + behavior tests for holonomy_lib.audit.
 
@@ -15,10 +15,10 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
-
 from holonomy_lib.audit import (
-    ALLOWED_LITERALS, ConstantVisitor, load_catalog, scan_file, scan_path,
+    load_catalog,
+    scan_file,
+    scan_path,
 )
 
 

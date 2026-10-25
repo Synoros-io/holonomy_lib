@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """SO(3) rotation-group primitives — batched, GPU-native.
 
@@ -31,12 +31,10 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 
 from holonomy_lib.provenance import with_provenance
-
 
 # Mathematical dimension of SO(3): the group lives in R^{3×3} and its
 # Lie algebra is R^3. **Scale of validity**: hard-coded by the
@@ -273,7 +271,7 @@ def compose(R1: torch.Tensor, R2: torch.Tensor) -> torch.Tensor:
 )
 def random_so3(
     batch_size: int,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:

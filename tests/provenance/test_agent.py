@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for the agent-tool decorator + schema generators.
 
@@ -9,12 +9,9 @@ tools (Phase 2+) have their own test classes.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import pytest
 
-from holonomy_lib.provenance import ProvenanceRegistry
-from holonomy_lib.provenance import agent
+from holonomy_lib.provenance import ProvenanceRegistry, agent
 
 
 @pytest.fixture
@@ -126,7 +123,7 @@ class TestSchemaGeneration:
             a_float: float,
             a_bool: bool,
             a_list: list[int],
-            an_optional: Optional[str] = None,
+            an_optional: str | None = None,
         ) -> dict:
             return {}
         s = agent.to_anthropic_schema()[0]["input_schema"]

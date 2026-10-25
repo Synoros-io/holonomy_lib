@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Iterative Krylov solvers: conjugate gradient (CG) and LSQR.
 
@@ -39,7 +39,8 @@ References:
 from __future__ import annotations
 
 import warnings
-from typing import Callable, Optional, Union
+from collections.abc import Callable
+from typing import Union
 
 import torch
 
@@ -113,11 +114,11 @@ def _normalize_rhs(b: torch.Tensor) -> tuple[torch.Tensor, bool]:
 def cg(
     A: Operator,
     b: torch.Tensor,
-    M: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-    x0: Optional[torch.Tensor] = None,
-    rtol: Optional[float] = None,
+    M: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    x0: torch.Tensor | None = None,
+    rtol: float | None = None,
     atol: float = 0.0,
-    maxiter: Optional[int] = None,
+    maxiter: int | None = None,
     sync_every: int = SOLVER_SYNC_EVERY_DEFAULT,
 ) -> torch.Tensor:
     """Conjugate gradient solve of symmetric positive-definite `A x = b`.
@@ -254,9 +255,9 @@ def lsqr(
     A: torch.Tensor,
     b: torch.Tensor,
     damp: float = 0.0,
-    atol: Optional[float] = None,
-    btol: Optional[float] = None,
-    maxiter: Optional[int] = None,
+    atol: float | None = None,
+    btol: float | None = None,
+    maxiter: int | None = None,
     sync_every: int = SOLVER_SYNC_EVERY_DEFAULT,
 ) -> torch.Tensor:
     """LSQR: iterative least squares `min ‖Ax − b‖²  (+ damp²·‖x‖²)`.

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """holonomy_lib.audit — find undocumented numeric constants in source.
 
@@ -33,8 +33,6 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
 
 # Universal safe literals.
 # Four categories, each justified explicitly:
@@ -55,9 +53,9 @@ from typing import Optional
 #      convention; documented in catalog as `numerical_floor_convention`.
 ALLOWED_LITERALS: set[float] = {
     # Mathematical identities
-    0, 1, -1, 0.0, 1.0, -1.0,
+    0, 1, -1, -1.0,
     # Halving/doubling identities (symmetric part, midpoint, n(n+1)/2, 2π, etc.)
-    0.5, 2, 2.0, -2, -2.0,
+    0.5, 2, -2, -2.0,
     # Universal binary unit conversions (KB↔MB↔GB)
     1024, 1024.0,
     # Universal SI time conversion (s↔ms) + RNG stream-offset multiplier
@@ -159,8 +157,8 @@ class FoundLiteral:
     lineno: int
     col_offset: int
     value: float
-    context_var: Optional[str] = None  # the variable being assigned to, if any
-    context_expr: Optional[str] = None  # the surrounding expression source
+    context_var: str | None = None  # the variable being assigned to, if any
+    context_expr: str | None = None  # the surrounding expression source
     severity: str = "🔴"  # 🟢 / 🟡 / 🔴
 
     def __repr__(self) -> str:
@@ -416,7 +414,7 @@ def scan_path(
     return all_literals
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Find undocumented constants in source.")
     ap.add_argument("paths", nargs="+", type=Path,
                     help="Files or directories to scan")

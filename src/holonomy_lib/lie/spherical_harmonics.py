@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Real spherical harmonics Y_lm on the unit 2-sphere, closed form
 for l ≤ 4.
@@ -39,7 +39,6 @@ import math
 import torch
 
 from holonomy_lib.provenance import with_provenance
-
 
 _SUPPORTED_L_MAX: int = 4
 

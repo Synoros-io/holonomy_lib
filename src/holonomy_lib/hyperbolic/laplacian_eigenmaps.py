@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Manifold-valued Laplacian eigenmaps via Riemannian SGD.
 
@@ -53,8 +53,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from holonomy_lib.optimization import RiemannianSGD
@@ -70,8 +68,8 @@ def hyperbolic_laplacian_eigenmaps(
     manifold,
     max_steps: int = 200,
     lr: float = 0.05,
-    generator: Optional[torch.Generator] = None,
-    init: Optional[torch.Tensor] = None,
+    generator: torch.Generator | None = None,
+    init: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Embed the nodes of `adjacency` on `manifold` by minimizing
 

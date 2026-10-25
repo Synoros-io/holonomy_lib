@@ -80,9 +80,10 @@ benchmark provenance docs record `CUDA available: False`.
 - audit (constant discipline; CI gate): `.venv/bin/python -m holonomy_lib.audit src/ --strict`
 - lint: `.venv/bin/python -m ruff check src/ tests/`
 - types: `.venv/bin/python -m mypy src/`
-- **GPU / benchmark work**: use the shared ROCm venv, never a per-repo torch install:
-  `PYTHONPATH=src /home/jack/.venvs/pes-rocm/bin/python …`
-  (Python 3.12, `torch 2.9.1+rocm6.4`, verified working on the RX 9060 XT / `gfx1200`).
+- **GPU / benchmark work**: run the same commands with a Python whose torch has a GPU
+  build, never a per-repo torch install: `PYTHONPATH=src <gpu-python> -m pytest -q`.
+  Which interpreter that is on a given machine is a workstation fact, kept in the
+  global agent standards, not in this public file.
 
 **Verify (definition of done for a change):** full suite green **and** audit clean.
 Last verified baseline: `1220 passed, 44 skipped`, audit `0 undocumented`.

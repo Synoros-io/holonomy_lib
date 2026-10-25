@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.manifolds.lorentzian.LorentzianManifold.
 
@@ -488,7 +488,8 @@ def test_lorentzian_in_product_manifold():
     with a Riemannian manifold. ProductManifold.inner sums per-component
     contributions; the Lorentzian piece contributes a *signed* term."""
     from holonomy_lib.manifolds import (
-        KappaStereographicManifold, ProductManifold,
+        KappaStereographicManifold,
+        ProductManifold,
     )
     mfd = ProductManifold([
         KappaStereographicManifold(n=2, kappa=-1.0, dtype=torch.float64),

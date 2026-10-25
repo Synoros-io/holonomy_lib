@@ -46,3 +46,6 @@ HANDOFF.md
 direction.md
 ledger.md
 archive/
+
+# Session scratch (briefs, review output, logs); deleted by the session that made it.
+.scratch/

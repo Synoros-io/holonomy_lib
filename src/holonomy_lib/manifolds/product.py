@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Mixed-curvature product manifold M_1 × M_2 × … × M_k.
 
@@ -33,7 +33,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import torch
 
@@ -77,7 +77,7 @@ class ProductManifold:
     def __init__(
         self,
         manifolds: Sequence,
-        weights: Optional[Sequence[float]] = None,
+        weights: Sequence[float] | None = None,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float64,
     ):
@@ -161,7 +161,7 @@ class ProductManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "ProductManifold":
+    def _from_signature(cls, sig: dict) -> ProductManifold:
         # Reconstruct each submanifold via its own _from_signature. The
         # registry stores the bound `_from_signature` callable, so we
         # apply it directly (not on the class).
@@ -193,7 +193,7 @@ class ProductManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample by drawing independently on each submanifold and
         concatenating. Each submanifold's `random_point` decides its

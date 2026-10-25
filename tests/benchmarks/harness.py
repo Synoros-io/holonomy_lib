@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Microbenchmark harness — device-agnostic, deterministic, lightweight.
 
@@ -26,9 +26,10 @@ from __future__ import annotations
 import json
 import statistics
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 import torch
 
@@ -186,7 +187,7 @@ def write_json(results: list[BenchResult], path: str | Path) -> None:
     Path(path).write_text(json.dumps(payload, indent=2))
 
 
-def detect_devices(explicit: Optional[str] = None) -> list[str]:
+def detect_devices(explicit: str | None = None) -> list[str]:
     """Pick which devices to benchmark on."""
     if explicit is not None:
         return [explicit]

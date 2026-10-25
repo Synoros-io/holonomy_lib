@@ -6,7 +6,7 @@ path (n=9). Same-machine comparison (both devices on one host) so the
 CPU/GPU ratio is meaningful.
 
 Run (on the instance):
-  PYTHONPATH=src /venv/main/bin/python notes/strengthening/gpu_scaling_bench.py
+  PYTHONPATH=src <python with a GPU torch build> notes/strengthening/gpu_scaling_bench.py
 """
 from __future__ import annotations
 

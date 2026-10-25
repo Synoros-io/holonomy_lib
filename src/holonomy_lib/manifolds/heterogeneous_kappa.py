@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Heterogeneous-curvature κ-stereographic manifold.
 
@@ -89,7 +89,7 @@ Citations (positioning):
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -169,7 +169,7 @@ class HeterogeneousKappaManifold:
     def __init__(
         self,
         n: int,
-        combiner: "str | Callable" = "arithmetic_mean",
+        combiner: str | Callable = "arithmetic_mean",
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float64,
     ):
@@ -212,7 +212,7 @@ class HeterogeneousKappaManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "HeterogeneousKappaManifold":
+    def _from_signature(cls, sig: dict) -> HeterogeneousKappaManifold:
         dtype_name = sig["dtype"].split(".")[-1]
         # Only built-in combiners can be round-tripped; custom
         # callables can't be serialized into a JSON-canonical hex.
@@ -275,8 +275,8 @@ class HeterogeneousKappaManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        kappa: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        kappa: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample `batch_size` random points on the manifold.
 

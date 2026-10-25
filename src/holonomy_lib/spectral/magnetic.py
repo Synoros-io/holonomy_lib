@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Magnetic Laplacian for directed and signed-directed graphs.
 
@@ -90,7 +90,6 @@ import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 from holonomy_lib.provenance import with_provenance
-
 
 # Default magnetic charge q ∈ [0, 1) per Furutani et al. (2020), §5.
 # `q = 1/4` is the value that maximally separates the directed

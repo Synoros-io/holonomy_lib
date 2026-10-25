@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """DenseSimplicialComplex — batched simplicial complex with padded
 dense simplex tables.
@@ -165,7 +165,7 @@ class DenseSimplicialComplex:
                     D[b, row, col] = sign
         return D
 
-    def to_sparse(self) -> "SparseSimplicialComplex":
+    def to_sparse(self) -> SparseSimplicialComplex:
         """Convert to a single-instance sparse complex. Requires `B = 1`."""
         from holonomy_lib.simplicial.sparse_complex import SparseSimplicialComplex
         if self.batch_size != 1:

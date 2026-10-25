@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Forman-Ricci curvature on graphs, batched-first, GPU-native.
 
@@ -67,7 +67,6 @@ import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 from holonomy_lib.provenance import with_provenance
-
 
 # Forman's "node weights" — Samal et al. (2018), §2.1: the standard
 # choice for unweighted simple graphs is w_u = 1 for every node, so the

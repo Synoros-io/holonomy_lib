@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """MCP transport for the agent-tool surface.
 
@@ -36,7 +36,6 @@ import inspect
 import os
 from functools import wraps
 from pathlib import Path
-from typing import Any
 
 from holonomy_lib.provenance import agent
 from holonomy_lib.provenance.protocol import ProvenanceRegistry

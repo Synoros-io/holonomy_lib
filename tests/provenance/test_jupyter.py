@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Smoke tests for the Jupyter cell magic.
 
@@ -30,6 +30,7 @@ class TestMagicRegistration:
     def test_load_ipython_extension_registers_magics(self):
         """Smoke: extension load registers the ProvenanceMagics class."""
         from IPython.testing.globalipapp import get_ipython
+
         from holonomy_lib.provenance.jupyter import load_ipython_extension
 
         ip = get_ipython()
@@ -44,6 +45,7 @@ class TestMagicRegistration:
         user namespace under the default name `_prov`.
         """
         from IPython.testing.globalipapp import get_ipython
+
         from holonomy_lib.provenance.jupyter import load_ipython_extension
 
         ip = get_ipython()
@@ -53,8 +55,8 @@ class TestMagicRegistration:
 
         # Pre-populate the user namespace so the cell can reference it.
         ip.user_ns["A"] = (
-            (torch.randn(1, 4, 4, dtype=torch.float64, generator=_seeded(0))
-             .abs() + torch.eye(4, dtype=torch.float64).unsqueeze(0))
+            torch.randn(1, 4, 4, dtype=torch.float64, generator=_seeded(0))
+             .abs() + torch.eye(4, dtype=torch.float64).unsqueeze(0)
         )
         ip.user_ns["A"] = (ip.user_ns["A"] + ip.user_ns["A"].mT) * 0.5
         ip.user_ns["laplacian"] = __import__(
@@ -73,6 +75,7 @@ class TestMagicRegistration:
     def test_cell_magic_respects_custom_var_name(self):
         """The line argument names the variable the registry binds to."""
         from IPython.testing.globalipapp import get_ipython
+
         from holonomy_lib.provenance.jupyter import load_ipython_extension
 
         ip = get_ipython()
@@ -81,8 +84,8 @@ class TestMagicRegistration:
         load_ipython_extension(ip)
 
         ip.user_ns["A"] = (
-            (torch.randn(1, 4, 4, dtype=torch.float64, generator=_seeded(1))
-             .abs() + torch.eye(4, dtype=torch.float64).unsqueeze(0))
+            torch.randn(1, 4, 4, dtype=torch.float64, generator=_seeded(1))
+             .abs() + torch.eye(4, dtype=torch.float64).unsqueeze(0)
         )
         ip.user_ns["A"] = (ip.user_ns["A"] + ip.user_ns["A"].mT) * 0.5
         ip.user_ns["laplacian"] = __import__(

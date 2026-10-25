@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Linear algebra primitives — audit-clean wrappers + extras.
 
@@ -17,7 +17,7 @@ Currently implemented:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
@@ -47,7 +47,7 @@ def truncated_svd(
     mode: Literal["exact", "randomized"] = "exact",
     oversample: int = RANDOMIZED_SVD_OVERSAMPLE_DEFAULT,
     n_iter: int = RANDOMIZED_SVD_N_ITER_DEFAULT,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Batched truncated SVD: top-r singular triples of M.
 
@@ -110,7 +110,7 @@ def _randomized_svd(
     r: int,
     oversample: int,
     n_iter: int,
-    generator: Optional[torch.Generator],
+    generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Halko-Martinsson-Tropp randomized SVD with subspace iteration.
 

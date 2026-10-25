@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Graph Laplacians, batched-first, GPU-native.
 
@@ -55,7 +55,6 @@ import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 from holonomy_lib.provenance import with_provenance
-
 
 _SPARSE_LAYOUTS = (
     torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,

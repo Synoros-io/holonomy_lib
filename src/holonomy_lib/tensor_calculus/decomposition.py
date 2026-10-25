@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tensor decompositions — HOSVD and the n-mode product machinery.
 
@@ -26,7 +26,8 @@ Operations implemented:
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Sequence
+from collections.abc import Sequence
+from typing import Literal
 
 import torch
 
@@ -121,7 +122,7 @@ def hosvd(
     T: torch.Tensor,
     ranks: Sequence[int],
     mode: Literal["exact", "randomized"] = "exact",
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Truncated Higher-Order SVD (HOSVD).
 

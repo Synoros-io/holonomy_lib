@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests that pin down the library-wide conventions from CONVENTIONS.md.
 
@@ -11,7 +11,6 @@ is what makes the simple-graph contract universal across the library.
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from holonomy_lib.discrete_geometry import (
@@ -21,8 +20,10 @@ from holonomy_lib.discrete_geometry import (
 )
 from holonomy_lib.spectral import (
     effective_resistance,
-    laplacian as _L,
     magnetic,
+)
+from holonomy_lib.spectral import (
+    laplacian as _L,
 )
 
 

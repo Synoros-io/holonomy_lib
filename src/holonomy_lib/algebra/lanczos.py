@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Symmetric Lanczos iteration for top-k eigenpairs of a batched matrix.
 
@@ -58,12 +58,11 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
 from holonomy_lib.provenance import with_provenance
-
 
 # Default oversampling: extra Lanczos iterations beyond `k` to improve
 # accuracy of the top-k Ritz values. Saad (2011), §6.5 recommends
@@ -85,11 +84,11 @@ _SPARSE_LAYOUTS = (
 def lanczos_eigsh(
     A: torch.Tensor,
     k: int,
-    n_iter: Optional[int] = None,
+    n_iter: int | None = None,
     oversample: int = LANCZOS_OVERSAMPLE_DEFAULT,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     which: Literal["LA", "SA"] = "LA",
-    sigma: Optional[float] = None,
+    sigma: float | None = None,
     solver: Literal["auto", "eigsh", "lobpcg", "torch_lobpcg"] = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Top-k symmetric eigenpairs via Lanczos (LA) or shift-invert (SA).
@@ -291,9 +290,9 @@ def lanczos_eigsh(
 def _lanczos_sparse(
     A: torch.Tensor,
     k: int,
-    n_iter: Optional[int],
+    n_iter: int | None,
     oversample: int,
-    generator: Optional[torch.Generator],
+    generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """2-D no-batch Lanczos for sparse `A`.
 
@@ -385,9 +384,9 @@ def _lanczos_shift_invert_dense(
     A: torch.Tensor,
     k: int,
     sigma: float,
-    n_iter: Optional[int],
+    n_iter: int | None,
     oversample: int,
-    generator: Optional[torch.Generator],
+    generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shift-and-invert Lanczos: top-k eigenpairs of `A` closest to σ.
 

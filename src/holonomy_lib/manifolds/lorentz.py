@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Lorentz (hyperboloid) model of hyperbolic space, GPU-native, batched-first.
 
@@ -54,7 +54,6 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 
@@ -188,7 +187,7 @@ class LorentzManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "LorentzManifold":
+    def _from_signature(cls, sig: dict) -> LorentzManifold:
         dtype_name = sig["dtype"].split(".")[-1]
         return cls(
             n=sig["n"],
@@ -267,7 +266,7 @@ class LorentzManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample B random points on H^n_k.
 

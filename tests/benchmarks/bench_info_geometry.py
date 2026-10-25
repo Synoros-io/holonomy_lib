@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Benchmarks for holonomy_lib.info_geometry.
 
@@ -19,7 +19,6 @@ from holonomy_lib.info_geometry import (
     kl_divergence_gaussian,
 )
 from tests.benchmarks.harness import Bench
-
 
 bench = Bench("info_geometry")
 

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.optimization.RiemannianSGD.
 
@@ -17,7 +17,8 @@ import torch
 
 from holonomy_lib.manifolds import FixedRankManifold, SPDManifold
 from holonomy_lib.optimization import (
-    RiemannianSGD, riemannian_sgd_step,
+    RiemannianSGD,
+    riemannian_sgd_step,
 )
 
 

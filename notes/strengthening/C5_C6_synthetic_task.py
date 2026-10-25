@@ -28,8 +28,7 @@ Output: `notes/strengthening/C5_C6_synthetic_task_results.md`.
 
 Run (GPU on ROCm via sibling venv):
 
-    PYTHONPATH=/home/jack/projects/holonomy_lib/src \\
-      /home/jack/projects/synoros-substrate/.venv/bin/python \\
+    PYTHONPATH=src <python with a ROCm or CUDA torch build> \\
       notes/strengthening/C5_C6_synthetic_task.py
 
 Run (CPU, local venv):

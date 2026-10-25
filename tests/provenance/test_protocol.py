@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.provenance.protocol.
 
@@ -1142,7 +1142,7 @@ class TestLoadDrift:
     version recorded at save-time, load() flags the drift so users
     don't silently replay against semantics that have changed."""
 
-    def _make_registry(self) -> "tuple[provenance.ProvenanceRegistry, str]":
+    def _make_registry(self) -> tuple[provenance.ProvenanceRegistry, str]:
         """Helper: record one laplacian call, return (registry, op_id)."""
         A = torch.randn(1, 4, 4, dtype=torch.float64, generator=_seeded(90))
         A = (A + A.mT).abs()

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Heat kernel exp(-t·L) on graphs via Chebyshev-polynomial expansion.
 
@@ -55,14 +55,11 @@ References:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 import scipy.special
 import torch
 
 from holonomy_lib.provenance import with_provenance
-
 
 # Default Chebyshev expansion order. Empirically (Hammond-Vandergheynst-
 # Gribonval 2011 §6 Fig. 4, and our own audit), `K = 30` gives sub-1e-12
@@ -89,7 +86,7 @@ LAMBDA_MAX_L_SYM: float = 2.0
 def heat_kernel_chebyshev(
     L: torch.Tensor,
     t: float,
-    signal: Optional[torch.Tensor] = None,
+    signal: torch.Tensor | None = None,
     K: int = CHEBYSHEV_ORDER_DEFAULT,
     lambda_max: float = LAMBDA_MAX_L_SYM,
 ) -> torch.Tensor:

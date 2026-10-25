@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Benchmarks for holonomy_lib.discrete_geometry (Ollivier + flow + surgery).
 
@@ -14,14 +14,13 @@ from __future__ import annotations
 import torch
 
 from holonomy_lib.discrete_geometry import (
-    ollivier_ricci_curvature,
     discrete_ricci_flow,
-    ricci_flow_with_surgery,
-    forman_ricci_simple,
     forman_ricci_augmented,
+    forman_ricci_simple,
+    ollivier_ricci_curvature,
+    ricci_flow_with_surgery,
 )
 from tests.benchmarks.harness import Bench
-
 
 bench = Bench("discrete_geometry")
 

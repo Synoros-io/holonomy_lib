@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.spectral.laplacian."""
 
@@ -278,8 +278,8 @@ class TestAgainstScipy:
     """
 
     def test_combinatorial_matches_scipy(self):
-        from scipy.sparse.csgraph import laplacian as scipy_laplacian
         import numpy as np
+        from scipy.sparse.csgraph import laplacian as scipy_laplacian
         A = _random_undirected_unweighted(n=8, edge_prob=0.4, batch=1, seed=50)
         L_ours = laplacian.combinatorial(A)[0].numpy()
         L_scipy = scipy_laplacian(A[0].numpy(), normed=False)
@@ -289,8 +289,8 @@ class TestAgainstScipy:
         np.testing.assert_allclose(L_ours, L_scipy_dense, atol=1e-12)
 
     def test_symmetric_normalized_matches_scipy(self):
-        from scipy.sparse.csgraph import laplacian as scipy_laplacian
         import numpy as np
+        from scipy.sparse.csgraph import laplacian as scipy_laplacian
         A = _random_undirected_unweighted(n=8, edge_prob=0.5, batch=1, seed=51)
         L_ours = laplacian.symmetric_normalized(A)[0].numpy()
         L_scipy = scipy_laplacian(A[0].numpy(), normed=True)

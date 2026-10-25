@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Lorentzian (pseudo-Riemannian, signature (1, n-1)) manifold —
 flat Minkowski spacetime `R^{1, n-1}`.
@@ -55,8 +55,6 @@ References:
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 
@@ -125,7 +123,7 @@ class LorentzianManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "LorentzianManifold":
+    def _from_signature(cls, sig: dict) -> LorentzianManifold:
         dtype_name = sig["dtype"].split(".")[-1]
         return cls(
             n=sig["n"],
@@ -493,7 +491,7 @@ class LorentzianManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample B random points in spacetime — Gaussian in each of
         the `n` coordinates. The manifold is `R^n` so no rejection

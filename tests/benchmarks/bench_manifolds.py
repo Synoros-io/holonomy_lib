@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Benchmarks for holonomy_lib.manifolds (FixedRank, SPD).
 
@@ -24,7 +24,6 @@ import torch
 from holonomy_lib.manifolds import FixedRankManifold, SPDManifold
 from holonomy_lib.manifolds.comparison import model_ball_volume
 from tests.benchmarks.harness import Bench
-
 
 bench = Bench("manifolds")
 

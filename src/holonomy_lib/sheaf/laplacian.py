@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Sheaf coboundary, sheaf Laplacian, and Dirichlet energy on graphs.
 
@@ -28,13 +28,12 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
 from holonomy_lib.provenance import with_provenance
 from holonomy_lib.sheaf.graph_sheaf import GraphSheaf, HeterogeneousGraphSheaf
-
 
 # Dense-coboundary allocation guard: refuse to allocate beyond this
 # many bytes for the staging tensor + δ. 2 GiB picks a generous
@@ -366,7 +365,7 @@ def sheaf_bottom_spectrum(
     drop_kernel: bool = True,
     kernel_headroom: int = SHEAF_KERNEL_HEADROOM,
     solver: Literal["auto", "eigsh", "lobpcg", "torch_lobpcg"] = "auto",
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Bottom-k spectral form of the sheaf Laplacian via a sparse solve.
 

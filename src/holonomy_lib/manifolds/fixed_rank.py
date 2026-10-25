@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Fixed-rank matrix manifold, GPU-native, batched-first.
 
@@ -33,7 +33,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
@@ -137,7 +137,7 @@ class FixedRankManifold:
         }
 
     @classmethod
-    def _from_signature(cls, sig: dict) -> "FixedRankManifold":
+    def _from_signature(cls, sig: dict) -> FixedRankManifold:
         """Inverse of `_provenance_signature` — reconstruct an instance
         with the same parameters. Used by `ProvenanceRegistry.replay`
         to rebuild the bound `self` of recorded class-method calls.
@@ -160,7 +160,7 @@ class FixedRankManifold:
     def random_point(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> FixedRankPoint:
         """Sample B random points on the manifold.
 

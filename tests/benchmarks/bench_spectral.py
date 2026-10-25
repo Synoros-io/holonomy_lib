@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Benchmarks for holonomy_lib.spectral.
 
@@ -16,11 +16,16 @@ from __future__ import annotations
 import torch
 
 from holonomy_lib.spectral import (
-    diffusion_map, effective_resistance, heat_kernel_chebyshev,
-    laplacian as _L, laplacian_eigenmaps, magnetic,
+    diffusion_map,
+    effective_resistance,
+    heat_kernel_chebyshev,
+    laplacian_eigenmaps,
+    magnetic,
+)
+from holonomy_lib.spectral import (
+    laplacian as _L,
 )
 from tests.benchmarks.harness import Bench
-
 
 bench = Bench("spectral")
 

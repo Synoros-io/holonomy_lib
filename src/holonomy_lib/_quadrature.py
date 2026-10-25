@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Cached Gauss-Legendre quadrature nodes (internal).
 
@@ -30,7 +30,7 @@ import torch
 from scipy.special import roots_legendre
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _gauss_legendre_float64_cpu(n_quad: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Master copy: float64 CPU `(nodes, weights)` of the `n_quad`-point rule."""
     nodes_np, weights_np = roots_legendre(n_quad)

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Entry point: run all benchmarks and write results.
 
@@ -20,9 +20,10 @@ from pathlib import Path
 import torch
 
 from tests.benchmarks.harness import (
-    detect_devices, write_json, write_markdown,
+    detect_devices,
+    write_json,
+    write_markdown,
 )
-
 
 MODULES = [
     "bench_algebra",

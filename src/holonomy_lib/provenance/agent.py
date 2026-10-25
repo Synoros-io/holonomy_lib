@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Agent API: Python functions an LLM can call as native tools.
 
@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import inspect
 import typing
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 import torch
 
@@ -39,7 +40,6 @@ from holonomy_lib.provenance.protocol import (
     OP_REGISTRY,
     ProvenanceRegistry,
 )
-
 
 # ============================================================
 # Registry of decorated tools
@@ -72,7 +72,7 @@ _AGENT_TOOLS: dict[str, ToolSpec] = {}
 def agent_tool(
     *,
     description: str = "",
-    name: Optional[str] = None,
+    name: str | None = None,
 ) -> Callable[[Callable], Callable]:
     """Decorator: register a function as an agent-callable tool.
 
@@ -284,8 +284,8 @@ def list_ops(registry: ProvenanceRegistry) -> list[str]:
 ))
 def where(
     registry: ProvenanceRegistry,
-    op_id: Optional[str] = None,
-    op_version: Optional[str] = None,
+    op_id: str | None = None,
+    op_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter nodes by op."""
     return [
@@ -346,7 +346,7 @@ def get_tensor_summary(
     }
 
 
-def _parse_index_expr(expr: str) -> Union[int, slice, tuple]:
+def _parse_index_expr(expr: str) -> int | slice | tuple:
     """Parse a numpy-style index expression into a Python index value.
 
     Accepts:
@@ -380,14 +380,14 @@ def _parse_index_expr(expr: str) -> Union[int, slice, tuple]:
     if cleaned.endswith(","):
         cleaned = cleaned[:-1]
     parts = cleaned.split(",")
-    result: list[Union[int, slice]] = []
+    result: list[int | slice] = []
     for p in parts:
         if not p:
             raise ValueError(
                 f"index expression {expr!r} has an empty component"
             )
         if ":" in p:
-            slice_args: list[Optional[int]] = []
+            slice_args: list[int | None] = []
             for s in p.split(":"):
                 slice_args.append(int(s) if s else None)
             # Python slice() takes (start, stop, step); pad with None

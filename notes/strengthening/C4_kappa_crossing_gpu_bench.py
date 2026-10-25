@@ -10,8 +10,7 @@ CPU on AMD hardware), so this script is *not* run by the default
 pytest path. To execute on the workstation's Radeon RX 9060 XT
 (gfx1200), use the sibling project's ROCm venv:
 
-    PYTHONPATH=/home/jack/projects/holonomy_lib/src \\
-      /home/jack/projects/synoros-substrate/.venv/bin/python \\
+    PYTHONPATH=src <python with a ROCm or CUDA torch build> \\
       notes/strengthening/C4_kappa_crossing_gpu_bench.py
 
 Output appended to `C4_kappa_crossing_stress_results.md`.

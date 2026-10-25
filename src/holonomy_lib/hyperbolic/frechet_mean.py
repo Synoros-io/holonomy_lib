@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Fréchet (Karcher) mean on a Riemannian manifold.
 
@@ -32,8 +32,6 @@ References:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from holonomy_lib.provenance import with_provenance
@@ -45,7 +43,7 @@ from holonomy_lib.provenance import with_provenance
 def frechet_mean(
     points: torch.Tensor,
     manifold,
-    weights: Optional[torch.Tensor] = None,
+    weights: torch.Tensor | None = None,
     max_iter: int = 100,
     tol: float = 1e-9,
 ) -> torch.Tensor:

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Smallest-algebraic eigenpairs of a sparse symmetric matrix (hybrid backends).
 
@@ -51,7 +51,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
@@ -109,9 +109,9 @@ def _to_scipy_csr(A: torch.Tensor):
 def eigsh_sparse_sa(
     A: torch.Tensor,
     k: int,
-    sigma: Optional[float] = None,
+    sigma: float | None = None,
     solver: Solver = "auto",
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Bottom-k eigenpairs `(eigvals (k,), eigvecs (n, k))` of sparse symmetric `A`.
 

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Persistent homology of Vietoris-Rips filtrations.
 
@@ -52,7 +52,8 @@ import torch
 
 from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial import (
-    pairwise_distances, vietoris_rips_sparse,
+    pairwise_distances,
+    vietoris_rips_sparse,
 )
 from holonomy_lib.topology._filtration import build_filtration
 from holonomy_lib.topology._reduction import reduce_filtration
