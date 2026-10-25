@@ -611,3 +611,80 @@ mitigations:
 
 Currently OK because Ollivier is O(n³)-dominant; revisit when the
 sparse variant lands.
+
+---
+
+## 2026-10-25: 0.8.0 correctness and documentation review
+
+This entry supersedes current-behavior claims in older passes above; their
+observations remain dated records. Checked the implementation lane findings,
+31 shared before/after repros, release commits, exported API signatures, and
+the README example against the current source. Finding links below point to
+the release record, not to local review-report files.
+
+**Found and fixed:**
+
+- [B01/B02](../CHANGELOG.md#v080-b01), B18/B24: projected ambient gradients
+  were not Riemannian gradients for non-Euclidean metrics; repeated SPD
+  eigenvalues and fixed-rank singular values broke first derivatives.
+  Metric conversion and corrected spectral backwards repair the checked cases.
+- [B03](../CHANGELOG.md#v080-b03), [B03b](../CHANGELOG.md#v080-b03b),
+  [B04–B06](../CHANGELOG.md#v080-b04): SO(3) small-angle behavior and the
+  zero-exp Jacobian were wrong; heat-kernel subtraction, quadrature tails,
+  broadcast derivatives, and small-radius evaluation gave incorrect values.
+  The heat paths now match the stated independent references and run under
+  `no_grad`; high-dimensional and extreme-input accuracy is not certified.
+- [B09/B10](../CHANGELOG.md#v080-b09),
+  [B11/B12](../CHANGELOG.md#v080-curvature-derivatives),
+  [B13](../CHANGELOG.md#v080-b13): curvature membership/sign branches,
+  zero-curvature derivatives, transport, and large-radius Lorentz evaluation
+  were repaired. Prior “κ crosses zero” and “arcsinh is finite everywhere”
+  claims were stronger than the shipped implementation supported.
+- [B14](../CHANGELOG.md#v080-b14), [B15](../CHANGELOG.md#v080-b15),
+  B19–B23, [L1/L2 C01/C02/D01/D02](../CHANGELOG.md#v080-l1-l2-details):
+  Fréchet backtracking, KL reference values, empty batches, validation,
+  product dtype propagation, sampler signs, Cholesky solves, and mathematical
+  docstrings were corrected.
+- [C01/C01b](../CHANGELOG.md#v080-c01),
+  [C06b](../CHANGELOG.md#v080-c06b), C14/C20: persistence emitted killed
+  classes as essential; a filled triangle had an H1 bar and a 40-point circle
+  had 361. They now have none and one respectively. Rank tolerances repair
+  float32 Betti numbers. Complex construction and boundary preparation use
+  tensor operations; reduction itself remains sequential.
+- [C02/C03](../CHANGELOG.md#v080-c02),
+  [C07/C08](../CHANGELOG.md#v080-c07), C11–C18/C21–C23:
+  eigensolver breakdown/backward, sparse ordering, complex SVD, solver
+  scaling, empty inputs, validation, and backend boundaries were corrected.
+- [C05/C06/C10](../CHANGELOG.md#v080-c05),
+  [C19](../CHANGELOG.md#v080-c19): signed diffusion powers, stationary
+  normalization, resistance/component volume, and MSGNN magnetic phases now
+  match their stated references. Cross-component resistance and commute time
+  are `inf`; isolated diagonals remain zero.
+- [C04/C09/C10/C23 (graphs)](../CHANGELOG.md#v080-graph-contracts):
+  Sinkhorn now checks both marginals and warns when unconverged; the default
+  failing repro value did not become the LP answer. Augmented Forman is
+  binary-only, flow drops loops, and cross-component Ollivier pairs are
+  masked to zero. Sheaves reject invalid maps and indices.
+- [P D01–D07/D10](../CHANGELOG.md#v080-provenance): provenance was removed
+  with its faulty replay, hashing, inspection, and recording paths.
+  [P D08/D09/D11](../CHANGELOG.md#v080-audit): the relocated audit fails
+  on unreadable/missing inputs and closes literal exemptions; removing
+  decorators restores callable types. The audit remains a static heuristic.
+- Test review E1-01–E1-11 and E2-01–E2-08 cut redundant/tautological checks
+  and repaired retained reference, gradient, full-persistence-multiset, and
+  distinct-member batch assertions. Passing counts are not a quality metric.
+
+**Documentation:** Replaced the promotional README with a batch example,
+limitations, module map, and historical measurement links. Regenerated the
+public inventory, preserved convention section numbers, and corrected all
+C1–C7 research statuses in the [claims catalog](research_claims_catalog.md).
+The catalogue now distinguishes mathematical identities, sampled numerical
+evidence, and unfinished constructions.
+
+**Left in progress:** [B08/B17](../CHANGELOG.md#v080-heterogeneous)
+heterogeneous curvature is an experimental nonmetric `dissimilarity`;
+experimental eigenmaps still admits collapse. Sparse eigensolvers are
+nondifferentiable, SPD/fixed-rank custom backwards are first-order, and
+persistence reduction uses sequential per-member work and host metadata.
+The explorer and its screenshot are integrated by the explorer lane;
+this documentation pass does not certify its UI or publish new timings.

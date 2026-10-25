@@ -1,368 +1,215 @@
 # Research claims catalog
 
-The "our research" items in `holonomy_lib` v0.5.0, with explicit
-status fields. This is the source document for the strengthening
-pass: each row gets a deep dive in
-`notes/strengthening/<short-name>.md`, and the consolidated paper
-draws from the strengthened evidence.
+Research claims first collected for v0.5.0, reviewed against the 0.8.0
+implementation on 2026-10-25. The status fields below supersede the earlier
+blanket “paper-ready” labels. Historical strengthening and validation records
+remain evidence about their recorded implementations, not release-wide
+correctness or performance guarantees.
 
-Schema for each entry:
-- **Claim**: precise mathematical / engineering statement
-- **Current evidence**: what we already have
-- **Strengthening needed**: what would close the gap to publication
-- **Paper section**: which paper section it belongs in
-- **Status**: 🔴 not strengthened, 🟡 partially, 🟢 paper-ready
+Each entry separates the mathematical statement, current implementation,
+evidence, and remaining work. Finding IDs link to the 0.8.0 changelog; the
+review reports themselves are local session artifacts.
 
----
+## C1. Heat-kernel recursion and the spectral-shift factor
 
-## C1. Heat-kernel autograd implementation pitfall (spectral-shift factor)
+**Claim:** The published dimension-raising recursion is
+`k^{n+2}(t, r) = -exp(-n*t) / (2*pi*sinh(r)) * partial_r k^n(t, r)`.
+Grigor'yan–Noguchi (1998) state the correct factor. Omitting `exp(-n*t)`
+was our implementation error, not an error in that published formula and
+not a limitation imposed by autograd. Differentiating in radius does not
+supply a multiplicative time-dependent factor omitted from the program.
 
-**Claim** (revised): The literature recursion
-`k^{n+2}(t, r) = -exp(-n·t) / (2π·sinh r) · ∂_r k^n(t, r)`
-(Grigor'yan-Noguchi 1998 *Heat Kernel on Hyperbolic Space*, Bull.
-LMS 30(6); reaffirmed Naganawa 2018 arXiv:1807.05708 *Heat kernel
-recurrence on space forms*) is **correct as stated**. The bug we
-caught was an **autograd implementation pitfall**: writing
-```python
-grad = torch.autograd.grad(k_n(t, r).sum(), r)[0]
-return -grad / (2*math.pi*torch.sinh(r))   # WRONG — drops exp(-n·t)
+**Current evidence:**
+
+- [Implementation](../src/holonomy_lib/hyperbolic/heat_kernel.py).
+- [Symbolic verification](verification/heat_kernel_recursion_sympy.py) and
+  [historical derivation](strengthening/C1_C2_heat_kernel_strengthened.md).
+- [B04](../CHANGELOG.md#v080-b04), [B04b](../CHANGELOG.md#v080-b04b),
+  [B05](../CHANGELOG.md#v080-b05), and [B06](../CHANGELOG.md#v080-b06)
+  compare repaired quadrature, batch behavior, and small-radius values
+  against independent references. The H2 float32 origin value changes
+  from `1.6393e9` to `0.0575358`.
+
+**Status (0.8.0): formula verified; implementation repaired and checked on
+stated cases.** Earlier residual and mass checks did not cover the failures
+found in B04–B06. The current paths preserve time derivatives, distinguish
+batch members, and run under `torch.no_grad()`. Those checks do not establish
+accuracy at arbitrary dimensions, extreme times, or unrepresentable radii.
+
+**Remaining work:** Any broader accuracy or performance claim needs new
+measurements for the specified regime. The regular H2 quadrature endpoint
+is `d + sqrt(4*tail_budget*t)`; small-radius descent uses
+`sqrt(d**2 + 4*tail_budget*t)`. The tail budget is not a uniform relative-error
+bound.
+
+## C2. Closed-form H5 heat kernel
+
+**Claim:** Applying the dimension-raising operator to H3 gives
+
+```text
+k^5_t(r) = (4*pi*t)^(-5/2) * exp(-4*t - r^2/(4*t))
+           * [r^2*sinh(r) + 2*t*(r*cosh(r) - sinh(r))] / sinh(r)^3.
 ```
-because PyTorch's `torch.autograd.grad` computes `∂_r k^n` only,
-and the `exp(-n·t)` spectral-shift factor — multiplicative in the
-mathematical recursion — has to be applied explicitly outside the
-autograd call. The factor is "invisible" to autograd because it's a
-constant in r.
 
-This is a generalizable lesson for porting nuanced analytical
-formulas to PyTorch autograd code: multiplicative constants in r
-that depend on n (or t) must be applied by hand; autograd only
-gives you the r-derivative.
+This is one H3-to-H5 recursion step; the equivalent Gaussian operator-chain
+representation has two radial operators. The displayed expression is an
+algebraic identity, not a recommendation to evaluate the cancellations
+literally near zero.
 
-**Current evidence**:
-- `src/holonomy_lib/hyperbolic/heat_kernel.py` — implementation
-- `notes/validation/heat_kernel_findings.md` — derivation + bug
-  history
-- `notes/validation/heat_kernel_results.md` — PDE-residual at FD
-  noise floor for n ∈ {1, 2, 3, 5, 7, 9}; probability mass ≈ 1
-  to machine precision
+**Current evidence:**
 
-**Strengthening needed**:
-1. **Identify the published reference(s)** that state the recursion
-   without the spectral-shift factor (we need to cite the source of
-   the bug, not just claim "some references"). Candidates to check:
-   Davies (1989) §5.7; Grigor'yan-Noguchi (1998); review papers on
-   hyperbolic heat kernels in ML.
-2. **Formal derivation writeup**: a clean 1-page derivation from the
-   operator chain showing the spectral-shift factor emerges from
-   `D ∘ exp(-(2m+1)·t) = exp(-(2m+1)·t) · D` (commutation of the
-   shift operator with `(1/sinh r ∂_r)`).
-3. **GPU benchmark** of the corrected recursion at multiple `(n, t, B)`
-   sizes; demonstrate practical viability beyond the toy test cases.
-4. **Reference-table comparison**: compare to tabulated values from
-   numerical solvers (e.g. Crank–Nicolson on the radial heat eq.) at
-   a few `(n, t, d)` triples for n=5, 7, 9.
+- [Implementation](../src/holonomy_lib/hyperbolic/heat_kernel.py), including
+  `_heat_kernel_unit_n5`, `_heat_kernel_unit_n7`, and the odd radial series.
+- [Symbolic H5 verification](verification/heat_kernel_n5_sympy.py).
+- [B06](../CHANGELOG.md#v080-b06): H7 at `(t=1, d=1e-4)` changes from
+  `2.50596e-7` to `7.13434e-8` in float64; independent high-precision
+  comparisons also cover sampled small-radius H5/H7 values.
 
-**Paper section**: §3 "Implementation correctness"
+**Status (0.8.0): closed form retained; stable evaluation repaired.**
+Factored hyperbolic functions and a small-radius series replace unstable
+cancellations. H7 also has a closed form. Higher dimensions use the
+spectral-shifted recurrence, with a series/descent treatment near zero.
 
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C1_C2_heat_kernel_strengthened.md`. Literature
-attributed (Grigor'yan-Noguchi 1998); sympy-verified algebraic
-identity (`notes/verification/heat_kernel_recursion_sympy.py` —
-residual = 0 for corrected, residual ≠ 0 for naive); numerical
-fingerprint locked in (naive value is exactly `exp(n·t)` off);
-CPU performance characterized (GPU pending hardware).
+**Remaining work:** The earlier
+[speed and precision comparisons](strengthening/C1_C2_heat_kernel_strengthened.md)
+are historical. They do not justify a general “three orders more precise”
+or current speed claim.
 
----
+## C3. Arcsinh reparameterization for hyperbolic distance and logarithms
 
-## C2. Closed-form n=5 hyperbolic heat kernel
+**Claim:** On valid hyperboloid points, the distance identity
+`d_k(x,y) = 2/sqrt(abs(k)) * asinh(sqrt(abs(k))*norm_M(y-x)/2)`
+avoids subtracting a quantity near one before applying `acosh`. `asinh` is
+smooth on the real line, but this alone cannot prevent cancellation in an
+ambient Minkowski norm or recover information lost in floating-point inputs.
+Distance is not differentiable at coincidence; the implementation chooses
+a zero subgradient there.
 
-**Claim**: The H^5 heat kernel admits the hand-derived closed form
-```
-k^5_t(r) = (4πt)^(-5/2) · exp(-4t - r²/4t)
-                  · [r²·sinh r + 2t·(r·cosh r − sinh r)] / sinh³ r
-```
-derived by applying `(1/sinh r · ∂_r)²` to `exp(-4t - r²/4t)`
-analytically. Using this form directly (rather than two autograd-
-based recursion steps from n=3) is faster AND ~3 orders of magnitude
-more precise.
+**Current evidence:**
 
-**Current evidence**:
-- `src/holonomy_lib/hyperbolic/heat_kernel.py:_heat_kernel_unit_n5`
-- 3 tests (closed-form vs recursion, r=0 limit, backward-finite)
-- PDE-residual 1e-8..1e-6 (vs 1e-5..1e-3 for autograd path)
+- [Lorentz implementation](../src/holonomy_lib/manifolds/lorentz.py),
+  specifically `distance`, `log`, and `log_0`.
+- [B13](../CHANGELOG.md#v080-b13): float32 radius-20 distance changes from
+  `0` to `20`; the origin logarithm changes from `[242582592, 0]` to `[20, 0]`.
+- [Historical symbolic identity](verification/arcsinh_reparam_sympy.py),
+  [near-origin worked example](strengthening/C3_arcsinh_worked_example_results.md),
+  and [earlier analysis](strengthening/C3_arcsinh_strengthened.md).
 
-**Strengthening needed**:
-1. **Derivation writeup**: step-by-step expansion of the operator
-   chain. Already partially in the docstring; needs a clean note.
-2. **Independent cross-check**: verify formula against an external
-   reference (textbook, numerical solver). The H^5 closed form *is*
-   in the literature (Grigor'yan's book Thm 8.21), but the specific
-   polynomial expansion we use is hand-derived.
-3. **GPU benchmark**: forward + backward latency at multiple `(t, r)`
-   tensor sizes; compare to recursion path.
-4. **Same approach for n=7?** Tractable polynomial expansion. The
-   precision payoff would cascade.
+**Status (0.8.0): earlier implementation claim superseded.** Distance now
+uses a spatial radial decomposition rather than subtracting temporal and
+spatial squares of ambient differences. Logarithm tangents are reconstructed
+using their tangency constraint. The old assertion “finite at every input”
+was false: the identity does not guarantee representable coordinates,
+adequate angular precision, or finite values outside the supported domain.
 
-**Paper section**: §4 "Precision/speed optimization"
+**Remaining work:** State coordinate range and precision when making
+stability claims; the historical near-origin comparison does not certify
+large-radius or arbitrary-input behavior.
 
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C1_C2_heat_kernel_strengthened.md`. Sympy
-verifies (A) closed form ≡ corrected recursion, (B) closed form
-satisfies H^5 heat equation, (C) r=0 limit matches docstring
-formula (`notes/verification/heat_kernel_n5_sympy.py`, all
-residuals = 0 algebraically). Performance characterized.
+## C4. Learnable curvature crossing zero
 
----
+**Claim:** Tensor-valued κ can select the current spherical, Euclidean, or
+hyperbolic chart during evaluation instead of fixing the branch at
+construction. Near zero, the implementation uses a signed expansion in
+`q = kappa * alpha**2` for `abs(q) <= sqrt(eps(dtype))`; inactive branch
+arguments are kept finite. Clamping `abs(kappa)` to `finfo.tiny` alone did
+not implement the zero-curvature derivative correctly.
 
-## C3. Autograd-safe arcsinh reparameterization for hyperbolic
-distance/log
+**Current evidence:**
 
-**Claim**: Replacing the textbook `d_k(x, y) = (1/√|k|) · arccosh(k·⟨x,y⟩_M)`
-with the equivalent `d_k(x, y) = (2/√|k|) · arcsinh(√|k|·‖y - x‖_M/2)`
-eliminates **two distinct backward-NaN failure modes** that the
-textbook form has at x ≈ y:
-1. `arccosh`'s derivative singularity at z = 1 (`1/√(z²-1) = ∞`).
-2. Catastrophic cancellation in `‖u‖² = (k·⟨x,y⟩_M - 1)/k` when
-   `k·⟨x,y⟩_M ≈ 1`.
+- [Stereographic implementation](../src/holonomy_lib/manifolds/stereographic.py)
+  and [generalized sine](../src/holonomy_lib/manifolds/comparison.py).
+- [B10](../CHANGELOG.md#v080-b10): a manifold constructed at tensor κ=0 and
+  changed to -1 now maps `[0.5, 0]` to `[0.462117, 0]`.
+- [B10/B11 derivatives](../CHANGELOG.md#v080-curvature-derivatives): the
+  first-coordinate exp/log derivatives at κ=0 and input `[0.5, 0]` are
+  `+1/24` and `-1/24`; the generalized sine derivative is `-1/6` at `t=1`
+  (in general, `partial_kappa sn_0(t) = -t**3/6`). A reported training trajectory
+  `+0.5 → -0.000964363664 → -0.5` had 64 finite gradients.
 
-The arcsinh form uses `‖y - x‖_M²` which is computed from
-coordinate differences (no near-1 subtraction), and `arcsinh` is
-entire (no derivative singularity). Combined with the
-`_safe_sqrt(diff_sq)` autograd-safe helper, the result is
-forward-AND-backward finite at every input.
+**Status (0.8.0): implementation corrected; derivatives at zero curvature and a training
+crossing checked numerically.** Previous claims overstated the shipped
+behavior: construction at zero could freeze the Euclidean branch, and
+inactive branches could poison gradients. Crossing zero now works in the
+checked domain; this is not unrestricted optimization across chart poles
+or saturation limits.
 
-**Current evidence**:
-- `src/holonomy_lib/manifolds/lorentz.py:distance` and `:log`
-- `notes/validation/autograd_safe_vs_geoopt.py` —
-  comparison against eps-clamp pattern
-- `tests/manifolds/test_lorentz.py::TestAutogradFinite` (~11 tests)
+**Remaining work:** The
+[old strengthening results](strengthening/C4_kappa_crossing_strengthened.md)
+and [symbolic continuation](verification/kappa_crossing_sympy.py) are
+historical evidence. Earlier rankings of dispatch against Taylor evaluation
+are not current: the repaired implementation uses Taylor evaluation itself.
 
-**Strengthening needed**:
-1. **Formal proof** that the arcsinh form gives a finite gradient at
-   all boundary inputs (currently shown empirically; needs symbolic
-   verification via sympy).
-2. **Numerical worked example**: show the catastrophic cancellation
-   step-by-step. Compute float64 values at d = 1e-5 with both
-   formulas, show the bit-level disagreement.
-3. **Quantify the win in real training**: run a downstream task
-   (Poincaré-embedding-style hierarchy embedding) with both
-   variants, measure NaN-rate and final loss.
-4. **Cite related work**: the `_safe_*` idiom is folklore in
-   PyTorch (geoopt's eps-clamp; pytorch3d's similar patterns).
-   Place our arcsinh-reparameterization in that lineage.
+## C5. Per-point curvature
 
-**Paper section**: §3 "Implementation correctness" — best-practices
-sub-section
+**Claim:** `holonomy_lib.experimental.HeterogeneousKappaManifold` supplies
+constant-curvature origin maps with a curvature tensor per point. Pairwise
+`dissimilarity` uses a combined endpoint curvature. This does not integrate
+a curvature field or define geodesics on a variable-curvature manifold.
+Curvatures and coordinates must satisfy the selected chart domains.
 
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C3_arcsinh_strengthened.md`. Sympy-verified
-algebraic equivalence
-(`notes/verification/arcsinh_reparam_sympy.py`); worked float64
-example demonstrating textbook form loses all precision below
-α ~ 1e-8, eps-clamp returns a constant 4.5e-3 below the clamp,
-arcsinh tracks to fp precision
-(`notes/strengthening/C3_arcsinh_worked_example_results.md`);
-related-work positioning (geoopt / pytorch3d eps-clamp folklore);
-performance characterized.
+**Current evidence:**
 
----
+- [Experimental implementation](../src/holonomy_lib/experimental/heterogeneous_kappa.py).
+- [B08/B17](../CHANGELOG.md#v080-heterogeneous): both endpoint domains are
+  validated, and the negative harmonic-mean bug is repaired.
+- [Historical synthetic task](strengthening/C5_C6_synthetic_task_results.md)
+  and [analysis](strengthening/C5_C6_heterogeneous_kappa_strengthened.md).
 
-## C4. κ-can-cross-zero dynamic dispatch
+**Status (0.8.0): experimental, in progress.** The pair values are not a
+metric: distinct points can compare as zero and triangle inequalities can
+fail. The API was renamed from `distance` to `dissimilarity` to expose that
+limitation. Differentiable coordinate maps do not establish a metric.
 
-**Claim**: For learnable κ on the κ-stereographic model, the
-branch (spherical/hyperbolic/Euclidean) need NOT be locked at
-construction. `torch.where(κ > 0, spherical_formula(√|κ|·α),
-hyperbolic_formula(√|κ|·α))` with `|κ|` clamped at `finfo.tiny` for
-the sqrt gives:
-- Forward continuous through κ = 0 (both formulas reduce to the
-  Euclidean limit at scaled-arg = 0).
-- Backward finite at κ = 0 (the clamp keeps √|κ| ≠ 0; mask-by-cond
-  gradients cleanly).
+**Remaining work:** Historical synthetic-task comparisons describe an older
+implementation. They do not establish a variable-curvature geometry or
+superiority over discrete gating; neither is a current library claim.
 
-SGD can push κ through 0 without breakdown.
+## C6. Pair-curvature combiner abstraction
 
-**Current evidence**:
-- `src/holonomy_lib/manifolds/stereographic.py` —
-  dynamic dispatch in `_tan_kappa_c` / `_atan_kappa_c`
-- 2 tests (κ crosses 0 in either direction during SGD)
+**Claim:** Arithmetic mean, signed harmonic mean, and a callable override
+choose the effective curvature used by the experimental pair comparison.
+This is a modeling choice, not a metric construction established by the
+constant-curvature references.
 
-**Strengthening needed**:
-1. **Stress test**: trajectory that crosses 0 multiple times. Does
-   it stay stable?
-2. **Comparison to alternatives**: (a) static-branch lock + restart;
-   (b) Taylor-blended unified κ-trig. Quantify when each matters.
-3. **GPU benchmark**: dispatch overhead. The `torch.where` evaluates
-   both branches — does this double the compute on GPU?
-4. **No clear prior art**: most ML libraries lock to one geometry
-   per layer (κ-stereographic transformer heads). Our dynamic
-   dispatch is a separate primitive.
+**Current evidence:**
 
-**Paper section**: §4 "Precision/speed optimization" — sub-section
-on learnable-geometry training
+- [Combiner implementation](../src/holonomy_lib/experimental/heterogeneous_kappa.py).
+- [B17](../CHANGELOG.md#v080-heterogeneous): harmonic mean of `(-1, -1)`
+  changes from `2.2250738585072014e-308` to `-1`.
+- Homogeneous agreement with the ordinary stereographic distance excludes
+  `(0, 0)` for the harmonic combiner: a zero sum raises `ValueError`.
+  One zero operand and one nonzero operand give zero.
 
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C4_kappa_crossing_strengthened.md`. Sympy
-verifies analytic continuation across κ = 0 (Taylor series match
-term-by-term on both sides, limits/derivatives agree, integral
-representation bridges the sign-conditional;
-`notes/verification/kappa_crossing_sympy.py`). Numerical stress
-test (`notes/strengthening/C4_kappa_crossing_stress.py` +
-`_results.md`) demonstrates: 100-step SGD trajectory with 4
-κ-sign crossings stays finite; static-branch lock has 1.38%
-relative-error failure mode after a flip; Taylor-truncation
-alternative is dominated by the dispatch across the entire
-manifold domain; CPU latency overhead ~1.2–1.4× vs the
-float-locked fast path; AMD ROCm GPU benchmark (Radeon RX 9060 XT)
-confirms ×1.27 (float64) / ×1.58 (float32) overhead.
+**Status (0.8.0): experimental modeling choice; metric interpretation
+unresolved.** The old positive-clamp implementation destroyed signs.
+Correcting it does not restore the metric axioms of the pair construction.
 
----
+**Remaining work:** Earlier
+[combiner rankings](strengthening/C5_C6_heterogeneous_kappa_strengthened.md)
+used the faulty implementation. Any empirical ranking needs new evidence
+and an explicit task; no combiner is claimed to recover a curvature field.
 
-## C5. Per-point κ continuous (vs. GraphMoRE's discrete gating)
+## C7. Complementary numerical validation
 
-**Claim**: `HeterogeneousKappaManifold` exposes each point's κ as a
-continuous real-valued tensor, vs. GraphMoRE's mixture-of-experts
-gating over a discrete set of constant-curvature spaces. The
-continuous parameterization:
-1. Enables direct SGD on κ (autograd through every op).
-2. Allows arbitrary κ values learned from data.
-3. Loses the "interpretability of discrete gating" — there's no
-   structural "this concept is in expert 3" output, just a
-   continuous κ value per point.
+**Claim:** Differential-equation residuals and normalization check different
+properties. A constant rescale of a heat kernel can preserve the homogeneous
+PDE while changing its mass; a mass-preserving perturbation can violate the
+PDE. Neither check alone is sufficient.
 
-**Current evidence**:
-- `src/holonomy_lib/manifolds/heterogeneous_kappa.py`
-- 26 tests (homogeneous-case agreement, heterogeneous behavior,
-  autograd through both v + κ, combiner override)
+**Current evidence:**
 
-**Strengthening needed**:
-1. **Downstream-task ablation**: synthetic graph with known per-node
-   curvature (e.g. mixture of trees + cycles, each region a
-   different "true κ"). Train continuous per-point κ vs. discrete
-   gating (a GraphMoRE-style implementation we'd need to add).
-   Measure recovery quality + final loss.
-2. **Pair-κ combiner study**: which combiner works best in practice?
-   The arithmetic mean default is defensible but a real ablation
-   would show whether harmonic mean or other choices help.
-3. **Theoretical analysis**: when does a continuous κ field
-   approximate a discrete mixture? Conditions under which they
-   agree / disagree.
+- [Heat-kernel validation](validation/heat_kernel_validation.py).
+- [Historical methodology analysis](strengthening/C7_validation_methodology_strengthened.md).
+- [Graph heat-kernel validation](validation/graph_heat_kernel_validation.py).
+- [B04–B06](../CHANGELOG.md#v080-b04): numerical failures missed by the
+  earlier validation, despite correct formulas and favorable sampled residuals.
 
-**Paper section**: §5 "New primitives" — the heterogeneous-κ
-sub-section
+**Status (0.8.0): useful complementary checks; insufficient as a correctness
+certificate.** Pair them with independent reference values, distinct-member
+batch correspondence, and derivatives in each supported argument. Agreement
+on sampled inputs is evidence for those inputs, not every implementation path.
 
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C5_C6_heterogeneous_kappa_strengthened.md`.
-Synthetic identifiability task
-(`notes/strengthening/C5_C6_synthetic_task.py` +
-`_results.md`) with 3-region ground-truth κ-field shows continuous
-per-point κ (with arithmetic_mean combiner) gives best final loss
-(0.0065 vs 0.0099 single, 0.0099 friendly-bank discrete) AND best
-κ-recovery correlation (+0.67 vs +0.63 friendly, +0.53 adversarial).
-The bank-choice penalty (~25% worse loss when bank doesn't match
-truth) is quantified. GraphMoRE-style discrete-gating baseline at
-`tests/research_baselines/graphmore_discrete.py`. Optimization-
-stability caveats documented (coord barrier + κ clamp + LR decay
-needed for robust training).
-
----
-
-## C6. Pair-κ combiner abstraction
-
-**Claim**: The rule for combining two per-point κ's into an
-effective pair-κ for pairwise distance is **not standardized in
-the literature**. We propose a `Callable[[κ_x, κ_y], κ_eff]`
-abstraction with two built-in defaults (arithmetic mean, harmonic
-mean) and arbitrary callable override.
-
-**Current evidence**:
-- `src/holonomy_lib/manifolds/heterogeneous_kappa.py`:
-  `_combiner_arithmetic_mean`, `_combiner_harmonic_mean`
-- Tests verify homogeneous-case agreement (κ_x = κ_y reduces to
-  `KappaStereographicManifold(κ).distance`) for both combiners
-
-**Strengthening needed**:
-1. **Theoretical motivation**: what properties should a "good"
-   combiner have? (Commutative, smooth, recovers single-κ limit,
-   behaves well at sign mix.) Justify the choices.
-2. **Empirical comparison**: on the downstream task from C5, which
-   combiner gives best recovery? Different combiners encode
-   different inductive biases about "what the geometry looks like
-   between heterogeneous regions."
-3. **Mathematical relation to other approaches**: is the
-   arithmetic-mean combiner equivalent to anything in the
-   geometric-mean / wrapped-Cauchy / similar literature?
-
-**Paper section**: §5 "New primitives" — same sub-section as C5
-
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C5_C6_heterogeneous_kappa_strengthened.md`.
-Four combiners exercised on the same synthetic task (arithmetic_mean,
-harmonic_mean, signed_geometric_mean, max_magnitude). arithmetic_mean
-is the empirical winner (best fit + κ-recovery) AND the well-motivated
-smooth default. Non-smooth combiners (signed_geometric_mean's sign(),
-max_magnitude's |·|=|·|) are brittle in Adam-based training;
-harmonic_mean collapses when truth includes κ = 0 because of the
-finfo.tiny clamp guard. The abstraction's value isn't a single
-magic combiner — it's that the library exposes the design choice
-instead of hard-coding one, and lets the user override.
-
----
-
-## C7. Validation methodology
-
-**Claim**: For numerical implementations of manifold-PDE solutions
-(heat kernels, geodesic flows, etc.), **two complementary
-consistency checks** — (1) heat-equation PDE residual via finite
-differences, (2) probability-mass normalization via Gauss-Legendre
-quadrature — provide a robust correctness check that catches errors
-the standard "compare to closed form at a few points" approach
-misses. Demonstrated by finding the spectral-shift bug (C1).
-
-**Current evidence**:
-- `notes/validation/heat_kernel_validation.py` — the methodology
-  applied
-- The bug we found via this methodology
-
-**Strengthening needed**:
-1. **Apply the methodology to other primitives**: graph Laplacian
-   heat kernel? Spherical heat kernel?
-2. **General writeup**: methodology section that's reusable for
-   any future manifold-PDE primitive.
-
-**Paper section**: §3 "Implementation correctness" — methodology
-sub-section (§3.3)
-
-**Status**: 🟢 **paper-ready** — see
-`notes/strengthening/C7_validation_methodology_strengthened.md`.
-Abstracted into a reference-free dual check (operator-equation
-residual + conserved-quantity check) and generalized to a second,
-structurally different primitive: the graph heat kernel
-`exp(−t·L)` (`notes/validation/graph_heat_kernel_validation.py` +
-`_results.md`), crossing the continuous→discrete divide (PDE→ODE,
-probability mass→row mass). Key new result: the two checks are
-**complementary** — a constant rescale `K→c·K` is invisible to the
-residual (a scaled solution still solves the homogeneous ODE) but
-caught by mass; a mass-preserving perturbation `K→K+ε·L'` is
-invisible to mass but caught by the residual. Neither check alone
-suffices; the C1 spectral-shift bug was caught by both only by
-luck.
-
----
-
-## Strengthening pass — order of attack
-
-By **paper-impact × tractability**:
-
-1. **C1 + C7 first** (heat-kernel bug + methodology) — the
-   strongest story, biggest paper anchor. ~half-day each.
-2. **C2 next** (closed-form n=5) — natural extension of C1.
-3. **C3 third** (arcsinh idiom) — broadly applicable, easy to
-   strengthen with sympy + a numerical example.
-4. **C4 fourth** (κ-sign crossing) — depends on having a downstream
-   task to validate against.
-5. **C5 + C6 last** (per-point κ + combiner) — requires a
-   GraphMoRE-style baseline implementation for comparison; biggest
-   work.
-
-The paper draft (T#60) consumes all of the above. Order: build the
-strengthening artifacts first, then the paper draws from them.
+**Remaining work:** No blanket paper-readiness or release-certification claim.
+The 0.8.0 review concerns a usable, numerically checked library; future
+research claims require an explicit question and evidence for its scope.

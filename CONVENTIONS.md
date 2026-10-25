@@ -2,7 +2,7 @@
 
 These are the binding rules every primitive in this library follows.
 They're enforced by:
-- the audit tool (`python -m holonomy_lib.audit src/ --strict`) for the
+- the audit tool (`python tools/audit.py src/ --strict`) for the
   numerical-constant rules,
 - the test suite for the API-shape rules,
 - and code review for the rest.
@@ -29,12 +29,16 @@ by the math dimensions:
 
 Single-point use is `B = 1`. Outputs preserve the batch shape:
 `(B, …)` in, `(B, …)` out. **All primitives must work for
-`B ∈ {0, 1, > 1}`**; there is a test for each.
+`B ∈ {0, 1, > 1}`**. Check numerical correspondence with distinct batch
+members, not just shapes. Single-instance sparse APIs and sheaf structures
+must state their exceptions explicitly; do not advertise them as batched.
 
 ### 1.2 Device and dtype propagation
 
 Outputs land on the same device and (compatible) dtype as inputs. We
-do not silently `.cpu()` or upcast. The constructors of class-based
+do not silently `.cpu()` or upcast. Document backend boundaries: sparse
+eigensolvers may compute in SciPy on CPU in float64 and restore output
+device/dtype; persistence reduction uses host metadata. The constructors of class-based
 primitives (`FixedRankManifold`, `SPDManifold`) accept `device` and
 `dtype`; functional primitives infer from their tensor arguments.
 
@@ -99,13 +103,13 @@ handles asymmetric input via the phase factor.
   via `torch.where(d > 0, …, 0)`. See `Cheng-Wu (2024)` for the
   formal treatment.
 
-- **Disconnected components**: each primitive documents its behavior.
-  Ollivier curvature inflates the shortest-path distance to a large
-  finite value (`DISCONNECTED_DISTANCE_MULTIPLIER`) so Sinkhorn stays
-  finite; diffusion-map emits a `UserWarning` because the embedding
-  contains degenerate constant-on-component modes; effective
-  resistance returns 0 between components (which the docstring
-  flags as "not physically meaningful, mask by component").
+- **Disconnected components**: effective resistance and commute time are
+  `inf` between components, with zero diagonals even at isolated nodes.
+  Commute time uses the volume of the component containing the pair.
+  Ollivier curvature masks cross-component pairs to `0`; this is an output
+  convention, not a transport distance between those components.
+  Diffusion maps emit a `UserWarning` because the embedding contains
+  degenerate constant-on-component modes.
 
 ---
 
@@ -115,11 +119,13 @@ handles asymmetric input via the phase factor.
 
 The library-wide `numerical_floor_convention` is `1e-9`. It's the
 floor used in `1 / max(x, 1e-9)`-style guards. It's listed in
-`audit.ALLOWED_LITERALS` so every primitive can reuse it.
+`tools/audit.py:ALLOWED_LITERALS` so every primitive can reuse it.
 
-Rationale: `1e-9` is comfortably below float32 eps (`~1.19e-7`) for
-safety across dtypes, and well above `torch.finfo(float64).tiny`
-(`~2.22e-308`) so we never amplify true zero into a huge reciprocal.
+This is a historical convention, not a universal stability bound. Flooring
+a nonnegative denominator at `1e-9` bounds its reciprocal by `1e9`; that
+can still be a large amplification. Suitability depends on units, input
+scale, and dtype. Being below float32 epsilon does not establish safety.
+Use a dtype- and problem-aware threshold when the computation requires one.
 
 ### 3.2 Eigenvalue clamping
 
@@ -137,23 +143,18 @@ factorize. For chained ops at the same `S`, expose a
 `whitening=(S_sqrt, S_inv_sqrt)` kwarg so callers can precompute
 once and pass through.
 
-### 3.4 Pseudoinverse threshold
+### 3.4 Rank and pseudoinverse tolerance
 
-When computing the Moore-Penrose pseudoinverse of a symmetric matrix
-via eigh, the threshold for "is this eigenvalue effectively zero?"
-is `max_abs · 1e-9`. Compare against unclamped eigenvalues for the
-where-branch; clamp the safe value for the reciprocal:
+Use `torch.linalg.pinv(A, hermitian=True)` and
+`torch.linalg.matrix_rank(A, hermitian=True)` for symmetric matrices,
+with their dtype- and size-aware default tolerances. Their default relative
+threshold scales with `max(m, n) * torch.finfo(dtype).eps`; a fixed `1e-9`
+relative cutoff can mistake float32 roundoff for a nonzero eigenvalue.
+Do not use the numerical floor in §3.1 as a rank threshold.
 
-```python
-safe_eig = eigvals.clamp(min=torch.finfo(dtype).tiny)
-inv_eig = torch.where(eigvals > max_abs * 1e-9,
-                       torch.reciprocal(safe_eig),
-                       torch.zeros_like(eigvals))
-```
-
-This pattern handles isolated nodes, disconnected components, and
-the all-zeros graph correctly (all eigenvalues exactly zero ⇒
-pseudoinverse is zero).
+If an API exposes an explicit absolute tolerance, document its units and
+meaning. Sparse sheaf kernel filtering uses the analogous matrix-size and
+dtype scale because it does not compute the full dense rank.
 
 ---
 
@@ -174,9 +175,12 @@ appear in inner loops without a clear reason. Specifically:
 
 ### 4.2 Pre-allocate hot-loop tensors
 
-Don't rebuild tensors in tight loops. The Lanczos `V` matrix is
-pre-allocated as `torch.empty(*batch, n, n_iter + 1)` and written
-in-place per iteration, never reassembled with `torch.stack`.
+Preallocate working storage when it is safe for autograd. Never write in
+place into a tensor, or a view of one, that an operation has saved for
+backward. A later basis-column write can invalidate an earlier matrix
+product's gradient even when the forward result is correct. Use independent
+iteration tensors and assemble them with `torch.stack` when backward needs
+the earlier values. Verify the actual gradient path before optimizing storage.
 
 ### 4.3 Tile when memory is the bottleneck
 
@@ -207,9 +211,10 @@ The pattern is:
 Every numerical literal in source code must fall into one of:
 
 1. **Derived from inputs**: `1/N`, `1/sqrt(d)`, `n(n+1)/2`.
-   No catalog entry needed; the audit treats these as ✅.
-2. **Universal invariant**: `0, 1, -1, 0.5, 2, 1024, 1000, π, e,
-   1e-9`. Listed in `audit.ALLOWED_LITERALS`. No catalog entry
+   No catalog entry is needed for the derivation itself; any unexplained
+   literals within it still need review.
+2. **Allowlisted mathematical identities and conventions**: `0, 1, -1, 0.5, 2, 1024, 1000, π, e,
+   1e-9`. Listed in `tools/audit.py:ALLOWED_LITERALS`. No catalog entry
    needed.
 3. **Experimentally tuned**: `SINKHORN_TILE_DEFAULT = 256`,
    `MAGNETIC_CHARGE_DEFAULT = 0.25`, etc. **Catalog entry required**
@@ -220,7 +225,13 @@ Every numerical literal in source code must fall into one of:
      distribution changes substantially),
    - the file path where it's used.
 
-The audit tool fails the build on any uncataloged literal.
+Run `python tools/audit.py src/ --strict`. It scans Python AST numeric
+literals, accepts allowlisted values and cataloged assignment names, and
+fails on undocumented literals or missing, unreadable, or unparseable input.
+It is a heuristic, not a proof: it cannot establish mathematical derivations,
+check the truth of a citation or a catalog entry, or certify numerical
+correctness. Allowlisted values and excluded files can hide inappropriate
+constants; review those uses as well.
 
 ### 5.2 Catalog entries
 
@@ -232,8 +243,10 @@ re-derive; point at the docstring and the paper.
 
 ## 6. Citations
 
-Every public function has a `References:` section in its docstring
-pointing to the paper or textbook that defines its math. Format:
+Every public mathematical function has a `References:` section in its docstring
+pointing to the paper or textbook that defines its math. Properties and plain
+constructors are exempt; a constructor that implements a mathematical
+algorithm still cites that algorithm. Format:
 
 ```
 References:
@@ -267,33 +280,34 @@ The removal rationale and requirements for any return are in `archive/README.md`
 
 ## 8. Testing
 
-### 8.1 Three layers
+### 8.1 Correctness guarantees
 
-Every primitive has:
+Tests guard results that a user must be able to rely on. Choose a closed
+form, independently computed reference value, cross-library comparison, or
+mathematical invariant that could expose an incorrect implementation.
+Check gradients where differentiation is supported, and compare distinct
+batch members with their singleton computations. Cover empty batches
+(`B = 0`) and device/dtype behavior where those are part of the contract.
 
-1. **Unit tests**: shape correctness across `B ∈ {0, 1, several}`.
-   Validation tests (rejects bad input).
-2. **Property tests**: mathematical invariants (a projection is
-   idempotent; a retraction lands on the manifold; a divergence
-   is non-negative).
-3. **Comparison tests**: agreement with an established library
-   where one exists (`pymanopt`, `geoopt`, `tensorly`,
-   `GraphRicciCurvature`). Tests `pytest.importorskip` the
-   comparison library so the suite runs without it installed.
+Do not add shape-only checks, duplicated cases, or tautologies such as
+comparing a function with itself. Shape assertions belong beside a numerical
+assertion when shape matters. Optional cross-library checks may use
+`pytest.importorskip` when the reference library is unavailable.
 
 ### 8.2 Tolerances
 
-Use `torch.testing.assert_close` with explicit `atol` and `rtol`.
-Default `atol=1e-12, rtol=0` for exact closed-form checks (e.g.
-K_3 Ollivier curvature). Loosen only with a comment explaining
-why (e.g. Sinkhorn convergence plateau).
+Use `torch.testing.assert_close` with explicit `atol` and `rtol` justified
+by the reference, dtype, scale, and approximation error. Closed-form float64
+checks can often use `atol=1e-12, rtol=0`; this is not a float32 or iterative
+solver default. A loose tolerance must not hide failure to converge.
 
 ### 8.3 Regression tests
 
-When you fix a bug, add a regression test in the same commit. The
-test should fail against the buggy code and pass against the fix.
-A new test file isn't needed; add to the existing module's test
-file under an appropriate class.
+A new test needs a stated reason: name the correctness guarantee and how the
+assertion can fail. For a reproduced bug, repair or extend the existing test
+for that function with the corrected reference value and confirm that it
+rejects the buggy behavior. Prefer one meaningful case over several
+redundant ones. Do not add test files or coverage targets by default.
 
 ---
 
@@ -307,7 +321,7 @@ Every public function has a docstring with:
 - Math statement (formula, LaTeX-style ascii is fine).
 - `Args:` section with shape conventions.
 - `Returns:` section with shape conventions.
-- `References:` section (see §6).
+- `References:` section for mathematical functions (see §6 for exemptions).
 - Optional `Notes:` for performance, convergence caveats,
   scale-of-validity, etc.
 

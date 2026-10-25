@@ -4,6 +4,206 @@ All notable changes to `holonomy_lib` are documented here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 version numbers follow [Semantic Versioning](https://semver.org).
 
+## [0.8.0] - 2026-10-25
+
+### Added
+
+- Local explorer in the separate `holonomy_explorer` package, launched with
+  `holonomy-explorer` or `python -m holonomy_explorer`. Graphs, curvature,
+  topology, and batching scenes call the real library; device, dtype, port,
+  and browser launch are configurable.
+- `egrad_to_rgrad` on every manifold in `holonomy_lib.manifolds`, used by
+  Riemannian SGD to convert
+  ambient gradients through the metric before retraction.
+
+### Changed
+
+- License: FSL-1.1-ALv2, with Synoros as licensor. Permitted use and modification
+  are free; competing commercial use is reserved. Each release becomes
+  Apache-2.0 two years after publication. Releases through 0.7.0 retain
+  AGPL-3.0-or-later. See [LICENSE.md](LICENSE.md).
+- Moved heterogeneous curvature and hyperbolic eigenmaps into
+  `holonomy_lib.experimental`. Eigenmaps remains attraction-only and admits
+  collapse. Heterogeneous `distance` is now `dissimilarity`, because it is
+  not a metric; both endpoint chart domains are checked.
+- Moved the development-only constant audit to `tools/audit.py`.
+- Added Fréchet `sync_every` and `max_backtracks`, Vietoris-Rips
+  `candidate_tile_size`, Ollivier `sync_every`, and flow
+  `sinkhorn_sync_every`. `GraphSheaf.trivial(device=None)` follows the input
+  edge device unless explicitly overridden.
+- Diffusion time `t` must be a nonnegative integer. Betti-number `threshold`
+  defaults to `None` for PyTorch's dtype- and size-aware rank tolerance.
+  Effective resistance uses the corresponding Hermitian pseudoinverse default;
+  sparse sheaf kernel filtering follows the same size/dtype scale.
+- Sparse eigensolvers explicitly reject autograd inputs; detach them to use
+  the solver. Small full/near-full requests may use dense `eigh`. SVD returns
+  are described as `(U, S, Vh)`, including conjugation for complex inputs.
+- Simplicial construction and boundary preparation use batch-aware tensor
+  joins. Vietoris-Rips extensions are tiled, pairwise distances use `cdist`,
+  and each filtration transfers its boundary metadata to the host once.
+  Z2 reduction and union-find remain sequential per batch member.
+- CPU suite reduced from 1220 to 697 passing tests, including removal of
+  157 provenance tests. Removed shape-only, duplicate, and tautological checks;
+  repaired retained checks with reference values, complete persistence-pair
+  multisets, meaningful gradient assertions, and distinct-member batch
+  correspondence. These counts describe the integration run, not coverage.
+- Python floor is 3.12; dependency floors are `torch>=2.2`, `numpy>=1.26`,
+  and `scipy>=1.11.2`. Added `py.typed` and SciPy typing stubs for development;
+  configured pytest, Ruff, and mypy in `pyproject.toml`.
+- README rewritten around one runnable batch example, explicit limitations,
+  and historical measurement links. Public API inventory regenerated from
+  exports and signatures; research claim statuses corrected for the fixes below.
+
+### Removed
+
+- Content-addressable provenance, recording decorators, replay/inspection,
+  MCP server, and Jupyter integration. Removed the `provenance`, `mcp`,
+  `jupyter`, and `all` extras. The optional `comparison` and `dev` extras remain.
+- Provenance benchmark records from the active notes. The removed subsystem
+  and records remain in repository history; local archive tombstones record
+  the requirements for any return.
+
+### Fixed
+
+The shared reviewer repros below show the old and corrected CPU results.
+Values retain the precision recorded by the repro runner; exception messages
+are abbreviated. IDs identify the review findings, not public API names.
+
+| Finding | Repro | Before | After |
+|---|---|---|---|
+| <a id="v080-b01"></a>B01 | SGD on SPD: S=2I, egrad=I, lr=0.1 (diag entry) | `1.90246` | `1.63746` |
+| <a id="v080-b02"></a>B02 | SPD log_I(T) grad at T=I finite | `False` | `True` |
+| <a id="v080-b03"></a>B03 | so3 log(exp([0,1e-7,0])) | `[9.88431e-08, 0, 0]` | `[0, 1e-07, 0]` |
+| <a id="v080-b03b"></a>B03b | so3_exp Jacobian at 0 nonzero | `False` | `True` |
+| <a id="v080-b04"></a>B04 | H2 heat kernel t=1 d=0, float32 | `1.6393e+09` | `0.0575358` |
+| <a id="v080-b04b"></a>B04b | H2 heat kernel t=0.01 d=0.2, float64 | `2.86669` | `2.90806` |
+| <a id="v080-b05"></a>B05 | H4 kernel t=[.3,.7], d=.8 batched | `[0.0239, 0.0107]` | `[0.0192, 0.0021]` |
+| <a id="v080-b06"></a>B06 | H7 kernel t=1 d=1e-4, float64 | `2.50596e-07` | `7.13434e-08` |
+| <a id="v080-b09"></a>B09 | Poincare ball k=-1 accepts [2,0] | `True` | `False` |
+| <a id="v080-b10"></a>B10 | tensor kappa 0 -> -1, exp_0([.5,0]) | `[0.5, 0]` | `[0.462117, 0]` |
+| <a id="v080-b12"></a>B12 | transport k=-1 x=[.5,0] y=[.2,0] v=[2,0] | `[nan, nan]` | `[2.56, 0]` |
+| <a id="v080-b13"></a>B13 | Lorentz float32 d(origin, exp_0([20,0])) | `0` | `20` |
+| <a id="v080-b14"></a>B14 | Frechet mean of symmetric H2 triple, dist to origin | `1.76495` | `9.69415e-11` |
+| <a id="v080-b15"></a>B15 | KL([1e-10,1-1e-10] \|\| [1e-100,1]) | `-1e-10` | `2.06233e-08` |
+| <a id="v080-b19"></a>B19 | mode_product with B=0 | `RuntimeError (empty reshape)` | `shape (0, 3, 2)` |
+| <a id="v080-b21"></a>B21 | 2-dim product given a 3-coordinate point | `0` | `ValueError: x must have shape (..., 2); got (1, 3)` |
+| <a id="v080-c01"></a>C01 | PH: equilateral triangle H1 bars | `[[1, inf]]` | `[]` |
+| <a id="v080-c01b"></a>C01b | PH: 40-point circle, number of H1 bars | `361` | `1` |
+| <a id="v080-c02"></a>C02 | Lanczos I4 k=4 eigenvalues | `[1, 0, 0, 0]` | `[1, 1, 1, 1]` |
+| <a id="v080-c03"></a>C03 | Lanczos backward on diag(1,2,3,4) | `RuntimeError (saved tensor modified in place)` | `ok` |
+| <a id="v080-c04"></a>C04 | Ollivier default, 3-node weighted, k(0,1) | `0.666667` | `0.666667; now warns that Sinkhorn has not converged` |
+| <a id="v080-c05"></a>C05 | diffusion map, unit triangle t=1, \|coords\| sum | `0` | `2.72504` |
+| <a id="v080-c06"></a>C06 | float32 K5 effective resistance range | `[0.375, 0.4375]` | `[0.4, 0.4]` |
+| <a id="v080-c07"></a>C07 | shift-invert SA on diag(1e8,2e8,3e8) | `RuntimeError (false singular shift-invert breakdown)` | `[1e+08]` |
+| <a id="v080-c08"></a>C08 | sparse SA on diag(-10,-2,1,3), k=1 | `[1]` | `[-10]` |
+| <a id="v080-c09"></a>C09 | augmented Forman on weighted triangle | `3` | `ValueError (requires binary adjacency)` |
+| <a id="v080-c10"></a>C10 | commute time, unit edge + 10*I | `22` | `2` |
+| <a id="v080-c12"></a>C12 | randomized SVD of 1j*I3, reconstruction error | `1.08282` | `6.79055e-16` |
+| <a id="v080-c16"></a>C16 | float32 cg(I2, [1e20, 1e20]) | `[nan, nan]` | `[1e+20, 1e+20]` |
+| <a id="v080-c17"></a>C17 | spectral dimension, eig [1,2], t [1000,2000] | `[nan]` | `[2885.39]` |
+| <a id="v080-c06b"></a>C06b | float32 7-cycle Betti numbers | `[0, 0]` | `[1, 1]` |
+
+Additional corrections and checks from the implementation reviews:
+
+- **B01/B02/B18/B24:** metric-aware gradients repair SPD optimization.
+  Daleckii–Krein derivatives handle repeated SPD eigenvalues; fixed-rank
+  retraction uses the exact SVD path when gradients are required and supports
+  derivatives of the reconstructed matrix at repeated retained singular values.
+  Zero-tangent norm gradients change from nonfinite to exactly zero.
+  These custom backwards are first-order; individual repeated SVD factors
+  remain nonunique.
+- <a id="v080-curvature-derivatives"></a>**B10/B11:** at κ=0 and input `[0.5,0]`,
+  first-coordinate exp/log derivatives change from `0/0` to `+1/24,-1/24`;
+  generalized sine derivative at `t=1` changes from `0` to `-1/6`. Spherical position/curvature gradients change
+  from `[nan,nan]/nan` to `[1.2195121951219514,0]/-0.3738721283495443`.
+  Tensor curvature follows its current value, signed series cover zero,
+  and inactive branches no longer poison gradients.
+- **B09/B13/B20/B21:** float32 ball saturation is kept inside the chart
+  (`[1,0]` with nonfinite log becomes `[0.9999997615814209,0]` with finite log).
+  Radius-20 Lorentz origin log changes from `[242582592,0]` to `[20,0]`.
+  Fractional-dimension endpoint area and zero-radius volume derivative change
+  from `nan` to `0`. Product widths and positive finite weights are validated;
+  a requested float32 origin no longer comes back as float64.
+- <a id="v080-heterogeneous"></a>**B08/B17:** experimental endpoint comparisons
+  that returned `nan` now raise a domain error. Harmonic mean of `(-1,-1)`
+  changes from `2.2250738585072014e-308` to `-1`; zero sums raise `ValueError`.
+- **B22/B23:** experimental eigenmaps drops self-loops and supports product
+  manifolds: the `.n` attribute error becomes shape `(1,2,1)`. Seeded fixed-rank
+  samples no longer lock QR signs: positive first-coordinate counts change
+  from `0/0` to `20/17` in 32 samples. Draws use the generator's device before
+  transferring to the requested output device.
+- **B03b/B04–B06/B14:** the SO(3) exponential Jacobian at zero has absolute
+  sum `0 → 6`. H4 time derivative changes from `-0.004203000187508567` to
+  `-0.009673119185033718`; dimensions 4/6/9 run under `no_grad`.
+  H7 small-radius float32 changes from `14.034762382507324` to
+  `7.134337209890873e-8`. Stable H2 subtraction, the corrected quadrature tail,
+  independent broadcast derivatives, and small-radius series/descent repair
+  the heat paths. Fréchet mean backtracks, rejects invalid weights, and warns
+  on exhausted convergence budgets.
+- <a id="v080-l1-l2-details"></a>**L1 C01/C02/D02; L2 C01/D01/D02:** SPD
+  inner products and Fisher natural gradients use Cholesky solves. The
+  checked values agree to roundoff (`0.3651271874939033 → 0.3651271874939032`
+  and `[[0.2,0.6000000000000001]] → [[0.2,0.6]]`). `sn_kappa` now has its
+  public citation. HOSVD rank-domain errors fail at entry. Corrected Burg
+  potential sign, Fisher boundary distance, harmonic normalization/ordering,
+  quadrature exactness, Lorentzian timelike terminology, and heat dispatch prose.
+- **C01/C01b/C06b/C14/C20:** killed persistence classes are excluded from
+  essential bars; both reduction backends agree. Empty simplex dimensions
+  survive construction, and edgeless Betti computations return valid empty
+  or `[3,0]` results. Sparse Hodge products use `torch.sparse.mm`; the filled
+  triangle remains `diag(3,3,3)`. H0 keeps coincident-point zero bars; higher
+  dimensions omit zero-length intervals.
+- <a id="v080-graph-contracts"></a>**C04/C09/C10/C23 (graphs):** Sinkhorn checks
+  both transport marginals. The C04 default still gives `0.666667` with
+  marginal error `0.333333`; at 1000 iterations it gives `0.1666666667`,
+  matching the independent LP `0.16666666666666674`. Augmented Forman rejects
+  weighted adjacency. Flow drops self-loops before normalization/surgery:
+  a looped path edge changes from `4.4440972087` to `1`, and a zero-step flow
+  diagonal changes from `[5,5,5]` to `[0,0,0]`. Cross-component Ollivier
+  curvature changes from `0.9994999999995` to its documented mask value `0`.
+- **C05/C06/C10/C13:** diffusion uses absolute-eigenvalue ordering, signed
+  integer powers, and stationary normalization: triangle diffusion distance
+  squared changes from `0` to `1.5000000000000009`, and adjacency scaling
+  by four changes the coordinate-norm ratio from `0.5` to `1`.
+  Disconnected resistance changes from `0.4999999999999999` to `inf`;
+  commute time uses component volume and also returns `inf` across components.
+  Random-walk embedding preserves an isolated-node eigenvector (`norm 0 → 1`).
+- **C02/C07/C08/C11/C21:** Lanczos restarts after breakdown rather than
+  inventing zero eigenpairs; `-I4` changes from `[0,0,0,-1]` to four `-1`s.
+  Factorization status and Ritz residuals replace the false singularity
+  heuristic. Sparse SA selects algebraic minima, handles near-full requests
+  and zero operators (`backend errors → [-10,-2]` and `[0]`), and honors the
+  native generator. Two-node sheaf positive/full spectra return `[2]`/`[0,2]`;
+  offsets follow device. Sparse autograd boundaries now fail explicitly.
+- **C14/C15/C18/C22:** empty diffusion, resistance, SA, mode products, and
+  Fréchet means execute; empty LSQR no longer emits a convergence warning.
+  Sheaves reject complex restrictions, fractional indices, and reversed
+  duplicate edges. Negative SVD oversampling, invalid flow iteration/tile
+  settings, and negative surgery steps are rejected. Sparse asymmetric
+  inputs now warn (`0 → 1` warning in the repro).
+- **C16/C17/C23 (algebra/spectral):** CG/LSQR scale intermediate arithmetic
+  and warn on nonfinite failure per member. Large-scale float32 LSQR changes
+  from `[nan]` to `[1]`; preconditioned CG changes from `[0,0]` with warning
+  to `[1e-20,1e-20]`. Spectral dimension uses `logsumexp` and rejects repeated
+  times with zero log-time variance. LSQR defaults to `2*n` iterations and
+  uses the compatible-system stopping term.
+- <a id="v080-c19"></a>**C19:** signed magnetic Laplacians now implement
+  MSGNN (He, Perlmutter, Reinert, Cucuringu, 2022) with absolute-degree
+  normalization. The negative unit-edge imaginary entry changes from
+  `+0.5j` to `-0.5j`; the previous attribution to SigMaNet was incorrect.
+- <a id="v080-audit"></a>**P D08/D09/D11:** audit checks no longer exempt
+  literals by argument name or unrelated trailing comments; missing paths
+  return strict exit `1` instead of `0`, and read/parse failures propagate.
+  Removing decorators restores callable type signatures instead of `Any`.
+  Catalog matching remains heuristic and does not prove numerical correctness.
+- <a id="v080-provenance"></a>**P D01–D07/D10:** removed the subsystem with
+  mutation-history collisions, ignored replay substitutions (`120` instead
+  of `400`), complex hash/inspection loss, broken disk retrieval, sparse and
+  bfloat16 recording errors, incorrect batched/empty inspection, scale-dependent
+  cosine (`3.9999984000006404e-7` for a self-comparison), and import-dependent
+  MCP registration. These features were removed, not repaired or retained
+  behind compatibility shims.
+
 ## [0.7.0] - 2026-07-08
 
 ### Added
