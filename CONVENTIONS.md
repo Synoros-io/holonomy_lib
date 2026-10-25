@@ -145,16 +145,28 @@ once and pass through.
 
 ### 3.4 Rank and pseudoinverse tolerance
 
-Use `torch.linalg.pinv(A, hermitian=True)` and
-`torch.linalg.matrix_rank(A, hermitian=True)` for symmetric matrices,
-with their dtype- and size-aware default tolerances. Their default relative
-threshold scales with `max(m, n) * torch.finfo(dtype).eps`; a fixed `1e-9`
-relative cutoff can mistake float32 roundoff for a nonzero eigenvalue.
-Do not use the numerical floor in §3.1 as a rank threshold.
+Do not apply one rank cutoff to a whole padded batch or a whole
+multi-component matrix. A single cutoff is blind to the scale of each
+component and changes with the padding next to a batch member. Prefer
+constructions that need no global cutoff:
 
-If an API exposes an explicit absolute tolerance, document its units and
-meaning. Sparse sheaf kernel filtering uses the analogous matrix-size and
-dtype scale because it does not compute the full dense rank.
+- Integer invariants from exact combinatorial matrices. Betti numbers use
+  ranks of the 0/±1 boundary matrices in float64, per batch member, with a
+  tolerance set by that member's own sizes.
+- Grounded, per-component factorizations instead of a pseudoinverse.
+  Effective resistance scales each component by its maximum weighted degree,
+  adds the projector onto its constants, and uses Cholesky.
+- Eigenvalue classification against the accuracy the eigensolver achieved.
+  Sheaf kernel filtering compares each mode with its residual bound and a
+  matrix-scale tolerance.
+
+Where a rank or pseudoinverse is unavoidable, use
+`torch.linalg.matrix_rank(A, hermitian=True)` or
+`torch.linalg.pinv(A, hermitian=True)` per member, with their dtype- and
+size-aware defaults. A fixed `1e-9` relative cutoff can mistake float32
+roundoff for a nonzero eigenvalue. Do not use the numerical floor in §3.1
+as a rank threshold. If an API exposes an explicit tolerance, document its
+units and meaning.
 
 ---
 
@@ -184,11 +196,13 @@ the earlier values. Verify the actual gradient path before optimizing storage.
 
 ### 4.3 Tile when memory is the bottleneck
 
-The `(B, n², n)` Sinkhorn pair structure was the canonical example:
-materializing it explodes RAM at modest `n`. The fix is
-**tile-over-pairs** with a configurable `tile_size` parameter
-(default `SINKHORN_TILE_DEFAULT = 256`). Future memory-bound
-primitives should follow the same pattern.
+Ollivier transport is the canonical example. Solving every pair over
+full length-`n` measures needs `(B, n², n)` storage and `O(B n⁴)` work.
+Each lazy-walk measure lives on one node's neighborhood, so the solver
+gathers those supports (width: largest degree plus one) and tiles over
+pairs with a configurable `tile_size` (default
+`SINKHORN_TILE_DEFAULT = 256`). Future memory-bound primitives should
+follow the same pattern: shrink the problem to its support, then tile.
 
 ### 4.4 Algorithm switching
 

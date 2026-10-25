@@ -115,9 +115,17 @@ choose execution settings, or `--no-browser` to print the URL only.
   Full/near-full requests can use dense `eigh`. SciPy computes in CPU float64
   before restoring output placement and dtype. Sparse eigensolvers are not
   differentiable.
-- Ollivier curvature uses regularized Sinkhorn transport and warns when either
-  marginal has not converged. More iterations may be needed; a warning is not
-  an accuracy certificate. Augmented Forman curvature accepts binary adjacency only.
+- Ollivier curvature solves entropy-regularized transport on neighborhood
+  supports and warns when either marginal has not converged. At the defaults
+  the karate club is within 5.6e-4 of exact transport; a result without a
+  warning still carries entropic bias that grows with `reg`. Adjacency values
+  serve both as edge lengths and as random-walk weights, so interpret weighted
+  results with care. Augmented Forman curvature accepts binary adjacency only.
+- Ricci flow with surgery separates clear community structure such as a ring
+  of cliques. It does not recover the two factions of the karate club at any
+  setting we swept.
+- Gradients through `cg` are unreliable when it converges in very few
+  iterations (an identity-matrix gradcheck fails). This predates 0.8.0 and is open.
 - Effective resistance and commute time are `inf` between disconnected components.
   Diffusion maps warn on disconnected graphs and require nonnegative integer time.
 

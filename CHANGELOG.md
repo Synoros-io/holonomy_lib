@@ -31,10 +31,24 @@ version numbers follow [Semantic Versioning](https://semver.org).
   `candidate_tile_size`, Ollivier `sync_every`, and flow
   `sinkhorn_sync_every`. `GraphSheaf.trivial(device=None)` follows the input
   edge device unless explicitly overridden.
-- Diffusion time `t` must be a nonnegative integer. Betti-number `threshold`
-  defaults to `None` for PyTorch's dtype- and size-aware rank tolerance.
-  Effective resistance uses the corresponding Hermitian pseudoinverse default;
-  sparse sheaf kernel filtering follows the same size/dtype scale.
+- Diffusion time `t` must be a nonnegative integer.
+- Betti numbers come from boundary ranks, `β_k = n_k - rank(∂_k) - rank(∂_{k+1})`,
+  computed in float64 for each batch member over its own simplex counts, so
+  input dtype and padding next to larger members no longer change the answer.
+  `threshold` (default `None`) is a relative tolerance on boundary singular values.
+- Effective resistance and commute time scale each connected component by its
+  maximum weighted degree, add the projector onto that component's constants,
+  and invert the grounded matrix by Cholesky. No global rank cutoff is applied.
+- Sheaf kernel filtering counts a mode as positive only above both its
+  eigensolver residual bound and a matrix-scale tolerance, and raises with the
+  numbers when fewer than `k` positive modes are resolved.
+- Ollivier curvature solves each transport problem on the two nodes'
+  neighborhood supports (padded to the largest degree plus one) with stabilized
+  log-domain Sinkhorn, epsilon-scaling and absorption (Schmitzer 2019).
+  Defaults are `reg=0.003`, `n_iter=65536` (a cap; finished pairs stop early)
+  and `tol=1e-4` on both marginals. On the karate club the largest edge error
+  against an exact linear program is 5.6e-4 and a CPU float64 call takes 145 ms;
+  the 0.7.0 defaults gave 0.525 and 643 ms. The Ricci flows inherit both.
 - Sparse eigensolvers explicitly reject autograd inputs; detach them to use
   the solver. Small full/near-full requests may use dense `eigh`. SVD returns
   are described as `(U, S, Vh)`, including conjugation for complex inputs.
@@ -91,7 +105,7 @@ are abbreviated. IDs identify the review findings, not public API names.
 | <a id="v080-c01b"></a>C01b | PH: 40-point circle, number of H1 bars | `361` | `1` |
 | <a id="v080-c02"></a>C02 | Lanczos I4 k=4 eigenvalues | `[1, 0, 0, 0]` | `[1, 1, 1, 1]` |
 | <a id="v080-c03"></a>C03 | Lanczos backward on diag(1,2,3,4) | `RuntimeError (saved tensor modified in place)` | `ok` |
-| <a id="v080-c04"></a>C04 | Ollivier default, 3-node weighted, k(0,1) | `0.666667` | `0.666667; now warns that Sinkhorn has not converged` |
+| <a id="v080-c04"></a>C04 | Ollivier default, 3-node weighted, k(1,2) | `0.666667` | `0.166667` (exact transport gives 1/6; no warning) |
 | <a id="v080-c05"></a>C05 | diffusion map, unit triangle t=1, \|coords\| sum | `0` | `2.72504` |
 | <a id="v080-c06"></a>C06 | float32 K5 effective resistance range | `[0.375, 0.4375]` | `[0.4, 0.4]` |
 | <a id="v080-c07"></a>C07 | shift-invert SA on diag(1e8,2e8,3e8) | `RuntimeError (false singular shift-invert breakdown)` | `[1e+08]` |
@@ -104,6 +118,27 @@ are abbreviated. IDs identify the review findings, not public API names.
 | <a id="v080-c06b"></a>C06b | float32 7-cycle Betti numbers | `[0, 0]` | `[1, 1]` |
 
 Additional corrections and checks from the implementation reviews:
+
+- Fréchet mean gradients with respect to points and weights use the implicit
+  function theorem at the returned mean instead of differentiating through the
+  iterations. A singular stationarity Jacobian gives NaN gradients for that
+  batch member only, and members no longer influence each other's gradients.
+- Fixed-rank SVD backward uses Townsend's `1 / (s_j² - s_i²)` terms for every
+  pair of distinct singular values, however close; only exactly equal values
+  take the removable limit.
+- Stereographic `log` near the boundary takes its magnitude from the stable
+  distance over the conformal factor and its direction from a Möbius
+  difference, so float32 points at radius 0.9999 give finite logs and
+  `log(x, x) = 0`.
+- `model_ball_volume` no longer overflows or underflows when the volume itself
+  is representable. `sn_kappa` evaluates its series argument as `(κt)t`, so
+  large `t` stays finite.
+- SO(3) `exp` uses Rodrigues' formula with Taylor coefficients near zero; its
+  derivative at zero is the skew generators and float32 results stay
+  orthogonal at 1e6 rad.
+- LSQR substitutes safe Givens inputs for finished batch members, so gradients
+  are finite. Normalized Ricci flows guard only an exactly zero norm instead of
+  clamping at an absolute `1e-9`, which distorted graphs at very small scale.
 
 - **B01/B02/B18/B24:** metric-aware gradients repair SPD optimization.
   Daleckii–Krein derivatives handle repeated SPD eigenvalues; fixed-rank
