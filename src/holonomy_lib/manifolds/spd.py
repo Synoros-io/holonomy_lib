@@ -42,11 +42,91 @@ References:
 
 from __future__ import annotations
 
+from typing import Any, Literal
+
 import torch
+from torch.autograd.function import once_differentiable
+
+_MatrixFunction = Literal["sqrt", "inv_sqrt", "exp", "log"]
+
+
+class _SymmetricMatrixFunction(torch.autograd.Function):
+    """Spectral functions with the continuous Daleckii-Krein derivative.
+
+    Eigenvectors are only coordinates for the derivative, so repeated
+    eigenvalues do not introduce the singular eigenvector derivatives of eigh.
+    This backward implements first derivatives, not higher-order derivatives.
+
+    References:
+      Higham (2008), Functions of Matrices, Theorem 3.11.
+    """
+
+    @staticmethod
+    def forward(ctx: Any, matrix: torch.Tensor, kind: _MatrixFunction) -> torch.Tensor:
+        values, vectors = torch.linalg.eigh(0.5 * (matrix + matrix.mT))
+        if kind != "exp":
+            values = values.clamp_min(torch.finfo(matrix.dtype).tiny)
+        if kind == "sqrt":
+            transformed = values.sqrt()
+        elif kind == "inv_sqrt":
+            transformed = values.rsqrt()
+        elif kind == "exp":
+            transformed = values.exp()
+        else:
+            transformed = values.log()
+        ctx.kind = kind
+        ctx.save_for_backward(values, vectors, transformed)
+        return (vectors * transformed.unsqueeze(-2)) @ vectors.mT
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+        values, vectors, transformed = ctx.saved_tensors
+        left, right = values.unsqueeze(-1), values.unsqueeze(-2)
+        gap = left - right
+        # The midpoint derivative has O(gap²) error. Switching at sqrt(eps)
+        # times the local eigenvalue scale keeps that error at roundoff.
+        scale = torch.maximum(left.abs(), right.abs())
+        close = gap.abs() <= torch.finfo(values.dtype).eps**0.5 * scale
+        safe_gap = torch.where(close, torch.ones_like(gap), gap)
+        midpoint = 0.5 * (left + right)
+        if ctx.kind == "sqrt":
+            divided = (left.sqrt() + right.sqrt()).reciprocal()
+            derivative = 0.5 * midpoint.rsqrt()
+        elif ctx.kind == "inv_sqrt":
+            roots = left.sqrt() * right.sqrt()
+            divided = -1.0 / (roots * (left.sqrt() + right.sqrt()))
+            derivative = -0.5 * midpoint.rsqrt() / midpoint
+        elif ctx.kind == "log":
+            # log1p retains the small difference between nearby eigenvalues.
+            low = torch.minimum(left, right)
+            nearby = gap.abs() <= low
+            relative_gap = torch.where(nearby, gap.abs(), 0.0) / low
+            local = torch.log1p(relative_gap) / safe_gap.abs()
+            log_difference = transformed.unsqueeze(-1) - transformed.unsqueeze(-2)
+            divided = torch.where(nearby, local, log_difference / safe_gap)
+            derivative = midpoint.reciprocal()
+        else:
+            # Factor out the larger exponential to avoid expm1 overflow.
+            high = torch.maximum(transformed.unsqueeze(-1), transformed.unsqueeze(-2))
+            divided = high * (-torch.expm1(-gap.abs())) / safe_gap.abs()
+            derivative = midpoint.exp()
+        loewner = torch.where(close, derivative, divided)
+        local_grad = vectors.mT @ (0.5 * (grad + grad.mT)) @ vectors
+        return vectors @ (loewner * local_grad) @ vectors.mT, None
+
+
+def _symmetric_function(matrix: torch.Tensor, kind: _MatrixFunction) -> torch.Tensor:
+    return _SymmetricMatrixFunction.apply(matrix, kind)
 
 
 class SPDManifold:
     """Affine-invariant SPD(n) manifold, GPU-native + batched-first.
+
+    Spectral exp/log/distance and whitening support first derivatives at
+    repeated eigenvalues through a Daleckii-Krein backward. Higher-order
+    derivatives of these operations are not implemented.
+
 
     Args:
       n: matrix size (operations work on (B, n, n) symmetric tensors).
@@ -98,15 +178,21 @@ class SPDManifold:
 
         References:
           Anderson, T. W. (2003). An Introduction to Multivariate Statistical
-            Analysis, 3rd ed., chapter 7 — Wishart distribution.
+            Analysis, 3rd ed., chapter 7; Wishart distribution.
 
         Returns:
           Tensor of shape (B, n, n).
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
-        A = torch.randn(batch_size, self.n, self.n, generator=generator,
-                        device=self.device, dtype=self.dtype)
+        A = torch.randn(
+            batch_size,
+            self.n,
+            self.n,
+            generator=generator,
+            device=generator.device if generator is not None else self.device,
+            dtype=self.dtype,
+        ).to(self.device)
         return torch.bmm(A, A.mT)
 
     def is_spd(self, S: torch.Tensor) -> torch.Tensor:
@@ -114,6 +200,10 @@ class SPDManifold:
 
         Returns:
           (B,) boolean tensor.
+
+        References:
+          Pennec, Fillard, Ayache (2006), A Riemannian Framework for Tensor
+          Computing, §3, positive-definite matrices and affine-invariant geometry.
         """
         sym_err = torch.linalg.matrix_norm(S - S.mT, dim=(-2, -1))
         sym_ref = torch.linalg.matrix_norm(S, dim=(-2, -1))
@@ -154,14 +244,8 @@ class SPDManifold:
     ) -> torch.Tensor:
         """Affine-invariant inner product ⟨U, V⟩_S = tr(S⁻¹ U S⁻¹ V).
 
-        Computed via solve rather than explicit inverse for numerical
-        stability: X = S⁻¹ U is `linalg.solve(S, U)`, then
-        Y = S⁻¹ V is `linalg.solve(S, V)`, then tr(X Y) by elementwise sum.
-
-        Note: trace(AB) = Σ_ij A_ij B_ji = Σ_ij A_ij (Bᵀ)_ij, and since
-        U, V are symmetric (in the tangent space) the result simplifies
-        further to Σ A * B elementwise, but we use the general formula
-        to keep the implementation correct for any ambient inputs.
+        A shared Cholesky factor computes both solves. The trace contracts
+        transposed indices; the solved matrices need not be symmetric.
 
         References:
           Pennec et al. (2006), eq. 4.
@@ -172,36 +256,42 @@ class SPDManifold:
         Returns:
           (B,) inner products.
         """
-        S_inv_U = torch.linalg.solve(S, U)  # (B, n, n)
-        S_inv_V = torch.linalg.solve(S, V)  # (B, n, n)
+        factor = torch.linalg.cholesky(S)
+        S_inv_U = torch.cholesky_solve(U, factor)
+        S_inv_V = torch.cholesky_solve(V, factor)
         # tr(X Y) = sum_{i,j} X_ij Y_ji = sum_{i,j} X_ij (Yᵀ)_ij
         return (S_inv_U * S_inv_V.mT).sum(dim=(-2, -1))
 
     def norm(self, S: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
-        """Riemannian norm sqrt(⟨V, V⟩_S). Shape (B,)."""
-        return torch.sqrt(self.inner(S, V, V))
+        """Frobenius norm of the Cholesky-whitened tangent, shape (B,).
+
+        Uses PyTorch's zero subgradient at a zero tangent.
+
+        References:
+          Pennec et al. (2006), eq. 4.
+        """
+        factor = torch.linalg.cholesky(S)
+        left = torch.linalg.solve_triangular(factor, V, upper=False)
+        whitened = torch.linalg.solve_triangular(factor, left.mT, upper=False).mT
+        return torch.linalg.vector_norm(whitened, dim=(-2, -1))
+
+    def egrad_to_rgrad(self, point: torch.Tensor, egrad: torch.Tensor) -> torch.Tensor:
+        """Convert an ambient gradient G to S sym(G) S, shape (B, n, n).
+
+        Args:
+          point: (B, n, n) base point.
+          egrad: (B, n, n) Euclidean gradient.
+        Returns:
+          (B, n, n) metric gradient in tangent coordinates.
+
+        References:
+          Absil, Mahony, Sepulchre (2008), §3.6; Pennec et al. (2006), eq. 4.
+        """
+        return point @ self.projection(point, egrad) @ point
 
     # ----------------------------------------------------------------
     # Exponential and logarithmic maps, geodesic distance
     # ----------------------------------------------------------------
-
-    @staticmethod
-    def _eigh_symmetric_func(
-        S: torch.Tensor, func
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply a scalar function to the eigenvalues of a symmetric SPD S.
-
-        Returns (eigvals, eigvecs, S_func) where
-          S_func = U diag(func(λ)) Uᵀ.
-
-        Used to build S^{1/2}, S^{−1/2}, log S, etc.
-        """
-        eigvals, eigvecs = torch.linalg.eigh(S)  # (B, n), (B, n, n)
-        func_vals = func(eigvals)
-        S_func = torch.matmul(
-            eigvecs * func_vals.unsqueeze(dim=-2), eigvecs.mT
-        )
-        return eigvals, eigvecs, S_func
 
     def _sqrt_and_inv_sqrt(
         self, S: torch.Tensor
@@ -217,15 +307,7 @@ class SPDManifold:
         clamp, `torch.rsqrt(0)` would propagate `inf` through all
         downstream exp/log/distance computations.
         """
-        eigvals, eigvecs = torch.linalg.eigh(S)
-        floor = torch.finfo(S.dtype).tiny
-        sqrt_eig = torch.sqrt(eigvals.clamp(min=floor))
-        inv_sqrt_eig = torch.reciprocal(sqrt_eig)
-        S_sqrt = torch.matmul(eigvecs * sqrt_eig.unsqueeze(dim=-2), eigvecs.mT)
-        S_inv_sqrt = torch.matmul(
-            eigvecs * inv_sqrt_eig.unsqueeze(dim=-2), eigvecs.mT
-        )
-        return S_sqrt, S_inv_sqrt
+        return _symmetric_function(S, "sqrt"), _symmetric_function(S, "inv_sqrt")
 
     def precompute_whitening(
         self, S: torch.Tensor,
@@ -240,7 +322,11 @@ class SPDManifold:
         O(n³) and dominates the operations on large n.
 
         Returns:
-          (S_sqrt, S_inv_sqrt) — both (..., n, n), symmetric.
+          (S_sqrt, S_inv_sqrt); both (..., n, n), symmetric.
+
+        References:
+          Pennec, Fillard, Ayache (2006), A Riemannian Framework for Tensor
+          Computing, §3, positive-definite matrices and affine-invariant geometry.
         """
         return self._sqrt_and_inv_sqrt(S)
 
@@ -265,13 +351,13 @@ class SPDManifold:
         S_sqrt, S_inv_sqrt = whitening if whitening is not None \
                                        else self._sqrt_and_inv_sqrt(S)
         inner = S_inv_sqrt @ V @ S_inv_sqrt
-        # Symmetrize against numerical drift before matrix_exp; result of
+        # Symmetrize against numerical drift before the spectral exponential; result of
         # symmetric @ symmetric @ symmetric is symmetric in exact arithmetic.
         inner = 0.5 * (inner + inner.mT)
         # The outer S_sqrt @ ... @ S_sqrt is symmetric in exact arithmetic
         # but accumulates float drift; symmetrize so callers can chain
         # exp() into is_spd / further geodesics without false negatives.
-        out = S_sqrt @ torch.matrix_exp(inner) @ S_sqrt
+        out = S_sqrt @ _symmetric_function(inner, "exp") @ S_sqrt
         return 0.5 * (out + out.mT)
 
     def log(
@@ -298,7 +384,7 @@ class SPDManifold:
                                        else self._sqrt_and_inv_sqrt(S)
         inner = S_inv_sqrt @ T @ S_inv_sqrt
         inner = 0.5 * (inner + inner.mT)  # symmetrize
-        _, _, log_inner = self._eigh_symmetric_func(inner, torch.log)
+        log_inner = _symmetric_function(inner, "log")
         # log_S(T) lives in Sym(n); symmetrize the outer product to
         # absorb float drift, consistent with exp() above.
         out = S_sqrt @ log_inner @ S_sqrt
@@ -334,10 +420,8 @@ class SPDManifold:
         # arithmetic (congruent to the SPD T). Clamp by the dtype tiny
         # to guard against float error driving an eigenvalue slightly
         # below zero and producing NaN through log().
-        floor = torch.finfo(S.dtype).tiny
-        eigvals = torch.linalg.eigvalsh(whitened).clamp(min=floor)
-        log_eig = torch.log(eigvals)
-        return torch.sqrt((log_eig * log_eig).sum(dim=-1))
+        log_matrix = _symmetric_function(whitened, "log")
+        return torch.linalg.vector_norm(log_matrix, dim=(-2, -1))
 
     # ----------------------------------------------------------------
     # Retraction (exponential map is the canonical choice on SPD)
@@ -356,6 +440,6 @@ class SPDManifold:
         when benchmarks demand it.
 
         References:
-          Absil-Mahony-Sepulchre (2008), §4.1 — exponential as retraction.
+          Absil-Mahony-Sepulchre (2008), §4.1; exponential as retraction.
         """
         return self.exp(S, V, whitening=whitening)

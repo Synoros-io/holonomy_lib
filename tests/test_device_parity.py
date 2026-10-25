@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Cross-device parity tests — every primitive produces the same
-numerical results on CPU and (when available) CUDA / MPS.
+"""Cross-device parity tests; every primitive produces the same
+numerical results on CPU and (when available) CUDA / ROCm.
 
 These tests run automatically on CPU and on whatever GPU is available
-through `torch.cuda.is_available()` / `torch.backends.mps.is_available()`.
+through `torch.cuda.is_available()` (including ROCm builds).
 When no GPU is present (the common case for CPU-only torch builds),
 the GPU parametrization simply skips. Run on a CUDA / ROCm machine
 to actually exercise the device-portable paths.
@@ -32,12 +32,10 @@ def _available_devices() -> list[str]:
     devs = ["cpu"]
     if torch.cuda.is_available():
         devs.append("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        devs.append("mps")
     return devs
 
 
-_HAS_GPU = len(_available_devices()) > 1
+_HAS_GPU = torch.cuda.is_available()
 
 
 def _seeded(seed: int) -> torch.Generator:
@@ -51,9 +49,9 @@ def device(request):
     return request.param
 
 
-@pytest.mark.skipif(not _HAS_GPU, reason="no GPU available — parity tests are CPU-only")
+@pytest.mark.skipif(not _HAS_GPU, reason="CUDA/ROCm unavailable")
 class TestParityOnGpu:
-    """Smoke parity: each primitive on GPU matches the CPU result.
+    """CUDA/ROCm parity: each primitive matches the CPU result.
 
     We do exact comparisons (atol=0) on operations that are
     deterministic (no random projection); approximate comparisons
@@ -190,3 +188,7 @@ class TestDeviceMovability:
         assert d.device.type == torch.device(device).type
         assert v.device.type == torch.device(device).type
         assert mfd.origin(2).device.type == torch.device(device).type
+
+        # A CPU generator must also work when the manifold is on CUDA/ROCm.
+        reference = LorentzManifold(n=3).random_point(2, generator=_seeded(23))
+        torch.testing.assert_close(x.cpu(), reference, atol=1e-12, rtol=1e-12)

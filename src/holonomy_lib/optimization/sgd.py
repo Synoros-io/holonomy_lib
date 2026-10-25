@@ -37,7 +37,7 @@ def riemannian_sgd_step(
     """Functional one-step Riemannian SGD.
 
     Args:
-      manifold: object exposing `projection(point, ambient)` and
+      manifold: object exposing `egrad_to_rgrad(point, ambient)` and
         `retraction(point, tangent)` methods (e.g.
         `FixedRankManifold`, `SPDManifold`).
       point: current point on the manifold (tensor for SPD; triple
@@ -54,15 +54,14 @@ def riemannian_sgd_step(
     References:
       Absil, P.-A., Mahony, R., Sepulchre, R. (2008). Optimization
         Algorithms on Matrix Manifolds. Princeton University Press,
-        §4.1 — retraction-based steepest descent.
+        §4.1; retraction-based steepest descent.
       Bonnabel, S. (2013). Stochastic gradient descent on Riemannian
         manifolds. IEEE TAC 58(9):2217-2229, §III.
     """
-    # Project the negative ambient gradient onto the tangent space at
-    # `point`, then retract. The projection is linear, so scaling by
-    # `-lr` before the projection is equivalent to scaling after.
-    tangent = manifold.projection(point, -lr * ambient_grad)
-    return manifold.retraction(point, tangent)
+    # A tangent projection alone only converts gradients for an embedded
+    # Euclidean metric. The manifold must account for its metric first.
+    tangent = manifold.egrad_to_rgrad(point, ambient_grad)
+    return manifold.retraction(point, -lr * tangent)
 
 
 class RiemannianSGD(RiemannianOptimizer):
@@ -70,7 +69,7 @@ class RiemannianSGD(RiemannianOptimizer):
 
     Args:
       manifold: the underlying manifold object (see `riemannian_sgd_step`).
-      lr: learning rate. Default `1e-2` (the torch.optim.SGD default).
+      lr: learning rate. Default `1e-2` (the library's existing default).
 
     Example:
       >>> from holonomy_lib.manifolds import SPDManifold
@@ -89,4 +88,10 @@ class RiemannianSGD(RiemannianOptimizer):
         self.lr = lr
 
     def step(self, point: Any, ambient_grad: Any) -> Any:
+        """Convert the ambient gradient and retract one descent step.
+
+        References:
+          Bonnabel (2013), Stochastic Gradient Descent on Riemannian
+          Manifolds, §III.
+        """
         return riemannian_sgd_step(self.manifold, point, ambient_grad, self.lr)

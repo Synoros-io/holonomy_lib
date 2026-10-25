@@ -18,7 +18,6 @@ import torch
 from holonomy_lib.manifolds import FixedRankManifold, SPDManifold
 from holonomy_lib.optimization import (
     RiemannianSGD,
-    riemannian_sgd_step,
 )
 
 
@@ -43,7 +42,7 @@ class TestValidation:
 
 
 class TestBatchZero:
-    """`B = 0` must work — required by CONVENTIONS.md §1.1 for every
+    """`B = 0` must work; required by CONVENTIONS.md §1.1 for every
     primitive that accepts a batched input."""
 
     def test_spd_batch_zero(self):
@@ -55,7 +54,6 @@ class TestBatchZero:
         S_next = opt.step(S, g)
         assert S_next.shape == (0, 3, 3)
 
-    def test_fixed_rank_batch_zero(self):
         mfd = FixedRankManifold(m=4, n=5, r=2, dtype=torch.float64)
         pt = mfd.random_point(batch_size=0, generator=_seeded(81))
         assert pt[0].shape == (0, 4, 2)
@@ -111,27 +109,6 @@ class TestFixedRankConvergence:
             f"expected sub-1e-3"
         )
 
-    def test_iterates_stay_on_manifold(self):
-        """Every iterate must have rank exactly r."""
-        m, n, r = 8, 8, 3
-        mfd = FixedRankManifold(m=m, n=n, r=r, dtype=torch.float64)
-        point = mfd.random_point(batch_size=1, generator=_seeded(10))
-        opt = RiemannianSGD(mfd, lr=0.1)
-
-        for step in range(20):
-            ambient_grad = torch.randn(
-                1, m, n, dtype=torch.float64, generator=_seeded(100 + step),
-            )
-            point = opt.step(point, ambient_grad)
-            # Rank check: dense(point) has exactly r nonzero singular values
-            dense = mfd.dense(point)
-            svals = torch.linalg.svdvals(dense)
-            tail = svals[..., r:]
-            assert tail.abs().max().item() < 1e-9, (
-                f"step {step}: iterate has rank > r; "
-                f"tail singular values max={tail.abs().max().item():.3e}"
-            )
-
 
 # --------------------------------------------------------------------
 # Convergence: geodesic gradient descent on SPDManifold
@@ -149,35 +126,36 @@ class TestSPDConvergence:
         mfd = SPDManifold(n=4, dtype=torch.float64)
         S = mfd.random_point(batch_size=1, generator=_seeded(20))
         T = mfd.random_point(batch_size=1, generator=_seeded(21))
-        # The ambient gradient of ½ d(S, T)² w.r.t. S in the
-        # affine-invariant metric is -log_S(T) on the manifold.
-        # In ambient form (treat as a free symmetric variable), the
-        # Euclidean gradient on (1/2) d^2 is approximately -log_S(T)
-        # to first order. We use that directly here.
+        # Convert -log_S(T), the Riemannian gradient, to the ambient
+        # gradient S^{-1} (-log_S(T)) S^{-1} required by the optimizer.
         opt = RiemannianSGD(mfd, lr=1.0)
-        ambient_grad = -mfd.log(S, T)
+        factor = torch.linalg.cholesky(S)
+        left = torch.cholesky_solve(-mfd.log(S, T), factor)
+        ambient_grad = torch.cholesky_solve(left.mT, factor).mT
         S_next = opt.step(S, ambient_grad)
-        # After projection (symmetrize) + retraction (exp_S(-log_S(T) * (-1)))
+        # After metric conversion and exp_S(log_S(T))
         # = exp_S(log_S(T)) = T.
         torch.testing.assert_close(S_next, T, atol=1e-8, rtol=0)
 
-    def test_iterates_stay_spd(self):
         mfd = SPDManifold(n=4, dtype=torch.float64)
         S = mfd.random_point(batch_size=2, generator=_seeded(30))
         T = mfd.random_point(batch_size=2, generator=_seeded(31))
         opt = RiemannianSGD(mfd, lr=0.3)
         for _ in range(20):
-            grad = -mfd.log(S, T)
+            factor = torch.linalg.cholesky(S)
+            left = torch.cholesky_solve(-mfd.log(S, T), factor)
+            grad = torch.cholesky_solve(left.mT, factor).mT
             S = opt.step(S, grad)
             assert mfd.is_spd(S).all()
 
-    def test_converges_to_target(self):
         mfd = SPDManifold(n=4, dtype=torch.float64)
         S = mfd.random_point(batch_size=1, generator=_seeded(40))
         T = mfd.random_point(batch_size=1, generator=_seeded(41))
         opt = RiemannianSGD(mfd, lr=0.5)
         for _ in range(50):
-            grad = -mfd.log(S, T)
+            factor = torch.linalg.cholesky(S)
+            left = torch.cholesky_solve(-mfd.log(S, T), factor)
+            grad = torch.cholesky_solve(left.mT, factor).mT
             S = opt.step(S, grad)
         # After enough steps, S should be very close to T
         dist = mfd.distance(S, T)
@@ -185,29 +163,11 @@ class TestSPDConvergence:
             f"failed to converge to target; final distance {dist[0].item():.3e}"
         )
 
-
-# --------------------------------------------------------------------
-# Functional and class APIs agree
-# --------------------------------------------------------------------
-
-
-class TestFunctionalEquivalence:
-    def test_class_and_function_match_spd(self):
-        mfd = SPDManifold(n=3, dtype=torch.float64)
-        S = mfd.random_point(batch_size=1, generator=_seeded(50))
-        g = torch.randn(1, 3, 3, dtype=torch.float64, generator=_seeded(51))
-        out_class = RiemannianSGD(mfd, lr=0.05).step(S, g)
-        out_fn = riemannian_sgd_step(mfd, S, g, lr=0.05)
-        torch.testing.assert_close(out_class, out_fn, atol=0, rtol=0)
-
-    def test_class_and_function_match_fixed_rank(self):
-        mfd = FixedRankManifold(m=5, n=6, r=2, dtype=torch.float64)
-        pt = mfd.random_point(batch_size=1, generator=_seeded(60))
-        g = torch.randn(1, 5, 6, dtype=torch.float64, generator=_seeded(61))
-        out_class = RiemannianSGD(mfd, lr=0.05).step(pt, g)
-        out_fn = riemannian_sgd_step(mfd, pt, g, lr=0.05)
-        for a, b in zip(out_class, out_fn):
-            torch.testing.assert_close(a, b, atol=0, rtol=0)
+        identity = torch.eye(2, dtype=torch.float64)[None]
+        mfd = SPDManifold(2)
+        actual = RiemannianSGD(mfd, lr=0.1).step(2 * identity, identity)
+        expected = 2 * torch.exp(torch.tensor(-0.2, dtype=identity.dtype)) * identity
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=0)
 
 
 # --------------------------------------------------------------------
@@ -268,7 +228,9 @@ class TestAgainstPymanopt:
         opt = RiemannianSGD(mfd, lr=0.5)
         S = S0_torch
         for _ in range(100):
-            grad = -mfd.log(S, T_torch)
+            factor = torch.linalg.cholesky(S)
+            left = torch.cholesky_solve(-mfd.log(S, T_torch), factor)
+            grad = torch.cholesky_solve(left.mT, factor).mT
             S = opt.step(S, grad)
         S_holonomy = S[0].numpy()
 

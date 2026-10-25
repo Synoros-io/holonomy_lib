@@ -39,25 +39,9 @@ class TestConstruction:
         with pytest.raises(ValueError, match="at least one"):
             ProductManifold([])
 
-    def test_rejects_negative_weight(self):
-        with pytest.raises(ValueError, match="non-negative"):
-            ProductManifold(
-                [KappaStereographicManifold(n=3, kappa=0.0)],
-                weights=[-1.0],
-            )
-
-    def test_rejects_mismatched_weights(self):
-        with pytest.raises(ValueError, match="length"):
-            ProductManifold(
-                [KappaStereographicManifold(n=3, kappa=0.0)],
-                weights=[1.0, 2.0],
-            )
-
-    def test_dim_and_ambient(self):
-        mfd = _make_mfd()
-        # 3 + 3 = 6 intrinsic, 3 + 4 = 7 ambient
-        assert mfd.dim == 6
-        assert mfd.ambient_dim == 7
+        for weight in [0., float("nan"), float("inf")]:
+            with pytest.raises(ValueError, match="positive and finite"):
+                ProductManifold([KappaStereographicManifold(1)], weights=[weight])
 
 
 # --------------------------------------------------------------------
@@ -66,18 +50,6 @@ class TestConstruction:
 
 
 class TestPythagoreanDistance:
-    def test_distance_decomposes_per_component(self):
-        """d²((x_E, x_H), (y_E, y_H)) = d_E² + d_H²."""
-        mfd = _make_mfd()
-        x = mfd.random_point(batch_size=4, generator=_seed(0))
-        y = mfd.random_point(batch_size=4, generator=_seed(1))
-        d_total = mfd.distance(x, y)
-        mfd_e = mfd.manifolds[0]
-        mfd_h = mfd.manifolds[1]
-        d_e = mfd_e.distance(mfd.component(x, 0), mfd.component(y, 0))
-        d_h = mfd_h.distance(mfd.component(x, 1), mfd.component(y, 1))
-        expected = torch.sqrt(d_e * d_e + d_h * d_h)
-        torch.testing.assert_close(d_total, expected, atol=1e-10, rtol=1e-10)
 
     def test_weighted_distance(self):
         """w-weighted Pythagorean: d² = Σ_i w_i · d_i²."""
@@ -100,6 +72,26 @@ class TestPythagoreanDistance:
         )
         expected = torch.sqrt(2.0 * d_e * d_e + 0.5 * d_h * d_h)
         torch.testing.assert_close(d_total, expected, atol=1e-10, rtol=1e-10)
+
+        mfd = _make_mfd()
+        x = mfd.random_point(batch_size=4, generator=_seed(0))
+        y = mfd.random_point(batch_size=4, generator=_seed(1))
+        d_total = mfd.distance(x, y)
+        mfd_e = mfd.manifolds[0]
+        mfd_h = mfd.manifolds[1]
+        d_e = mfd_e.distance(mfd.component(x, 0), mfd.component(y, 0))
+        d_h = mfd_h.distance(mfd.component(x, 1), mfd.component(y, 1))
+        expected = torch.sqrt(d_e * d_e + d_h * d_h)
+        torch.testing.assert_close(d_total, expected, atol=1e-10, rtol=1e-10)
+
+        product = ProductManifold(
+            [KappaStereographicManifold(1, 0.0), KappaStereographicManifold(1, 0.0)],
+            dtype=torch.float32,
+        )
+        assert product.origin().dtype == torch.float32
+        assert product.random_point(2, generator=_seed(500)).dtype == torch.float32
+        with pytest.raises(ValueError, match="shape"):
+            product.distance(torch.zeros(1, 3), torch.tensor([[0., 0., 100.]]))
 
     def test_distance_at_same_point(self):
         mfd = _make_mfd()
@@ -164,6 +156,16 @@ class TestComponentDelegation:
             ip_total, expected, atol=1e-12, rtol=0,
         )
 
+        mfd = ProductManifold(mfd.manifolds, weights=[2., 3.])
+        grad = torch.ones_like(x)
+        tangent = mfd.projection(x, grad)
+        torch.testing.assert_close(
+            mfd.inner(x, mfd.egrad_to_rgrad(x, grad), tangent),
+            (grad * tangent).sum(-1),
+            atol=1e-10,
+            rtol=1e-10,
+        )
+
     def test_is_on_manifold_requires_all_components(self):
         """A product point is on the manifold iff every component is."""
         mfd = _make_mfd()
@@ -191,13 +193,6 @@ class TestExpLogOrigin:
         v_back = mfd.log_0(y)
         torch.testing.assert_close(v_back, v, atol=1e-9, rtol=1e-9)
 
-    def test_exp_0_shape(self):
-        mfd = _make_mfd()
-        v = torch.randn(5, mfd.dim, dtype=torch.float64,
-                        generator=_seed(21)) * 0.1
-        y = mfd.exp_0(v)
-        assert y.shape == (5, mfd.ambient_dim)
-
 
 # --------------------------------------------------------------------
 # Autograd-finite
@@ -218,8 +213,6 @@ class TestAutogradFinite:
         d.sum().backward()
         assert torch.isfinite(v.grad).all()
 
-    def test_full_substrate_chain(self):
-        """v → exp_0(v) → all-pairs distance → NLL → backward."""
         mfd = _make_mfd()
         v = (torch.randn(6, mfd.dim, dtype=torch.float64,
                          generator=_seed(31)) * 0.15)

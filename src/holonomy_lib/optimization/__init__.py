@@ -7,10 +7,10 @@ Currently implemented:
   RiemannianSGD(manifold, lr)  : steepest descent on a manifold.
 
 The optimizer wraps the existing `FixedRankManifold` / `SPDManifold`
-`projection` + `retraction` API. The flow is:
+`egrad_to_rgrad` + `retraction` API. The flow is:
 
   1. Caller computes the ambient gradient `g` of the objective.
-  2. `optimizer.step(point, g)` projects `g` to the tangent space at
+  2. `optimizer.step(point, g)` converts `g` using the metric at
      `point`, scales by `-lr`, and retracts back onto the manifold.
   3. Returns the new point. Caller drives the loop.
 
@@ -20,8 +20,8 @@ training loops.
 
 Why no Adam (or RMSProp, AdamW, ...): adaptive step-size schemes are
 user-side ergonomics, not part of the math of optimization on a
-manifold. SGD's projection + retraction *is* the Riemannian gradient
-step; everything else is preconditioning. Users who want Adam-style
+manifold. SGD uses metric gradient conversion followed by retraction.
+Users who want Adam-style
 adaptive rates can compute their adaptive step in ambient space and
 pass the rescaled gradient into `step()`.
 

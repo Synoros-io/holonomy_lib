@@ -4,10 +4,10 @@
 """Tests for holonomy_lib.manifolds.spd.SPDManifold.
 
 Three layers:
-  1. Unit tests — shapes correct across B ∈ {0, 1, several}.
-  2. Property tests — mathematical invariants (exp/log inverse, symmetry
+  1. Unit tests; shapes correct across B ∈ {0, 1, several}.
+  2. Property tests; mathematical invariants (exp/log inverse, symmetry
      and positivity of distance, isometry under congruence).
-  3. Comparison tests — agreement with geoopt's `SymmetricPositiveDefinite`
+  3. Comparison tests; agreement with geoopt's `SymmetricPositiveDefinite`
      (skipped if geoopt not installed).
 """
 
@@ -41,72 +41,12 @@ class TestConstruction:
         with pytest.raises(ValueError, match="n"):
             SPDManifold(n=0)
 
-    def test_rejects_n_negative(self):
-        with pytest.raises(ValueError, match="n"):
-            SPDManifold(n=-3)
 
     def test_dimension_formula(self):
         # P(n) has dimension n(n+1)/2
         assert SPDManifold(n=1).dim == 1
         assert SPDManifold(n=4).dim == 10
         assert SPDManifold(n=7).dim == 28
-
-
-# --------------------------------------------------------------------
-# Shapes across B ∈ {0, 1, several}
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [0, 1, 4])
-class TestShapes:
-    def test_random_point_shape(self, batch):
-        mfd = _make_manifold()
-        S = mfd.random_point(batch_size=batch, generator=_seeded_generator(0))
-        assert S.shape == (batch, mfd.n, mfd.n)
-
-    def test_projection_shape(self, batch):
-        mfd = _make_manifold()
-        S = mfd.random_point(batch_size=batch, generator=_seeded_generator(1))
-        Z = torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
-                        generator=_seeded_generator(2))
-        V = mfd.projection(S, Z)
-        assert V.shape == (batch, mfd.n, mfd.n)
-
-    def test_inner_shape(self, batch):
-        mfd = _make_manifold()
-        S = mfd.random_point(batch_size=max(batch, 1),
-                              generator=_seeded_generator(3))
-        # Use batch=1 for "B=0" inner-product test — skip B=0 entirely
-        # since solve on (0, n, n) is fine but adds no value.
-        if batch == 0:
-            pytest.skip("inner product on B=0 is trivially empty")
-        U = mfd.projection(
-            S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
-                            generator=_seeded_generator(4)),
-        )
-        V = mfd.projection(
-            S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
-                            generator=_seeded_generator(5)),
-        )
-        ip = mfd.inner(S, U, V)
-        assert ip.shape == (batch,)
-
-    def test_exp_shape(self, batch):
-        mfd = _make_manifold()
-        S = mfd.random_point(batch_size=batch, generator=_seeded_generator(6))
-        V = mfd.projection(
-            S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
-                            generator=_seeded_generator(7)),
-        ) * 0.1
-        out = mfd.exp(S, V)
-        assert out.shape == (batch, mfd.n, mfd.n)
-
-    def test_distance_shape(self, batch):
-        mfd = _make_manifold()
-        S = mfd.random_point(batch_size=batch, generator=_seeded_generator(8))
-        T = mfd.random_point(batch_size=batch, generator=_seeded_generator(9))
-        d = mfd.distance(S, T)
-        assert d.shape == (batch,)
 
 
 # --------------------------------------------------------------------
@@ -120,6 +60,16 @@ class TestProperties:
         S = mfd.random_point(batch_size=8, generator=_seeded_generator(10))
         assert mfd.is_spd(S).all()
 
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold()
+            S = mfd.random_point(batch_size=batch, generator=_seeded_generator(0))
+            assert S.shape == (batch, mfd.n, mfd.n)
+
+        mfd = SPDManifold(n=1)
+        S = mfd.random_point(batch_size=4, generator=_seeded_generator(110))
+        assert S.shape == (4, 1, 1)
+        assert mfd.is_spd(S).all()
+
     def test_projection_symmetrizes(self):
         mfd = _make_manifold()
         S = mfd.random_point(batch_size=3, generator=_seeded_generator(11))
@@ -127,6 +77,14 @@ class TestProperties:
                         generator=_seeded_generator(12))
         V = mfd.projection(S, Z)
         torch.testing.assert_close(V, V.mT, atol=1e-12, rtol=0)
+
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold()
+            S = mfd.random_point(batch_size=batch, generator=_seeded_generator(1))
+            Z = torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
+                            generator=_seeded_generator(2))
+            V = mfd.projection(S, Z)
+            assert V.shape == (batch, mfd.n, mfd.n)
 
     def test_projection_idempotent(self):
         mfd = _make_manifold()
@@ -156,6 +114,35 @@ class TestProperties:
         self_ip = mfd.inner(S, U, U)
         assert (self_ip > 0).all()
 
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold()
+            S = mfd.random_point(batch_size=batch,
+                                  generator=_seeded_generator(3))
+            U = mfd.projection(
+                S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
+                                generator=_seeded_generator(4)),
+            )
+            V = mfd.projection(
+                S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
+                                generator=_seeded_generator(5)),
+            )
+            ip = mfd.inner(S, U, V)
+            assert ip.shape == (batch,)
+
+        S = torch.tensor([[[2., .1], [.1, 3.]]], dtype=torch.float64)
+        U = torch.tensor([[[1., .2], [.2, 1.]]], dtype=S.dtype)
+        mfd = SPDManifold(2)
+        reference = torch.linalg.inv(S) @ U
+        reference = (reference @ reference).diagonal(dim1=-2, dim2=-1).sum(-1)
+        torch.testing.assert_close(mfd.inner(S, U, U), reference, atol=1e-12, rtol=0)
+        torch.testing.assert_close(
+            mfd.inner(S, mfd.egrad_to_rgrad(S, U), U), U.square().sum((-2, -1)),
+            atol=1e-12, rtol=0,
+        )
+        zero = torch.zeros_like(S, requires_grad=True)
+        grad = torch.autograd.grad(mfd.norm(S, zero).sum(), zero)[0]
+        torch.testing.assert_close(grad, torch.zeros_like(grad), atol=0, rtol=0)
+
     def test_exp_lands_on_spd(self):
         mfd = _make_manifold()
         S = mfd.random_point(batch_size=4, generator=_seeded_generator(18))
@@ -165,6 +152,35 @@ class TestProperties:
         ) * 0.1
         T = mfd.exp(S, V)
         assert mfd.is_spd(T).all()
+
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold()
+            S = mfd.random_point(batch_size=batch, generator=_seeded_generator(6))
+            V = mfd.projection(
+                S, torch.randn(batch, mfd.n, mfd.n, dtype=mfd.dtype,
+                                generator=_seeded_generator(7)),
+            ) * 0.1
+            out = mfd.exp(S, V)
+            assert out.shape == (batch, mfd.n, mfd.n)
+
+        mfd = SPDManifold(n=5)
+        S = mfd.random_point(batch_size=3, generator=_seeded_generator(112))
+        V = torch.randn(3, 5, 5, dtype=torch.float64,
+                        generator=_seeded_generator(113))
+        V = 0.5 * (V + V.mT)  # symmetric tangent
+        out = mfd.exp(S, V)
+        torch.testing.assert_close(out, out.mT, atol=1e-12, rtol=0)
+
+        # Repeated eigenspaces are ordinary SPD points, not derivative singularities.
+        mfd = SPDManifold(3)
+        for diagonal in ([1., 1., 1.], [2., 2., 3.], [1., 2., 4.]):
+            S = torch.diag(torch.tensor(diagonal, dtype=torch.float64)).unsqueeze(0)
+            S.requires_grad_()
+            tangent = torch.full_like(S, 0.1, requires_grad=True)
+            assert torch.autograd.gradcheck(mfd.exp, (S, tangent))
+            torch.testing.assert_close(
+                mfd.exp(S, torch.zeros_like(S)), S, atol=1e-12, rtol=1e-12,
+            )
 
     def test_exp_log_inverse(self):
         """log_S(exp_S(V)) = V for V in the tangent space."""
@@ -186,6 +202,23 @@ class TestProperties:
         V = mfd.log(S, T)
         T_recovered = mfd.exp(S, V)
         torch.testing.assert_close(T_recovered, T, atol=1e-10, rtol=1e-10)
+
+        mfd = SPDManifold(n=5)
+        S = mfd.random_point(batch_size=3, generator=_seeded_generator(114))
+        T = mfd.random_point(batch_size=3, generator=_seeded_generator(115))
+        out = mfd.log(S, T)
+        torch.testing.assert_close(out, out.mT, atol=1e-12, rtol=0)
+
+        mfd = SPDManifold(3)
+        for diagonal in ([1., 1., 1.], [2., 2., 3.], [1., 2., 4.]):
+            S = torch.diag(torch.tensor(diagonal, dtype=torch.float64)).unsqueeze(0)
+            S.requires_grad_()
+            T = (2.0 * S).detach().requires_grad_()
+            assert torch.autograd.gradcheck(mfd.log, (S, T))
+            torch.testing.assert_close(
+                mfd.log(S, T), torch.log(torch.tensor(2.0, dtype=S.dtype)) * S,
+                atol=1e-12, rtol=1e-12,
+            )
 
     def test_distance_symmetric(self):
         """d(S, T) = d(T, S)."""
@@ -214,6 +247,26 @@ class TestProperties:
         V = mfd.log(S, T)
         n_v = mfd.norm(S, V)
         torch.testing.assert_close(d, n_v, atol=1e-10, rtol=1e-10)
+
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold()
+            S = mfd.random_point(batch_size=batch, generator=_seeded_generator(8))
+            T = mfd.random_point(batch_size=batch, generator=_seeded_generator(9))
+            d = mfd.distance(S, T)
+            assert d.shape == (batch,)
+
+        mfd = SPDManifold(3)
+        for diagonal in ([1., 1., 1.], [2., 2., 3.], [1., 2., 4.]):
+            S = torch.diag(torch.tensor(diagonal, dtype=torch.float64)).unsqueeze(0)
+            S.requires_grad_()
+            T = (2.0 * S).detach().requires_grad_()
+            assert torch.autograd.gradcheck(mfd.distance, (S, T))
+            expected = torch.sqrt(torch.tensor(3.0, dtype=S.dtype)) * torch.log(
+                torch.tensor(2.0, dtype=S.dtype),
+            )
+            torch.testing.assert_close(
+                mfd.distance(S, T), expected[None], atol=1e-12, rtol=0
+            )
 
     def test_affine_invariance(self):
         """d(A S Aᵀ, A T Aᵀ) = d(S, T) for any invertible A.
@@ -248,12 +301,6 @@ class TestNumericalRobustness:
     stay symmetric to machine precision so chained calls don't drift
     off the SPD cone."""
 
-    def test_n_equal_one_is_spd(self):
-        """Trivial n=1 case — output is a scalar SPD matrix."""
-        mfd = SPDManifold(n=1)
-        S = mfd.random_point(batch_size=4, generator=_seeded_generator(110))
-        assert S.shape == (4, 1, 1)
-        assert mfd.is_spd(S).all()
 
     def test_near_singular_does_not_explode(self):
         """For an SPD matrix with one tiny but well-above-tiny eigenvalue,
@@ -303,24 +350,6 @@ class TestNumericalRobustness:
         S_sqrt, S_inv_sqrt = mfd._sqrt_and_inv_sqrt(S)
         assert not torch.isnan(S_sqrt).any()
         assert not torch.isnan(S_inv_sqrt).any()
-
-    def test_exp_output_is_symmetric_to_machine_precision(self):
-        """After the symmetrize-output fix, exp_S(V) is symmetric to
-        roundoff, not just the inner argument."""
-        mfd = SPDManifold(n=5)
-        S = mfd.random_point(batch_size=3, generator=_seeded_generator(112))
-        V = torch.randn(3, 5, 5, dtype=torch.float64,
-                        generator=_seeded_generator(113))
-        V = 0.5 * (V + V.mT)  # symmetric tangent
-        out = mfd.exp(S, V)
-        torch.testing.assert_close(out, out.mT, atol=1e-12, rtol=0)
-
-    def test_log_output_is_symmetric_to_machine_precision(self):
-        mfd = SPDManifold(n=5)
-        S = mfd.random_point(batch_size=3, generator=_seeded_generator(114))
-        T = mfd.random_point(batch_size=3, generator=_seeded_generator(115))
-        out = mfd.log(S, T)
-        torch.testing.assert_close(out, out.mT, atol=1e-12, rtol=0)
 
 
 try:

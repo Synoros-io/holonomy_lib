@@ -24,9 +24,9 @@ is the generalized sine
 
 The volume integral is closed-form for integer `N-1` but has no elementary form
 for general real `N`; it is evaluated by Gauss-Legendre quadrature. The
-integrand is smooth and analytic on `[0, r]`, so the quadrature converges
-geometrically; for `κ = 0` the integrand `t^{N-1}` is a polynomial and the rule
-is exact.
+integrand can have endpoint singular derivatives for noninteger `N`, so
+quadrature then converges algebraically. For `κ = 0` and integer `N`, the
+integrand is a polynomial, exact when `N <= 2 * n_quad`.
 
 These are the model-space (comparison) quantities: on a general space with a
 Ricci lower bound `Ric ≥ (N-1) κ` they bound the true volume from above
@@ -50,14 +50,10 @@ import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
 
-# Default Gauss-Legendre node count for the model ball-volume integral
-# `∫_0^r sn_κ(t)^{N-1} dt`. The integrand is smooth/analytic on a finite
-# interval, so Gauss-Legendre converges geometrically; for `κ = 0` (integrand a
-# degree-`(N-1)` polynomial) the rule is exact for `N ≤ 2 · nodes`. 64 nodes
-# give agreement below 1e-12 with the closed forms (Euclidean, sphere,
-# hyperbolic) for `N` up to ~100 and `√κ · r` up to the model diameter
-# (validated by `tests/manifolds/test_comparison.py`). Catalog:
-# `COMPARISON_BALL_VOLUME_QUADRATURE_NODES` in `notes/magic_numbers.md`.
+# Existing quadrature default, cataloged in notes/magic_numbers.md.
+# For flat integer N the degree-(N-1) polynomial is integrated exactly when
+# N <= 2 * nodes. Fractional N can have endpoint singular derivatives and
+# requires a convergence check at the caller's desired accuracy.
 COMPARISON_BALL_VOLUME_QUADRATURE_NODES: int = 64
 
 
@@ -89,6 +85,8 @@ def _prepare(
 def _validate(kappa: torch.Tensor, N: torch.Tensor, r: torch.Tensor) -> None:
     """Value-range checks (CONVENTIONS §1.3). `.any()` is False on an empty
     batch, so `B = 0` passes."""
+    if not torch.isfinite(kappa).all() or not torch.isfinite(N).all():
+        raise ValueError("kappa and N must be finite")
     if (N < 1).any():
         raise ValueError("N must be >= 1 (effective dimension)")
     if (r < 0).any():
@@ -106,24 +104,52 @@ def _validate(kappa: torch.Tensor, N: torch.Tensor, r: torch.Tensor) -> None:
             )
 
 
-def _sn_kappa(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    """Generalized sine `sn_κ(t)`: `sin(√κ t)/√κ` (κ>0), `t` (κ=0),
-    `sinh(√-κ t)/√-κ` (κ<0). One `torch.where` branch on `sign(κ)`; the abs is
-    clamped at `finfo.tiny` so the `κ = 0` branch never divides by zero."""
-    sqrt_abs_k = torch.sqrt(kappa.abs().clamp(min=torch.finfo(kappa.dtype).tiny))
-    arg = sqrt_abs_k * t
-    spherical = torch.sin(arg) / sqrt_abs_k
-    hyperbolic = torch.sinh(arg) / sqrt_abs_k
-    return torch.where(
-        kappa > 0, spherical, torch.where(kappa < 0, hyperbolic, t),
-    )
+# From sin(z)/z = 1 - z²/3! + z⁴/5! + O(z⁶), continued in signed κ.
+SN_LINEAR = 1.0 / 6.0
+SN_QUADRATIC = 1.0 / 120.0
 
 
-# Public alias: the generalized sine is a reusable primitive. A caller may need the
-# PER-DIRECTION `sn_{κ_i}(r)` (not just the product) to build sign-split / masked
-# anisotropic fluxes -- e.g. routing spherical (κ>0) vs hyperbolic (κ<0) directions to
-# different force terms. Batched `(B, K)` kappa, `(B, 1)` r -> `(B, K)`.
-sn_kappa = _sn_kappa
+def _sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """sn_κ(t)/t, with its analytic signed-κ expansion at zero."""
+    q = kappa * t.square()
+    small = q.abs() <= torch.finfo(t.dtype).eps**0.5
+    series_q = torch.where(small, q, torch.zeros_like(q))
+    positive = (q > 0) & ~small
+    negative = (q < 0) & ~small
+    spherical_arg = torch.sqrt(torch.where(positive, q, torch.ones_like(q)))
+    hyperbolic_arg = torch.sqrt(torch.where(negative, -q, torch.ones_like(q)))
+    spherical = torch.sin(spherical_arg) / spherical_arg
+    hyperbolic = torch.sinh(hyperbolic_arg) / hyperbolic_arg
+    series = 1.0 - SN_LINEAR * series_q + SN_QUADRATIC * series_q.square()
+    return torch.where(small, series, torch.where(positive, spherical, hyperbolic))
+
+
+def sn_kappa(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """Generalized sine, differentiable in signed curvature through zero.
+
+    sn_κ(t) = sin(√κ t)/√κ for κ > 0, t for κ = 0, and
+    sinh(√(-κ) t)/√(-κ) for κ < 0. Near zero the signed-curvature
+    series starts t - κt³/6; in particular ∂κ sn_0(t) = -t³/6.
+
+    Args:
+      kappa: floating curvature tensor, any sign, broadcastable with t.
+      t: floating radial coordinate tensor; shape may include leading batches.
+        Both tensors must share a device and compatible floating dtypes.
+    Returns:
+      Tensor with the broadcast shape of kappa and t, preserving their dtype.
+
+    References:
+      Petersen (2016), Riemannian Geometry, §7.1, model-space Jacobi fields.
+    """
+    kappa, t = torch.broadcast_tensors(kappa, t)
+    return t * _sn_ratio(kappa, t)
+
+
+def _model_sn(kappa: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+    """Nonnegative model sine on the validated closed radial interval."""
+    sqrt_positive = torch.sqrt(torch.where(kappa > 0, kappa, torch.ones_like(kappa)))
+    endpoint = (kappa > 0) & (r == math.pi / sqrt_positive)
+    return torch.where(endpoint, torch.zeros_like(r), sn_kappa(kappa, r)).clamp_min(0)
 
 
 def _unit_sphere_surface_area(N: torch.Tensor) -> torch.Tensor:
@@ -150,7 +176,7 @@ def model_sphere_area(
     """
     kappa, N, r = _prepare(kappa, N, r)
     _validate(kappa, N, r)
-    return _unit_sphere_surface_area(N) * _sn_kappa(kappa, r) ** (N - 1.0)
+    return _unit_sphere_surface_area(N) * _model_sn(kappa, r) ** (N - 1.0)
 
 
 def model_ball_volume(
@@ -161,7 +187,9 @@ def model_ball_volume(
     `V = ω_{N-1} · ∫_0^r sn_κ(t)^{N-1} dt`.
 
     The integral is evaluated by `n_quad`-point Gauss-Legendre quadrature
-    (exact for `κ = 0`; geometrically convergent otherwise).
+    (exact for flat integer dimensions with `N <= 2 * n_quad`).
+    Noninteger dimensions can have endpoint singular derivatives, so their
+    quadrature convergence is algebraic rather than geometric.
 
     Args:
       kappa: `(B,)` constant sectional curvature per element (any sign).
@@ -181,12 +209,14 @@ def model_ball_volume(
         n_quad, dtype=kappa.dtype, device=kappa.device,
     )
 
-    # Map nodes ∈ (-1, 1) → t ∈ (0, r): t = ½·r·(node + 1), Jacobian = ½·r.
-    half_r = 0.5 * r.unsqueeze(-1)                          # (..., 1)
-    t = half_r * (nodes + 1.0)                              # (..., n_quad)
-    integrand = _sn_kappa(kappa.unsqueeze(-1), t) ** (N.unsqueeze(-1) - 1.0)
-    integral = (weights * integrand).sum(dim=-1) * (0.5 * r)
-    return _unit_sphere_surface_area(N) * integral
+    # Pull out r^N analytically before quadrature. The remaining integrand
+    # stays nonsingular as r -> 0, including for fractional dimensions.
+    unit_nodes = 0.5 * (nodes + 1.0)
+    t = r.unsqueeze(-1) * unit_nodes
+    ratio = unit_nodes * _sn_ratio(kappa.unsqueeze(-1), t)
+    integrand = ratio.clamp_min(0) ** (N.unsqueeze(-1) - 1.0)
+    integral = 0.5 * (weights * integrand).sum(dim=-1)
+    return _unit_sphere_surface_area(N) * r**N * integral
 
 
 def model_anisotropic_flux(
@@ -198,8 +228,8 @@ def model_anisotropic_flux(
         flux = Π_i sn_{κ_i}(r),
 
     the product of the per-direction generalized sines. This is the anisotropic
-    generalization of the isotropic geodesic-sphere factor `sn_κ(r)^{N-1}` — which
-    it recovers when all `kappas` are equal (the same factor repeated) — but here
+    generalization of the isotropic geodesic-sphere factor `sn_κ(r)^{N-1}`; which
+    it recovers when all `kappas` are equal (the same factor repeated); but here
     each principal direction contributes its OWN `sn_{κ_i}(r)`. Use as a
     curvature-matched flux for a force-decay driven by a per-direction curvature
     TENSOR, where a single scalar κ would collapse the directional structure.
@@ -211,7 +241,7 @@ def model_anisotropic_flux(
       `(B,)` anisotropic flux `Π_i sn_{κ_i}(r)`.
 
     References:
-      Petersen, P. (2016). Riemannian Geometry, 3rd ed. Springer, §7.1 — the
+      Petersen, P. (2016). Riemannian Geometry, 3rd ed. Springer, §7.1; the
       `sn_κ` volume element, taken here per principal direction (product over the
       anisotropic frame).
     """
@@ -237,5 +267,5 @@ def model_anisotropic_flux(
                 "for kappa > 0, r must be <= pi / sqrt(kappa) per direction "
                 "(that direction's model-sphere diameter)"
             )
-    sn = _sn_kappa(kappas, r.unsqueeze(-1))            # (B, K)
+    sn = _model_sn(kappas, r.unsqueeze(-1))            # (B, K)
     return sn.prod(dim=-1)                              # (B,)

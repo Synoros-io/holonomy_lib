@@ -15,9 +15,9 @@ Points are represented in SVD form (U, S, Vt) where
     Vt ∈ R^{B × r × n}   rows orthonormal (i.e. V^T)
 
 and the ambient dense matrix is `M = U @ diag(S) @ Vt`. The leading batch
-dimension B is required for all operations — pass B = 1 for single-point use.
+dimension B is required for all operations; pass B = 1 for single-point use.
 
-Tangent vectors are stored in *ambient form* — i.e. as (B, m, n) matrices
+Tangent vectors are stored in *ambient form*; i.e. as (B, m, n) matrices
 in the embedding space, with the understanding that they satisfy the
 tangent-space constraint at the corresponding point. This matches
 Vandereycken's exposition and matches the calling convention used by most
@@ -33,9 +33,10 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import torch
+from torch.autograd.function import once_differentiable
 
 from holonomy_lib.algebra.linear import truncated_svd
 
@@ -51,6 +52,67 @@ FixedRankPoint = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 # strictly faster — 37× at 1024×1024, r=32 in our CPU baseline.
 # Cataloged as `fixed_rank_randomized_threshold`.
 RETRACTION_RANDOMIZED_THRESHOLD: float = 0.25
+
+
+class _TruncatedSVD(torch.autograd.Function):
+    """First derivative of retained SVD factors without discarded-zero poles.
+
+    At repeated retained values, the derivative is defined for losses on
+    the reconstructed matrix, not arbitrary losses on nonunique factors.
+    A tie across the retained/discarded boundary is truly nondifferentiable.
+
+    References:
+      Townsend (2016), Differentiating the Singular Value Decomposition.
+      Vandereycken (2013), §2.3, metric projection retraction.
+    """
+
+    @staticmethod
+    def forward(ctx: Any, matrix: torch.Tensor, rank: int) -> FixedRankPoint:
+        u, singular, vt = torch.linalg.svd(matrix, full_matrices=False)
+        ctx.rank = rank
+        ctx.save_for_backward(u, singular, vt)
+        return u[..., :rank], singular[..., :rank], vt[..., :rank, :]
+
+    @staticmethod
+    @once_differentiable
+    def backward(
+        ctx: Any, grad_u: torch.Tensor, grad_s: torch.Tensor, grad_vt: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        u, singular, vt = ctx.saved_tensors
+        rank = ctx.rank
+        v = vt.mT
+        gu, gs, gv = (
+            torch.zeros_like(u),
+            torch.zeros_like(singular),
+            torch.zeros_like(v),
+        )
+        gu[..., :rank], gs[..., :rank], gv[..., :rank] = grad_u, grad_s, grad_vt.mT
+        a, b = u.mT @ gu, vt @ gv
+        left, right = singular.unsqueeze(-1), singular.unsqueeze(-2)
+        kept = torch.arange(singular.shape[-1], device=singular.device) < rank
+        active = kept.unsqueeze(-1) | kept.unsqueeze(-2)
+        both_kept = kept.unsqueeze(-1) & kept.unsqueeze(-2)
+        close = (left - right).abs() <= (
+            torch.finfo(singular.dtype).eps**0.5 * torch.maximum(left, right)
+        )
+        repeated = both_kept & close
+        # Only discarded/discarded and repeated-retained pairs are removable.
+        # A boundary tie remains a zero gap and signals a nonunique projection.
+        gap = right.square() - left.square()
+        safe_gap = torch.where(~active | repeated, torch.ones_like(gap), gap)
+        core = ((a - a.mT) * right + left * (b - b.mT)) / safe_gap
+        inverse = torch.where(kept, singular, torch.ones_like(singular)).reciprocal()
+        inverse = torch.where(kept, inverse, torch.zeros_like(inverse))
+        limit = 0.5 * (a * inverse.unsqueeze(-2) + b.mT * inverse.unsqueeze(-1))
+        core = torch.where(repeated, limit, torch.where(active, core, 0.0))
+        diagonal = torch.eye(
+            singular.shape[-1], dtype=torch.bool, device=singular.device
+        )
+        core = torch.where(diagonal, torch.diag_embed(gs), core)
+        grad = u @ core @ vt
+        grad = grad + ((gu - u @ a) * inverse.unsqueeze(-2)) @ vt
+        grad = grad + (u * inverse.unsqueeze(-2)) @ (gv - v @ b).mT
+        return grad, None
 
 
 class FixedRankManifold:
@@ -89,8 +151,8 @@ class FixedRankManifold:
               Slower but deterministic; pick this when downstream code
               depends on bit-for-bit reproducibility.
             - "randomized": always Halko-Martinsson-Tropp via
-              `torch.svd_lowrank`. Non-deterministic — the random
-              projection differs across calls — and approximate to
+              `torch.svd_lowrank`. Non-deterministic; the random
+              projection differs across calls; and approximate to
               ~σ_{r+1}-precision.
         """
         if r <= 0 or r > min(m, n):
@@ -136,7 +198,7 @@ class FixedRankManifold:
         invariant (S decreasing) holds; V analogous.
 
         Note: the singular-value distribution here is uniform, NOT the
-        Marchenko–Pastur or any "natural" prior on M_r — it's a convenience
+        Marchenko–Pastur or any "natural" prior on M_r; it's a convenience
         for tests/initialization, not a statistically motivated draw.
 
         References:
@@ -149,15 +211,34 @@ class FixedRankManifold:
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
         B, m, n, r = batch_size, self.m, self.n, self.r
-        A = torch.randn(B, m, r, generator=generator,
-                        device=self.device, dtype=self.dtype)
-        U, _ = torch.linalg.qr(A)
-        C = torch.randn(B, n, r, generator=generator,
-                        device=self.device, dtype=self.dtype)
-        V, _ = torch.linalg.qr(C)
+        A = torch.randn(
+            B,
+            m,
+            r,
+            generator=generator,
+            device=generator.device if generator is not None else self.device,
+            dtype=self.dtype,
+        ).to(self.device)
+        U, R = torch.linalg.qr(A)
+        U = U * torch.sign(R.diagonal(dim1=-2, dim2=-1)).unsqueeze(-2)
+        C = torch.randn(
+            B,
+            n,
+            r,
+            generator=generator,
+            device=generator.device if generator is not None else self.device,
+            dtype=self.dtype,
+        ).to(self.device)
+        V, R = torch.linalg.qr(C)
+        V = V * torch.sign(R.diagonal(dim1=-2, dim2=-1)).unsqueeze(-2)
         Vt = V.mT.contiguous()
-        S_raw = torch.rand(B, r, generator=generator,
-                           device=self.device, dtype=self.dtype)
+        S_raw = torch.rand(
+            B,
+            r,
+            generator=generator,
+            device=generator.device if generator is not None else self.device,
+            dtype=self.dtype,
+        ).to(self.device)
         S, _ = torch.sort(S_raw, dim=-1, descending=True)
         return U, S, Vt
 
@@ -172,6 +253,10 @@ class FixedRankManifold:
           point: (U, S, Vt) with shapes (B, m, r), (B, r), (B, r, n).
         Returns:
           M of shape (B, m, n).
+
+        References:
+          Vandereycken (2013), Low-Rank Matrix Completion by Riemannian
+          Optimization, §2, embedded matrix representation and metric.
         """
         U, S, Vt = point
         # Broadcast scale: U (B, m, r) times diag(S) along last dim
@@ -203,7 +288,7 @@ class FixedRankManifold:
           Vandereycken (2013), eq. 2.5.
 
         Args:
-          point: (U, S, Vt) — S is unused for projection, included for API
+          point: (U, S, Vt); S is unused for projection, included for API
             consistency.
           Z: ambient direction, shape (B, m, n).
         Returns:
@@ -232,7 +317,7 @@ class FixedRankManifold:
         represented in ambient form.
 
         References:
-          Vandereycken (2013), §2.2 — induced metric.
+          Vandereycken (2013), §2.2; induced metric.
 
         Args:
           point: unused (induced metric is point-independent in ambient form;
@@ -248,8 +333,29 @@ class FixedRankManifold:
     def norm(
         self, point: FixedRankPoint, tangent: torch.Tensor
     ) -> torch.Tensor:
-        """Riemannian norm sqrt(<v,v>) of a tangent vector. (B,)-shaped output."""
-        return torch.sqrt(self.inner(point, tangent, tangent))
+        """Riemannian norm sqrt(<v,v>) of a tangent vector. (B,)-shaped output.
+
+        References:
+          Vandereycken (2013), Low-Rank Matrix Completion by Riemannian
+          Optimization, §2, embedded matrix representation and metric.
+        """
+        return torch.linalg.vector_norm(tangent, dim=(-2, -1))
+
+    def egrad_to_rgrad(
+        self, point: FixedRankPoint, egrad: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project an ambient gradient under the embedded Frobenius metric.
+
+        Args:
+          point: factor triple (U, S, Vt).
+          egrad: (B, m, n) Euclidean gradient.
+        Returns:
+          (B, m, n) metric gradient in tangent coordinates.
+
+        References:
+          Absil, Mahony, Sepulchre (2008), §3.6; Vandereycken (2013), eq. 2.5.
+        """
+        return self.projection(point, egrad)
 
     # ----------------------------------------------------------------
     # Retraction
@@ -273,23 +379,28 @@ class FixedRankManifold:
         common ranks. The threshold is governed by
         `retraction_mode` (default "auto"); see `__init__` docstring.
 
-        Numerically may produce degenerate singular values when the
-        truncation rank coincides with a spectral gap — caller can detect
-        S[r-1] ≈ S[r] and halve the step.
+        Differentiated calls use exact SVD, regardless of mode. The backward
+        differentiates the reconstructed rank-r matrix through repeated
+        retained or discarded values. Individual factors have no unique
+        derivative at repeated retained values. A tie across the truncation
+        boundary makes the rank-r projection itself nondifferentiable.
+        Only first derivatives are implemented by the custom backward.
 
         References:
-          Absil, Mahony, Sepulchre (2008), §4.1 — retractions.
+          Absil, Mahony, Sepulchre (2008), §4.1; retractions.
           Vandereycken (2013), eq. 2.7.
-          Halko, Martinsson, Tropp (2011) — randomized SVD.
+          Halko, Martinsson, Tropp (2011); randomized SVD.
 
         Args:
-          point: (U, S, Vt) — used only to call dense().
+          point: (U, S, Vt); used only to call dense().
           tangent: ambient (B, m, n).
         Returns:
           (U', S', Vt') with shapes (B, m, r), (B, r), (B, r, n).
         """
         M_plus = self.dense(point) + tangent  # (B, m, n)
         r = self.r
+        if M_plus.requires_grad and torch.is_grad_enabled():
+            return _TruncatedSVD.apply(M_plus, r)
         mode = self.retraction_mode
         if mode == "auto":
             min_dim = min(M_plus.shape[-2], M_plus.shape[-1])

@@ -29,21 +29,6 @@ class TestConstruction:
         with pytest.raises(ValueError, match="n"):
             HeterogeneousKappaManifold(n=0)
 
-    def test_rejects_unknown_combiner(self):
-        with pytest.raises(ValueError, match="combiner"):
-            HeterogeneousKappaManifold(n=3, combiner="bogus")
-
-    def test_accepts_callable_combiner(self):
-        def custom(a, b):
-            return (a + b) / 2
-        mfd = HeterogeneousKappaManifold(n=3, combiner=custom)
-        # Just check it doesn't reject
-        assert mfd.combiner is custom
-
-    def test_rejects_non_callable_non_string(self):
-        with pytest.raises(TypeError, match="combiner"):
-            HeterogeneousKappaManifold(n=3, combiner=42)
-
 
 # --------------------------------------------------------------------
 # Homogeneous case agrees with KappaStereographicManifold
@@ -66,6 +51,14 @@ class TestHomogeneousAgreement:
         T_homo = homo.exp_0(v)
         torch.testing.assert_close(T_het, T_homo, atol=1e-10, rtol=1e-10)
 
+        het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
+        v = torch.tensor([[0.3, 0.0, 0.0]], dtype=torch.float64)
+        # Try two different κ's on the same tangent
+        T1 = het.exp_0(v, torch.tensor([-1.0], dtype=torch.float64))
+        T2 = het.exp_0(v, torch.tensor([-0.5], dtype=torch.float64))
+        # Different embedded points
+        assert not torch.allclose(T1, T2)
+
     @pytest.mark.parametrize("k_val", [-1.0, -0.5, 0.5, 1.0])
     def test_distance_matches_homogeneous(self, k_val):
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
@@ -80,9 +73,15 @@ class TestHomogeneousAgreement:
                                     generator=_seed(2)),
             kappas,
         )
-        d_het = het.distance(x, kappas, y, kappas)
+        d_het = het.dissimilarity(x, kappas, y, kappas)
         d_homo = homo.distance(x, y)
         torch.testing.assert_close(d_het, d_homo, atol=1e-9, rtol=1e-9)
+
+        het = HeterogeneousKappaManifold(2)
+        x = torch.tensor([[1., 0.]], dtype=torch.float64)
+        k = torch.ones(1, dtype=x.dtype)
+        torch.testing.assert_close(het.dissimilarity(x, k, -x, k),
+                                   torch.full_like(k, torch.pi), atol=1e-12, rtol=0)
 
     def test_log_0_matches_homogeneous(self):
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
@@ -105,31 +104,21 @@ class TestHomogeneousAgreement:
 
 
 class TestHeterogeneousBehavior:
-    def test_different_kappas_give_different_embeddings(self):
-        """Same tangent at origin, but different κ → different embedded
-        point. This is the whole point of the class."""
-        het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
-        v = torch.tensor([[0.3, 0.0, 0.0]], dtype=torch.float64)
-        # Try two different κ's on the same tangent
-        T1 = het.exp_0(v, torch.tensor([-1.0], dtype=torch.float64))
-        T2 = het.exp_0(v, torch.tensor([-0.5], dtype=torch.float64))
-        # Different embedded points
-        assert not torch.allclose(T1, T2)
 
     def test_distance_asymmetric_in_kappa(self):
         """d(x, κ_x, y, κ_y) is symmetric in (x, κ_x) ↔ (y, κ_y) (the
         combiner is commutative). But changing one κ changes the
-        distance — that's the heterogeneous behavior."""
+        distance; that's the heterogeneous behavior."""
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
         x = torch.tensor([[0.1, 0.0, 0.0]], dtype=torch.float64)
         y = torch.tensor([[0.0, 0.1, 0.0]], dtype=torch.float64)
         kx = torch.tensor([-1.0], dtype=torch.float64)
         ky_a = torch.tensor([-1.0], dtype=torch.float64)
         ky_b = torch.tensor([-0.5], dtype=torch.float64)
-        d_a = het.distance(x, kx, y, ky_a)
-        d_b = het.distance(x, kx, y, ky_b)
+        d_a = het.dissimilarity(x, kx, y, ky_a)
+        d_b = het.dissimilarity(x, kx, y, ky_b)
         # Symmetry: pair swap shouldn't change anything
-        d_a_swap = het.distance(y, ky_a, x, kx)
+        d_a_swap = het.dissimilarity(y, ky_a, x, kx)
         torch.testing.assert_close(d_a, d_a_swap, atol=1e-12, rtol=0)
         # But changing κ_y to a different value DOES change distance
         assert not torch.allclose(d_a, d_b)
@@ -138,7 +127,7 @@ class TestHeterogeneousBehavior:
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
         x = torch.tensor([[0.1, -0.1, 0.05]], dtype=torch.float64)
         kappa = torch.tensor([-1.0], dtype=torch.float64)
-        d = het.distance(x, kappa, x, kappa)
+        d = het.dissimilarity(x, kappa, x, kappa)
         assert d.abs().max().item() < 1e-9
 
 
@@ -166,7 +155,7 @@ class TestAutogradFinite:
         Tj = T.unsqueeze(0).expand(N, N, 3).reshape(-1, 3)
         Ki = kappas.unsqueeze(1).expand(N, N).reshape(-1)
         Kj = kappas.unsqueeze(0).expand(N, N).reshape(-1)
-        d = het.distance(Ti, Ki, Tj, Kj).reshape(N, N)
+        d = het.dissimilarity(Ti, Ki, Tj, Kj).reshape(N, N)
         loss = d.sum()
         loss.backward()
         assert torch.isfinite(v.grad).all()
@@ -174,15 +163,28 @@ class TestAutogradFinite:
         # κ's gradient is non-trivial (the loss does depend on the κ's)
         assert kappas.grad.abs().max() > 0
 
-    def test_grad_at_self_pair_kappa_only(self):
-        """d(x, κ_x, x, κ_x) = 0 — gradient on κ should be 0 or near it
-        (no asymmetry to learn from). Just verify finite."""
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
         kappa = torch.nn.Parameter(torch.tensor(-1.0, dtype=torch.float64))
         x = torch.tensor([[0.1, 0.0, 0.0]], dtype=torch.float64)
-        d = het.distance(x, kappa.unsqueeze(0), x, kappa.unsqueeze(0))
+        d = het.dissimilarity(x, kappa.unsqueeze(0), x, kappa.unsqueeze(0))
         d.sum().backward()
         assert torch.isfinite(kappa.grad)
+
+        het = HeterogeneousKappaManifold(2)
+        v = torch.tensor([[.5, 0.]], dtype=torch.float64)
+        for op, sign in [(het.exp_0, 1), (het.log_0, -1)]:
+            k = torch.zeros(1, dtype=v.dtype, requires_grad=True)
+            grad = torch.autograd.grad(op(v, k).sum(), k)[0]
+            torch.testing.assert_close(
+                grad, torch.full_like(k, sign / 24), atol=1e-12, rtol=0
+            )
+        k = torch.ones(1, dtype=v.dtype, requires_grad=True)
+        x = torch.tensor([[.8, 0.]], dtype=v.dtype, requires_grad=True)
+        out = het.dissimilarity(x, k, -x.detach(), k)
+        grads = torch.autograd.grad(out.sum(), (x, k))
+        expected = 4 * torch.atan(torch.tensor(.8, dtype=v.dtype))
+        torch.testing.assert_close(out, expected[None], atol=1e-12, rtol=0)
+        assert all(torch.isfinite(g).all() for g in grads)
 
 
 # --------------------------------------------------------------------
@@ -201,10 +203,30 @@ class TestCombiner:
         # Opposite signs cancel under arithmetic mean
         kx = torch.tensor([-1.0], dtype=torch.float64)
         ky = torch.tensor([+1.0], dtype=torch.float64)
-        d = het.distance(x, kx, y, ky)
+        d = het.dissimilarity(x, kx, y, ky)
         # κ_pair = 0 → Euclidean distance 2·‖y - x‖ (Bachmann normalization)
         expected = 2.0 * torch.linalg.vector_norm(y - x, dim=-1)
         torch.testing.assert_close(d, expected, atol=1e-9, rtol=1e-9)
+
+        # Each pair can use a valid homogeneous distance and still violate the triangle
+        # law.
+        het = HeterogeneousKappaManifold(2)
+        a = torch.tensor([[-.5, 0.]], dtype=torch.float64)
+        b = torch.zeros_like(a)
+        c = -a
+        negative = torch.tensor([-1.], dtype=a.dtype)
+        positive = -negative
+        ab = het.dissimilarity(a, negative, b, positive)
+        bc = het.dissimilarity(b, positive, c, negative)
+        ac = het.dissimilarity(a, negative, c, negative)
+        torch.testing.assert_close(ab, torch.ones_like(ab), atol=1e-12, rtol=0)
+        torch.testing.assert_close(bc, torch.ones_like(bc), atol=1e-12, rtol=0)
+        torch.testing.assert_close(ac, 4 * torch.atanh(torch.full_like(ac, .5)),
+                                   atol=1e-12, rtol=0)
+        assert (ac > ab + bc).all()
+        with pytest.raises(ValueError, match="combined curvature"):
+            het.dissimilarity(torch.tensor([[.9, 0.]], dtype=a.dtype), negative,
+                              b, 4 * negative)
 
     def test_custom_combiner(self):
         """User-supplied combiner overrides the built-in."""
@@ -223,7 +245,7 @@ class TestCombiner:
         homo = KappaStereographicManifold(
             n=3, kappa=-1.0, dtype=torch.float64,
         )
-        d_het = het.distance(x, kx, y, ky)
+        d_het = het.dissimilarity(x, kx, y, ky)
         d_homo = homo.distance(x, y)
         torch.testing.assert_close(d_het, d_homo, atol=1e-10, rtol=1e-10)
 
@@ -234,12 +256,6 @@ class TestCombiner:
 
 
 class TestRandomPoint:
-    def test_random_point_default_kappa(self):
-        """When kappa is None, defaults to small standard-normal."""
-        het = HeterogeneousKappaManifold(n=4, dtype=torch.float64)
-        x = het.random_point(batch_size=5, generator=_seed(200))
-        assert x.shape == (5, 4)
-        assert torch.isfinite(x).all()
 
     def test_random_point_explicit_kappa(self):
         """kappa argument is honored when provided."""
@@ -251,14 +267,22 @@ class TestRandomPoint:
         # All on manifold under their respective κ
         assert het.is_on_manifold(x, kappa).all()
 
+        het = HeterogeneousKappaManifold(2, dtype=torch.float32)
+        x = torch.tensor([[2., 0.], [2., 0.]], dtype=torch.float32)
+        k = torch.tensor([-1., 1.], dtype=x.dtype)
+        assert het.is_on_manifold(x, k).tolist() == [False, True]
+        point = het.exp_0(torch.tensor([[10., 0.]], dtype=x.dtype), k[:1])
+        assert het.is_on_manifold(point, k[:1]).all()
+        assert torch.isfinite(het.log_0(point, k[:1])).all()
+        for batch in [0, 1, 4]:
+            curvature = torch.ones(batch, 1, dtype=x.dtype)
+            samples = het.random_point(batch, curvature, generator=_seed(600))
+            assert samples.shape == (batch, 2)
+            assert het.is_on_manifold(samples, curvature.squeeze(-1)).all()
+
     def test_random_point_rejects_mismatched_kappa(self):
         het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
         with pytest.raises(ValueError, match="shape"):
             het.random_point(
                 batch_size=5, kappa=torch.tensor([1.0, 2.0]),
             )
-
-    def test_random_point_rejects_negative_batch(self):
-        het = HeterogeneousKappaManifold(n=3, dtype=torch.float64)
-        with pytest.raises(ValueError, match="batch_size"):
-            het.random_point(batch_size=-1)

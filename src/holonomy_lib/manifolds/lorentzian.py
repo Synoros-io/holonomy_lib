@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Lorentzian (pseudo-Riemannian, signature (1, n-1)) manifold —
+"""Lorentzian (pseudo-Riemannian, signature (1, n-1)) manifold ,
 flat Minkowski spacetime `R^{1, n-1}`.
 
 Distinct from `LorentzManifold` (which is the *unit hyperboloid*, a
@@ -9,7 +9,7 @@ Riemannian submanifold sitting inside this space). `LorentzianManifold`
 **is** the ambient Minkowski space:
 
   - The manifold itself is `R^n` (no constraint surface).
-  - The metric is `g(u, v) = ⟨u, v⟩_M = -u_0·v_0 + Σ_{i ≥ 1} u_i·v_i` —
+  - The metric is `g(u, v) = ⟨u, v⟩_M = -u_0·v_0 + Σ_{i ≥ 1} u_i·v_i` ,
     **indefinite signature (1, n-1)**: one timelike direction, `n - 1`
     spacelike directions.
   - Tangent space at any point is the full `R^n`; tangent vectors carry
@@ -21,7 +21,7 @@ Riemannian submanifold sitting inside this space). `LorentzianManifold`
 The interesting structure isn't the geodesics (trivial) but the **causal
 classification**: which point pairs are timelike-separated, lightlike-
 separated, or spacelike-separated. This is the substrate-as-spacetime
-primitive — Lorentzian-geometry-aware operations that respect the
+primitive; Lorentzian-geometry-aware operations that respect the
 sign-indefinite metric.
 
 API summary (compared to a Riemannian manifold):
@@ -30,8 +30,8 @@ API summary (compared to a Riemannian manifold):
     number (vs `LorentzManifold.minkowski_inner` which is the same
     function used purely as a helper, and `LorentzManifold.inner`
     which is the *induced* positive-definite tangent-space metric).
-  - `norm_sq(v)`: signed `⟨v, v⟩_M`. **There is no `norm`** — the
-    square root would be complex for spacelike vectors.
+  - `norm_sq(v)`: signed `⟨v, v⟩_M`. **There is no `norm`**; the
+    square root would be complex for timelike vectors.
   - `interval_sq(x, y) := ⟨y - x, y - x⟩_M`: signed squared spacetime
     interval. Negative for timelike-separated pairs, zero for null,
     positive for spacelike.
@@ -63,7 +63,7 @@ class LorentzianManifold:
     """Flat pseudo-Riemannian manifold `R^{1, n-1}`.
 
     Args:
-      n: ambient dimension. The signature is `(1, n-1)` — one timelike
+      n: ambient dimension. The signature is `(1, n-1)`; one timelike
         component (index 0) and `n - 1` spacelike components.
       device, dtype: tensor placement / precision.
 
@@ -101,7 +101,7 @@ class LorentzianManifold:
 
     @property
     def dim(self) -> int:
-        """Manifold dimension `n`. Same as ambient — flat space, no
+        """Manifold dimension `n`. Same as ambient; flat space, no
         constraint surface.
         """
         return self.n
@@ -122,13 +122,17 @@ class LorentzianManifold:
         """Signed Minkowski inner product
         `⟨u, v⟩_M = -u_0·v_0 + Σ_{i≥1} u_i·v_i`.
 
-        Can be any real number — negative on timelike, zero on null,
+        Can be any real number; negative on timelike, zero on null,
         positive on spacelike directions.
 
         Args:
           u, v: `(B, n)` vectors.
         Returns:
           `(B,)` signed scalars.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         return (u[..., 1:] * v[..., 1:]).sum(dim=-1) - u[..., 0] * v[..., 0]
 
@@ -138,14 +142,14 @@ class LorentzianManifold:
         """Pseudo-Riemannian inner product `⟨u, v⟩_x = ⟨u, v⟩_M`.
 
         **Signed**: the Minkowski form restricted to ambient vectors,
-        with the (1, n-1) signature. NOT positive-definite — `inner(x,
+        with the (1, n-1) signature. NOT positive-definite; `inner(x,
         v, v)` can be any sign depending on `v`'s causal type. This
         differs from the conventional Riemannian `inner` (which is
         always positive); for `LorentzianManifold` the indefinite
         metric IS the geometry.
 
         Provided primarily for API uniformity with the other manifold
-        classes — so `manifold_aware_inner`, `ProductManifold.inner`
+        classes; so `manifold_aware_inner`, `ProductManifold.inner`
         and similar manifold-generic primitives don't crash when
         passed a `LorentzianManifold`. Callers that compute Riemannian
         norms via `sqrt(inner(...))` should be aware that the result
@@ -157,6 +161,10 @@ class LorentzianManifold:
           u, v: ambient `(B, n)` vectors.
         Returns:
           `(B,)` signed inner products.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         del x
         return self.minkowski_inner(u, v)
@@ -165,7 +173,7 @@ class LorentzianManifold:
         """Signed `⟨v, v⟩_M`. Negative = timelike, zero = null,
         positive = spacelike.
 
-        **No `norm` method exists** — `√⟨v, v⟩_M` is imaginary for
+        **No `norm` method exists**; `√⟨v, v⟩_M` is imaginary for
         timelike `v`. Use `proper_time` or `proper_distance` for the
         type-appropriate magnitude.
 
@@ -182,7 +190,7 @@ class LorentzianManifold:
         - Negative: `x` and `y` are timelike-separated (one is in the
           past or future light cone of the other).
         - Zero: `x` and `y` are null-separated (on each other's light
-          cone — photon path).
+          cone; photon path).
         - Positive: `x` and `y` are spacelike-separated (no signal
           can connect them).
 
@@ -208,7 +216,10 @@ class LorentzianManifold:
           - `FUTURE_TIMELIKE` (= 1): timelike with `(y - x)_0 > 0`
           - `PAST_TIMELIKE` (= -1): timelike with `(y - x)_0 < 0`
           - `FUTURE_NULL` (= 2): null/lightlike with `(y - x)_0 > 0`
-          - `PAST_NULL` (= -2): null/lightlike with `(y - x)_0 < 0`
+          - `PAST_NULL` (= -2): null/lightlike with `(y - x)_0 <= 0`
+
+        Coincident events have no time orientation; this API assigns them
+        PAST_NULL, also used for tolerance-null pairs with zero time difference.
 
         The `null_atol` tolerance pulls "exactly null" inwards from
         the |interval_sq| < null_atol band. Reuses the library's
@@ -339,6 +350,10 @@ class LorentzianManifold:
           x: `(..., n)` base point (unused).
         Returns:
           `(..., n, n)` metric tensor.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         eta = torch.ones(self.n, device=x.device, dtype=x.dtype)
         eta[0] = -1.0
@@ -389,7 +404,7 @@ class LorentzianManifold:
 
         Physics relevance: Einstein's equations equate `R_μν − (1/2) R
         g_μν + Λ g_μν` to the stress-energy tensor (up to constants);
-        in vacuum without cosmological constant, `R_μν = 0` — flat
+        in vacuum without cosmological constant, `R_μν = 0`; flat
         Minkowski is the simplest such solution.
 
         References:
@@ -418,8 +433,13 @@ class LorentzianManifold:
     # ----------------------------------------------------------------
 
     def origin(self, batch_size: int = 1) -> torch.Tensor:
-        """Origin `(0, 0, …, 0) ∈ R^{1, n-1}` — convention for the
-        spacetime origin event."""
+        """Origin `(0, 0, …, 0) ∈ R^{1, n-1}`; convention for the
+        spacetime origin event.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
+        """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
         return torch.zeros(batch_size, self.n,
@@ -430,14 +450,23 @@ class LorentzianManifold:
         batch_size: int = 1,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample B random points in spacetime — Gaussian in each of
+        """Sample B random points in spacetime; Gaussian in each of
         the `n` coordinates. The manifold is `R^n` so no rejection
         needed.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
-        return torch.randn(batch_size, self.n, generator=generator,
-                            device=self.device, dtype=self.dtype)
+        return torch.randn(
+            batch_size,
+            self.n,
+            generator=generator,
+            device=generator.device if generator is not None else self.device,
+            dtype=self.dtype,
+        ).to(self.device)
 
     # ----------------------------------------------------------------
     # Trivial flat-space geodesic primitives (included for API parity
@@ -450,9 +479,30 @@ class LorentzianManifold:
         """Tangent-space projection. For flat space the tangent at
         every point is the full `R^n`, so projection is the identity.
         Included for API parity with curved Riemannian manifolds.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         del x
         return w
+
+    def egrad_to_rgrad(self, point: torch.Tensor, egrad: torch.Tensor) -> torch.Tensor:
+        """Metric dual of an ambient covector in flat spacetime.
+
+        The Lorentzian metric is indefinite: this is not generally a descent
+        direction, unlike a Riemannian metric gradient.
+
+        Args:
+          point: (B, ambient_dim) base point.
+          egrad: (B, ambient_dim) Euclidean gradient.
+        Returns:
+          (B, ambient_dim) metric gradient in tangent coordinates.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, metric duality.
+        """
+        return torch.cat((-egrad[..., :1], egrad[..., 1:]), dim=-1)
 
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
@@ -470,13 +520,22 @@ class LorentzianManifold:
     ) -> torch.Tensor:
         """Logarithmic map = `y - x` (the geodesic from `x` to `y` is
         a straight line; its tangent at `x` is the difference vector).
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         return y - x
 
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
-        """Retraction = exponential map for flat space."""
+        """Retraction = exponential map for flat space.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
+        """
         return self.exp(x, v)
 
     # ----------------------------------------------------------------
@@ -486,9 +545,13 @@ class LorentzianManifold:
     def is_on_manifold(
         self, x: torch.Tensor, atol: float = 1e-9,
     ) -> torch.Tensor:
-        """Always True per-batch element — `R^n` has no constraint
+        """Always True per-batch element; `R^n` has no constraint
         surface. Included for API parity. `atol` is accepted for
         signature compatibility but unused.
+
+        References:
+          O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
+          and its Levi-Civita connection.
         """
         del atol
         return torch.ones(x.shape[:-1], dtype=torch.bool,

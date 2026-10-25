@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""κ-stereographic projection model — constant curvature manifold
+"""κ-stereographic projection model; constant curvature manifold
 that interpolates spherical (κ > 0), Euclidean (κ = 0), and
 hyperbolic (κ < 0) geometry via a single parameter.
 
 The κ-stereographic model represents:
 
   - **κ > 0** (spherical): the stereographic projection of the
-    `n`-sphere of radius `1/√κ` onto the open Euclidean ball
-    `{x ∈ R^n : κ‖x‖² < 1}`.
+    `n`-sphere of radius `1/√κ`, excluding one pole, onto all of `R^n`.
   - **κ = 0** (Euclidean): the standard `R^n`.
   - **κ < 0** (hyperbolic): the Poincaré ball of radius `1/√|κ|`,
     `{x ∈ R^n : ‖x‖² < 1/|κ|}`.
 
-Crucially, all three cases share the SAME formulas with κ as the
-only parameter — the Möbius gyro-addition, κ-tangent, conformal
-metric, and exp/log maps unify the three geometries. This makes the
-manifold a natural choice for "let the curvature be learned from
-data" architectures.
+The models share curvature-dependent conformal metrics and exp/log maps.
+The spherical formulas use a stereographic chart, so operations that hit
+its omitted pole are undefined even though distance itself remains defined.
 
 Coordinate convention: points live in `R^n` (no extra ambient
 dimension, unlike the Lorentz model). The intrinsic and ambient
@@ -40,9 +37,8 @@ Core formulas (Bachmann–Bécigneul–Ganea 2020, §3):
 where `tan_κ` is `tan` for κ > 0, `tanh` for κ < 0, identity for
 κ = 0; correspondingly `tan_κ⁻¹` is `arctan` / `arctanh` / identity.
 
-v1 takes κ as a Python float (set at construction time, dispatched
-on sign at every call). Learnable / scalar-tensor κ is a planned
-extension once the static-κ math is settled.
+κ may be a Python float or a learnable scalar tensor. Tensor curvature
+is evaluated on every call, including at and across zero.
 
 References:
   Bachmann, G., Bécigneul, G., Ganea, O.-E. (2020). Constant Curvature
@@ -58,94 +54,114 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Literal
 
 import torch
 
-from holonomy_lib.manifolds.lorentz import _safe_sqrt
+# Taylor coefficients of tan(sqrt(q))/sqrt(q) and atan(sqrt(q))/sqrt(q).
+# These analytic coefficients apply to signed q = kappa * alpha² near zero.
+KAPPA_SCALE_LINEAR = 1.0 / 3.0
+KAPPA_TAN_QUADRATIC = 2.0 / 15.0
+KAPPA_ATAN_QUADRATIC = 1.0 / 5.0
+# Preserve the existing sampling cap: one quarter of the tan pole radius.
+SPHERICAL_SAMPLE_RADIUS_FRACTION = 1.0 / 8.0
+# asin(sqrt(q))/sqrt(q) = 1 + q/6 + 3q²/40 + O(q³).
+DISTANCE_SCALE_LINEAR = 1.0 / 6.0
+DISTANCE_SCALE_QUADRATIC = 3.0 / 40.0
 
 
-def _safe_tanhc(t: torch.Tensor) -> torch.Tensor:
-    """tanh(t)/t with autograd-safe handling at t = 0 (limit = 1).
+def _kappa_scale(
+    alpha: torch.Tensor, kappa: float | torch.Tensor, *, inverse: bool = False,
+) -> torch.Tensor:
+    """Signed-curvature tan/artan scale with finite inactive branches.
 
-    Same idiom as `_safe_sinhc` in lorentz.py: compute the formula on
-    a where-substituted input that's never 0, then mask the output.
-    Used in `exp_0` for κ < 0 (hyperbolic / Poincaré ball).
+    The quadratic series has O(q³) remainder. At |q| <= sqrt(eps),
+    its value error is below roundoff and its derivative error is O(eps).
     """
-    is_positive = t > 0
-    t_safe = torch.where(is_positive, t, torch.ones_like(t))
-    return torch.where(
-        is_positive,
-        torch.tanh(t_safe) / t_safe,
-        torch.ones_like(t),
-    )
+    q = kappa * alpha.square()
+    small = q.abs() <= torch.finfo(alpha.dtype).eps**0.5
+    series_q = torch.where(small, q, torch.zeros_like(q))
+    positive = (q > 0) & ~small
+    negative = (q < 0) & ~small
+    positive_arg = torch.sqrt(torch.where(positive, q, torch.ones_like(q)))
+    # atanh's substitute must be strictly inside its domain.
+    substitute = torch.full_like(q, 0.5) if inverse else torch.ones_like(q)
+    negative_arg = torch.sqrt(torch.where(negative, -q, substitute.square()))
+    if inverse:
+        series = 1.0 - KAPPA_SCALE_LINEAR * series_q
+        series = series + KAPPA_ATAN_QUADRATIC * series_q.square()
+        spherical = torch.atan(positive_arg) / positive_arg
+        hyperbolic = torch.atanh(negative_arg) / negative_arg
+    else:
+        series = 1.0 + KAPPA_SCALE_LINEAR * series_q
+        series = series + KAPPA_TAN_QUADRATIC * series_q.square()
+        spherical = torch.tan(positive_arg) / positive_arg
+        hyperbolic = torch.tanh(negative_arg) / negative_arg
+    return torch.where(small, series, torch.where(positive, spherical, hyperbolic))
 
 
-def _safe_tanc(t: torch.Tensor) -> torch.Tensor:
-    """tan(t)/t with autograd-safe handling at t = 0 (limit = 1).
+def _project_ball(x: torch.Tensor, kappa: float | torch.Tensor) -> torch.Tensor:
+    """Keep rounded hyperbolic coordinates strictly inside their open ball.
 
-    Domain: `t ∈ (-π/2, π/2)` (tan singular at ±π/2). Used in
-    `exp_0` for κ > 0 (spherical). Caller is responsible for keeping
-    `t < π/2`.
+    A dimension-scaled eps margin covers accumulation error in the norm.
+    Beyond this representable radius, exp saturates and log cannot recover
+    the original large tangent. This is a coordinate precision limit.
     """
-    is_positive = t > 0
-    t_safe = torch.where(is_positive, t, torch.ones_like(t))
-    return torch.where(
-        is_positive,
-        torch.tan(t_safe) / t_safe,
-        torch.ones_like(t),
-    )
+    k = torch.as_tensor(kappa, dtype=x.dtype, device=x.device)
+    sqrt_negative = torch.sqrt(torch.where(k < 0, -k, torch.ones_like(k)))
+    norm = torch.linalg.vector_norm(x, dim=-1)
+    radius = (1.0 - x.shape[-1] * torch.finfo(x.dtype).eps) / sqrt_negative
+    safe_norm = torch.where(norm > 0, norm, torch.ones_like(norm))
+    scale = torch.where((k < 0) & (norm > radius), radius / safe_norm,
+                        torch.ones_like(norm))
+    return x * scale.unsqueeze(-1)
 
 
-def _safe_atanhc(t: torch.Tensor) -> torch.Tensor:
-    """arctanh(t)/t with autograd-safe handling at t = 0 (limit = 1).
+def _stereographic_distance(
+    x: torch.Tensor, y: torch.Tensor, kappa: float | torch.Tensor,
+) -> torch.Tensor:
+    """Distance using sphere chords or a hyperbolic asinh chord formula.
 
-    Domain: `|t| < 1` (arctanh's natural domain). Used in `log_0` for
-    κ < 0. Caller is responsible for keeping points strictly inside
-    the Poincaré ball so `√|κ|·‖y‖ < 1`.
+    The signed series supplies the curvature derivative at zero. Sphere
+    embedding chords also cover antipodes where Mobius subtraction is
+    undefined; hyperbolic asinh avoids an atanh argument rounding to one.
 
-    **Substitute-value note** (deliberate inconsistency with the
-    other `_safe_*c` helpers in this module): the masked-out
-    `t_safe` is `0.5`, NOT `1.0` as in `_safe_tanc` / `_safe_tanhc` /
-    `_safe_atanc` / `_safe_sinhc` etc. The reason: `arctanh(1.0) = ∞`
-    (the function diverges at the domain boundary), so substituting
-    `1.0` would produce a non-finite *value* in the formula branch.
-    `torch.where`'s gradient-masking by the boolean condition
-    multiplies the formula-branch gradient by `(1 − cond)`; an
-    infinite gradient times the boolean-as-int mask gives `∞ · 0 =
-    NaN` and propagates. `0.5` is the smallest "round" value
-    strictly inside `(-1, 1)` that keeps both the value and
-    derivative of `arctanh(0.5)/0.5 ≈ 1.099 / 1.099`-derivative
-    finite, so the masking works cleanly. Any value in
-    `(-1, 1) \\ {0}` would do; we pick `0.5` for definiteness.
+    References:
+      Bachmann et al. (2020), §2, stereographic metric; Cannon et al.
+      (1997), Hyperbolic Geometry, §3, hyperbolic distance models.
     """
-    is_positive = t > 0
-    t_safe = torch.where(is_positive, t, torch.ones_like(t) * 0.5)
-    return torch.where(
-        is_positive,
-        torch.atanh(t_safe) / t_safe,
-        torch.ones_like(t),
+    k = torch.as_tensor(kappa, dtype=x.dtype, device=x.device)
+    x_sq, y_sq = x.square().sum(-1), y.square().sum(-1)
+    separation = torch.linalg.vector_norm(x - y, dim=-1)
+    product = (1.0 + k * x_sq) * (1.0 + k * y_sq)
+    chord = separation / torch.sqrt(product)
+    q = k * chord.square()
+    small = q.abs() <= torch.finfo(x.dtype).eps**0.5
+    series_q = torch.where(small, q, torch.zeros_like(q))
+    scale = 1.0 + DISTANCE_SCALE_LINEAR * series_q
+    scale = scale + DISTANCE_SCALE_QUADRATIC * series_q.square()
+    series = 2.0 * chord * scale
+
+    spherical = (k > 0) & ~small
+    root = torch.sqrt(torch.where(spherical, k, torch.ones_like(k)))
+    # Mask inputs before lifting to the sphere so inactive denominators and
+    # transcendental branches cannot inject NaNs into backward.
+    sx = torch.where(spherical.unsqueeze(-1), root.unsqueeze(-1) * x, 0.0)
+    sy = torch.where(spherical.unsqueeze(-1), root.unsqueeze(-1) * y, 0.0)
+    sx_sq, sy_sq = sx.square().sum(-1, keepdim=True), sy.square().sum(-1, keepdim=True)
+    lifted_x = torch.cat((2.0 * sx, 1.0 - sx_sq), dim=-1) / (1.0 + sx_sq)
+    lifted_y = torch.cat((2.0 * sy, 1.0 - sy_sq), dim=-1) / (1.0 + sy_sq)
+    sphere_chord = torch.linalg.vector_norm(lifted_x - lifted_y, dim=-1)
+    sphere_sum = torch.linalg.vector_norm(lifted_x + lifted_y, dim=-1)
+    sphere_distance = 2.0 * torch.atan2(sphere_chord, sphere_sum) / root
+
+    hyperbolic = (k < 0) & ~small
+    negative_root = torch.sqrt(torch.where(hyperbolic, -k, torch.ones_like(k)))
+    hyperbolic_chord = torch.where(hyperbolic, chord, torch.zeros_like(chord))
+    hyperbolic_distance = (
+        2.0 * torch.asinh(negative_root * hyperbolic_chord) / negative_root
     )
-
-
-def _safe_atanc(t: torch.Tensor) -> torch.Tensor:
-    """arctan(t)/t with autograd-safe handling at t = 0 (limit = 1).
-
-    No domain restriction (arctan is entire). Used in `log_0` for
-    κ > 0.
-    """
-    is_positive = t > 0
-    t_safe = torch.where(is_positive, t, torch.ones_like(t))
-    return torch.where(
-        is_positive,
-        torch.atan(t_safe) / t_safe,
-        torch.ones_like(t),
-    )
-
-
-# Tag for the κ-sign branch chosen at __init__. Static — set once
-# from the Python-float κ and reused on every call.
-Branch = Literal["spherical", "euclidean", "hyperbolic"]
+    return torch.where(small, series, torch.where(spherical, sphere_distance,
+                                                 hyperbolic_distance))
 
 
 class KappaStereographicManifold:
@@ -153,10 +169,8 @@ class KappaStereographicManifold:
 
     Args:
       n: intrinsic / ambient dimension. Points are stored as `(B, n)`.
-      kappa: constant sectional curvature. v1 accepts a Python float
-        only — set the sign at construction, dispatch on it
-        thereafter. Default `-1.0` matches `LorentzManifold`'s unit
-        hyperbolic case (Poincaré ball of radius 1).
+      kappa: sectional curvature, a Python float or learnable scalar tensor.
+        Tensor curvature is evaluated on every call, including across zero.
       device, dtype: tensor placement and precision.
 
     Example:
@@ -171,77 +185,26 @@ class KappaStereographicManifold:
                  dtype: torch.dtype = torch.float64):
         if n <= 0:
             raise ValueError(f"n must be > 0, got n={n}")
-        # Accept Python float OR 0-d torch.Tensor (for learnable κ via
-        # SGD). The branch ("spherical" / "hyperbolic" / "euclidean")
-        # is fixed at construction from the sign of κ's *initial* value;
-        # subsequent updates that push κ across 0 produce undefined
-        # behavior (the branch dispatch stays fixed, so a positive κ
-        # value running through the "hyperbolic" branch's `tanh` will
-        # not give meaningful spherical geometry). Keep κ in one
-        # sign-half during learning.
         if isinstance(kappa, torch.Tensor):
-            if kappa.ndim != 0:
-                raise TypeError(
-                    "kappa as Tensor must be 0-dim (scalar); "
-                    f"got shape {tuple(kappa.shape)}"
-                )
-            self._kappa_init = float(kappa.item())
+            if kappa.ndim != 0 or not kappa.is_floating_point():
+                raise TypeError("kappa must be a floating-point scalar tensor")
             self.kappa: float | torch.Tensor = kappa
-            self._kappa_is_tensor = True
         elif isinstance(kappa, (int, float)):
-            self._kappa_init = float(kappa)
             self.kappa = float(kappa)
-            self._kappa_is_tensor = False
         else:
-            raise TypeError(
-                "kappa must be float or 0-dim torch.Tensor, got "
-                f"{type(kappa).__name__}"
-            )
+            raise TypeError("kappa must be a float or scalar tensor")
         self.n = n
         self.device = torch.device(device)
         self.dtype = dtype
 
-        # Branch selection: sign of κ at construction time. Once fixed,
-        # operations use closed forms for that branch — pushing the
-        # learnable κ across 0 won't switch branches at runtime.
-        if self._kappa_init > 0:
-            self._branch: Branch = "spherical"
-        elif self._kappa_init < 0:
-            self._branch = "hyperbolic"
-        else:
-            self._branch = "euclidean"
-
-        # Cached scalar magnitudes for the static-float fast path.
-        # For Tensor κ we use the live `|kappa|` instead (computed
-        # on demand to keep autograd graph attached).
-        if not self._kappa_is_tensor:
-            self._abs_kappa = abs(self.kappa)
-            self._sqrt_abs_kappa = (
-                math.sqrt(self._abs_kappa)
-                if self._abs_kappa > 0 else 0.0
-            )
-        else:
-            # Will be computed from `self.kappa` on each call via
-            # `_get_sqrt_abs_kappa()` to preserve autograd.
-            self._abs_kappa = abs(self._kappa_init)
-            self._sqrt_abs_kappa = math.sqrt(self._abs_kappa)
-
-    def _get_sqrt_abs_kappa(self):
-        """Return `sqrt(|κ|)` — as a tensor if κ is a tensor (for
-        autograd), as a float otherwise.
-        """
-        if self._kappa_is_tensor:
-            return torch.sqrt(torch.abs(self.kappa))
-        return self._sqrt_abs_kappa
-
-    def _get_kappa(self):
-        """Return κ — as a tensor if κ is a tensor, as a float otherwise."""
+    def _get_kappa(self) -> float | torch.Tensor:
+        """Return the current curvature without detaching its gradient."""
         return self.kappa
 
     @property
     def dim(self) -> int:
         """Intrinsic manifold dimension `n`. Same as ambient for this
-        model — no extra dimension (unlike `LorentzManifold(n)` which
+        model; no extra dimension (unlike `LorentzManifold(n)` which
         embeds in `R^{n+1}`).
         """
         return self.n
@@ -260,64 +223,16 @@ class KappaStereographicManifold:
     # ----------------------------------------------------------------
 
     def _tan_kappa_c(self, alpha: torch.Tensor) -> torch.Tensor:
-        """`tan_κ(√|κ|·α) / (√|κ|·α)` with the analytic limit `1` at
-        α = 0 OR κ = 0.
-
-        Dual-mode dispatch:
-          - **Static-float κ**: fast path using the construction-time
-            branch (`spherical` / `hyperbolic` / `Euclidean`).
-          - **Tensor κ**: dynamic dispatch on `sign(κ)` at each call,
-            so κ can cross 0 during training. Both spherical
-            (`tan/scaled`) and hyperbolic (`tanh/scaled`) formulas are
-            computed and `torch.where` picks per element. At κ ≈ 0
-            the clamped `sqrt(|κ|)` keeps `scaled` near 0, where both
-            branches' analytic limits are 1 — so the κ-sign flip is
-            continuous.
-        """
-        if not self._kappa_is_tensor:
-            # Static κ — locked branch.
-            if self._branch == "euclidean":
-                return torch.ones_like(alpha)
-            scaled = self._sqrt_abs_kappa * alpha
-            if self._branch == "spherical":
-                return _safe_tanc(scaled)
-            return _safe_tanhc(scaled)
-        # Tensor κ — dynamic dispatch so sign(κ) can change during SGD.
-        kappa = self._get_kappa()
-        abs_k = torch.abs(kappa).clamp(min=torch.finfo(alpha.dtype).tiny)
-        scaled = torch.sqrt(abs_k) * alpha
-        return torch.where(
-            kappa > 0, _safe_tanc(scaled), _safe_tanhc(scaled),
-        )
+        return _kappa_scale(alpha, self.kappa)
 
     def _atan_kappa_c(self, alpha: torch.Tensor) -> torch.Tensor:
-        """`tan_κ⁻¹(√|κ|·α) / (√|κ|·α)` with the analytic limit `1` at
-        α = 0 OR κ = 0.
-
-        Same dual-mode dispatch as `_tan_kappa_c`. Note: the hyperbolic
-        branch (`arctanh`) requires the scaled input < 1, i.e. caller
-        keeps points inside the Poincaré-ball domain when κ < 0.
-        """
-        if not self._kappa_is_tensor:
-            if self._branch == "euclidean":
-                return torch.ones_like(alpha)
-            scaled = self._sqrt_abs_kappa * alpha
-            if self._branch == "spherical":
-                return _safe_atanc(scaled)
-            return _safe_atanhc(scaled)
-        # Tensor κ — dynamic dispatch
-        kappa = self._get_kappa()
-        abs_k = torch.abs(kappa).clamp(min=torch.finfo(alpha.dtype).tiny)
-        scaled = torch.sqrt(abs_k) * alpha
-        return torch.where(
-            kappa > 0, _safe_atanc(scaled), _safe_atanhc(scaled),
-        )
+        return _kappa_scale(alpha, self.kappa, inverse=True)
 
     def _conformal_factor(self, x: torch.Tensor) -> torch.Tensor:
         """λ_κ(x) = 2 / (1 + κ‖x‖²). At origin = 2.
 
         Uses `_get_kappa()` so the conformal factor's derivative w.r.t.
-        a learnable-κ tensor is captured — affects `inner`, `norm`,
+        a learnable-κ tensor is captured; affects `inner`, `norm`,
         `exp`, `log`, `parallel_transport`.
         """
         norm_sq = (x * x).sum(dim=-1)
@@ -328,8 +243,12 @@ class KappaStereographicManifold:
     # ----------------------------------------------------------------
 
     def origin(self, batch_size: int = 1) -> torch.Tensor:
-        """The origin `(0, …, 0) ∈ R^n` — common base point for
+        """The origin `(0, …, 0) ∈ R^n`; common base point for
         tangent-space embeddings. Same shape as a regular point.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
@@ -341,87 +260,46 @@ class KappaStereographicManifold:
         batch_size: int = 1,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample B random points on the manifold via `exp_0` of a
-        Gaussian tangent.
+        """Draw Gaussian origin tangents and map them with the current κ.
 
-        For the **spherical** branch (κ > 0) the tangent norm has a
-        hard upper bound `‖v‖ < π/(2√κ)` (the `tan` singularity in
-        `exp_0`). Random Gaussian draws can exceed this; we clip the
-        per-element tangent norm at `π/(8√κ)` (one-quarter of the
-        singular radius — gives `‖exp_0(v)‖ ≤ tan(π/8)/√κ ≈ 0.414/√κ`,
-        so `κ‖x‖² ≤ 0.172` — comfortably inside the κ‖x‖² < 1 domain
-        with slack for `is_on_manifold` to pass at `atol = 1e-9`).
+        Positive-curvature tangents are capped at π/(8√κ), away from
+        the stereographic chart's pole. Hyperbolic outputs saturate at
+        a dtype-dependent interior radius. Draws use the generator's
+        device before transfer to the manifold's device.
 
-        For hyperbolic and Euclidean branches there is no upper bound
-        on ‖v‖, so the raw Gaussian draw is used as-is.
+        References:
+          Bachmann et al. (2020), §2, origin exponential.
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
+        draw_device = generator.device if generator is not None else self.device
         v = torch.randn(batch_size, self.n, generator=generator,
-                         device=self.device, dtype=self.dtype) * 0.5
-        if self._branch == "spherical":
-            # Cap ‖v‖ at π/(4√κ) (half the singular `exp_0` radius).
-            # Use _safe_sqrt for the norm + a `where` to apply the cap
-            # only when the draw exceeds the budget.
-            v_sq = (v * v).sum(dim=-1, keepdim=True)
-            v_norm = _safe_sqrt(v_sq.squeeze(-1)).unsqueeze(-1)
-            # Cap ‖v‖ at π/(8√κ). At that bound, √κ·‖v‖ = π/8 and
-            # ‖exp_0(v)‖ = tan(π/8)/√κ ≈ 0.414/√κ, so κ‖exp_0(v)‖² ≈
-            # 0.172 — comfortably inside the κ‖x‖² < 1 domain.
-            # `π/(4√κ)` would land EXACTLY on the boundary
-            # (tan(π/4) = 1), so we shrink by another factor of 2.
-            # Re-evaluate against the CURRENT √|κ| (for learnable κ
-            # that may have changed magnitude during training). The
-            # cap is not part of any gradient chain — `random_point` is
-            # a non-differentiable sampling op — so we extract a
-            # detached scalar.
-            if self._kappa_is_tensor:
-                sqrt_abs_k_now = float(
-                    torch.sqrt(torch.abs(self.kappa)).detach().item()
-                )
-            else:
-                sqrt_abs_k_now = self._sqrt_abs_kappa
-            safe_v_norm = (
-                0.5 * math.pi / (2.0 * 2.0 * sqrt_abs_k_now)
-            )
-            v_norm_safe = torch.where(
-                v_norm > 0, v_norm, torch.ones_like(v_norm),
-            )
-            scale_factor = torch.where(
-                v_norm > safe_v_norm,
-                safe_v_norm / v_norm_safe,
-                torch.ones_like(v_norm),
-            )
-            v = v * scale_factor
+                        device=draw_device, dtype=self.dtype).to(self.device) * 0.5
+        k = torch.as_tensor(self.kappa, device=v.device, dtype=v.dtype)
+        sqrt_positive = torch.sqrt(torch.where(k > 0, k, torch.ones_like(k)))
+        cap = SPHERICAL_SAMPLE_RADIUS_FRACTION * math.pi / sqrt_positive
+        norm = torch.linalg.vector_norm(v, dim=-1, keepdim=True)
+        safe_norm = torch.where(norm > 0, norm, torch.ones_like(norm))
+        v = v * torch.where((k > 0) & (norm > cap), cap / safe_norm,
+                            torch.ones_like(norm))
         return self.exp_0(v)
 
     def is_on_manifold(
         self, x: torch.Tensor, atol: float = 1e-9,
     ) -> torch.Tensor:
-        """Per-batch test for manifold membership.
+        """Check finite coordinates and the hyperbolic open-ball boundary.
 
-        Domain:
-          - κ > 0 (spherical): `κ‖x‖² < 1`.
-          - κ = 0 (Euclidean): always True.
-          - κ < 0 (hyperbolic): `‖x‖² < 1/|κ|`.
+        For κ < 0, -κ||x||² < 1 - atol; for κ >= 0 every finite chart
+        coordinate is valid. The sphere's omitted pole is at infinity.
 
-        Uses the **current** value of κ — important when κ is a
-        learnable Tensor that has drifted from its initial value
-        during training (the membership domain shrinks/grows with |κ|).
-        The `atol` parameter absorbs float drift at the boundary.
+        References:
+          Bachmann et al. (2020), §2, stereographic domain.
         """
-        if self._branch == "euclidean":
-            return torch.ones(x.shape[:-1], dtype=torch.bool,
-                               device=x.device)
-        norm_sq = (x * x).sum(dim=-1)
-        # Extract a scalar value for the comparison; detach so this
-        # method (used in validation checks) doesn't insert spurious
-        # autograd connections to κ.
-        kappa_value = (
-            self.kappa.detach().item()
-            if self._kappa_is_tensor else self.kappa
-        )
-        return kappa_value * norm_sq < 1.0 - atol
+        if x.ndim < 2 or x.shape[-1] != self.n:
+            raise ValueError(f"x must have shape (..., {self.n}); got {tuple(x.shape)}")
+        k = torch.as_tensor(self.kappa, device=x.device, dtype=x.dtype)
+        domain = (k >= 0) | (-k * x.square().sum(dim=-1) < 1.0 - atol)
+        return torch.isfinite(x).all(dim=-1) & torch.isfinite(k) & domain
 
     # ----------------------------------------------------------------
     # Möbius addition (gyro-addition)
@@ -444,18 +322,18 @@ class KappaStereographicManifold:
           x, y: `(..., n)` points on the manifold.
         Returns:
           `(..., n)` Möbius sum.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
-        if self._branch == "euclidean":
-            return x + y
         xy = (x * y).sum(dim=-1, keepdim=True)        # (..., 1)
         xx = (x * x).sum(dim=-1, keepdim=True)
         yy = (y * y).sum(dim=-1, keepdim=True)
         k = self._get_kappa()
         num = (1.0 - 2.0 * k * xy - k * yy) * x + (1.0 + k * xx) * y
-        # The denominator is strictly positive for x, y in the domain
-        # (1 - 2k⟨x,y⟩ + k²‖x‖²‖y‖² = (1 + k‖x‖²)(1 + k‖y‖²)/(...)
-        # ≥ small positive); no zero-denominator guard needed for
-        # well-conditioned inputs.
+        # Hyperbolic inputs have a positive denominator. In the spherical
+        # chart the sum can be the omitted pole; that operation is undefined.
         denom = 1.0 - 2.0 * k * xy + k * k * xx * yy
         return num / denom
 
@@ -479,9 +357,27 @@ class KappaStereographicManifold:
           w: ambient direction.
         Returns:
           `w` (no-op).
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
         del x
         return w
+
+    def egrad_to_rgrad(self, point: torch.Tensor, egrad: torch.Tensor) -> torch.Tensor:
+        """Divide an ambient gradient by the squared conformal factor.
+
+        Args:
+          point: (B, ambient_dim) base point.
+          egrad: (B, ambient_dim) Euclidean gradient.
+        Returns:
+          (B, ambient_dim) metric gradient in tangent coordinates.
+
+        References:
+          Absil, Mahony, Sepulchre (2008), §3.6; Bachmann et al. (2020), §2.
+        """
+        return egrad / self._conformal_factor(point).square().unsqueeze(-1)
 
     def inner(
         self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor,
@@ -502,13 +398,14 @@ class KappaStereographicManifold:
     ) -> torch.Tensor:
         """Riemannian norm `λ_κ(x) · ‖v‖_Eucl`.
 
-        Always non-negative; the Euclidean norm is squared and
-        square-rooted via `_safe_sqrt` for autograd-finite behavior
-        at v = 0.
+        Uses PyTorch's finite zero subgradient at v = 0.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
-        v_sq = (v * v).sum(dim=-1)
         lam = self._conformal_factor(x)
-        return lam * _safe_sqrt(v_sq)
+        return lam * torch.linalg.vector_norm(v, dim=-1)
 
     # ----------------------------------------------------------------
     # Exponential / logarithmic maps, geodesic distance
@@ -520,46 +417,52 @@ class KappaStereographicManifold:
 
         At κ = 0: `exp_0(v) = v` (Euclidean identity).
         At κ < 0: maps Euclidean coords to the Poincaré ball.
-        At κ > 0: maps to the open spherical-cap projection.
+        At κ > 0: the chart excludes the pole at infinity.
+        At κ < 0: large tangents saturate at a dimension-scaled eps
+        margin inside the ball; log_0 cannot invert that saturation.
 
         Args:
           v: `(..., n)` Euclidean tangent vector at the origin.
         Returns:
           `(..., n)` point on the manifold.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
-        if v.shape[-1] != self.n:
+        if v.ndim < 2 or v.shape[-1] != self.n:
             raise ValueError(
-                f"v last dim must be n={self.n}, got {v.shape[-1]}"
+                f"v last dim must be n={self.n}, got {tuple(v.shape)}"
             )
-        if self._branch == "euclidean":
-            return v
-        v_sq = (v * v).sum(dim=-1)
-        v_norm = _safe_sqrt(v_sq)
+        v_norm = torch.linalg.vector_norm(v, dim=-1)
         # tan_κ(√|κ|·‖v‖) / (√|κ|·‖v‖) · v.
         # Factor (1/√|κ|·‖v‖) absorbed via _tan_kappa_c which returns
         # tan_κ(scaled)/scaled where scaled = √|κ|·v_norm.
         scaling = self._tan_kappa_c(v_norm)
-        return scaling.unsqueeze(-1) * v
+        return _project_ball(scaling.unsqueeze(-1) * v, self.kappa)
 
     def log_0(self, y: torch.Tensor) -> torch.Tensor:
         """Logarithmic map at the origin: `log_0(y) =
         (1/√|κ|) · tan_κ⁻¹(√|κ|·‖y‖) · y / ‖y‖`.
 
         At κ = 0: `log_0(y) = y` (Euclidean identity).
+        For κ > 0 this selects the principal logarithm; exp_0 is invertible
+        only for ||v|| < π/(2√κ). Hyperbolic saturation is not invertible.
 
         Args:
           y: `(..., n)` point on the manifold.
         Returns:
           `(..., n)` Euclidean tangent at the origin.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
-        if y.shape[-1] != self.n:
+        if y.ndim < 2 or y.shape[-1] != self.n:
             raise ValueError(
-                f"y last dim must be n={self.n}, got {y.shape[-1]}"
+                f"y last dim must be n={self.n}, got {tuple(y.shape)}"
             )
-        if self._branch == "euclidean":
-            return y
-        y_sq = (y * y).sum(dim=-1)
-        y_norm = _safe_sqrt(y_sq)
+        y_norm = torch.linalg.vector_norm(y, dim=-1)
         # arctan_κ(√|κ|·‖y‖) / (√|κ|·‖y‖) · y. Same prefactor structure
         # as exp_0 — _atan_kappa_c returns the (atan_κ(α)/α) factor.
         scaling = self._atan_kappa_c(y_norm)
@@ -571,6 +474,11 @@ class KappaStereographicManifold:
         """Geodesic distance `d_κ(x, y) = (2/√|κ|) · tan_κ⁻¹(√|κ|
         · ‖(-x) ⊕_κ y‖)`.
 
+        Evaluated through sphere chords or a hyperbolic asinh chord formula
+        to cover spherical antipodes and near-boundary hyperbolic pairs.
+        The distance is nonsmooth at coincident points and spherical antipodes;
+        the implementation uses finite zero-subgradient conventions there.
+
         At κ = 0: `d(x, y) = 2 · ‖y - x‖_Eucl` (Bachmann normalization;
         the conformal factor at the origin is 2).
 
@@ -578,19 +486,12 @@ class KappaStereographicManifold:
           x, y: `(..., n)` points on the manifold.
         Returns:
           `(...,)` non-negative distances.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
-        diff = self.mobius_add(-x, y)              # (..., n)
-        diff_sq = (diff * diff).sum(dim=-1)
-        diff_norm = _safe_sqrt(diff_sq)
-        # Unified κ-trig form: distance = 2·d·(arctan_κ(√|κ|·d)/(√|κ|·d))
-        # = 2·d · _atan_kappa_c(d). Works for any κ ∈ R:
-        #   - κ > 0: 2·d · arctan(√κ·d)/(√κ·d)  = (2/√κ)·arctan(√κ·d)
-        #   - κ < 0: 2·d · arctanh(√|κ|·d)/(√|κ|·d) = (2/√|κ|)·arctanh(√|κ|·d)
-        #   - κ = 0: 2·d · 1 = 2d
-        # The `_atan_kappa_c` helper does the sign-dispatch (dynamic
-        # for Tensor κ, static fast-path for float κ), so κ can flip
-        # signs during training without breakdown.
-        return 2.0 * diff_norm * self._atan_kappa_c(diff_norm)
+        return _stereographic_distance(x, y, self.kappa)
 
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
@@ -603,10 +504,7 @@ class KappaStereographicManifold:
         References:
           Bachmann et al. (2020), eq. 5.
         """
-        if self._branch == "euclidean":
-            return x + v
-        v_sq = (v * v).sum(dim=-1)
-        v_norm = _safe_sqrt(v_sq)
+        v_norm = torch.linalg.vector_norm(v, dim=-1)
         lam = self._conformal_factor(x)
         # tan_κ(arg) / (√|κ| · ‖v‖) · v, with arg = λ · √|κ| · ‖v‖ / 2.
         # Rewrite as: (lam / 2) · (tan_κ(arg)/arg) · v   (factor √|κ|·‖v‖
@@ -614,7 +512,7 @@ class KappaStereographicManifold:
         arg = 0.5 * lam * v_norm
         scaling = 0.5 * lam * self._tan_kappa_c(arg)
         rhs = scaling.unsqueeze(-1) * v
-        return self.mobius_add(x, rhs)
+        return _project_ball(self.mobius_add(x, rhs), self.kappa)
 
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
@@ -628,13 +526,8 @@ class KappaStereographicManifold:
           Bachmann et al. (2020), eq. 5.
         """
         diff = self.mobius_add(-x, y)
-        diff_sq = (diff * diff).sum(dim=-1)
-        diff_norm = _safe_sqrt(diff_sq)
+        diff_norm = torch.linalg.vector_norm(diff, dim=-1)
         lam = self._conformal_factor(x)
-        if self._branch == "euclidean":
-            # (2/λ) · ‖diff‖ · diff/‖diff‖ = 2/λ · diff. At origin
-            # λ = 2 so this is just `diff = y - x`. ✓
-            return (2.0 / lam).unsqueeze(-1) * diff
         # atan_κ(√|κ|·‖diff‖) / (√|κ|·‖diff‖) · diff factor:
         scaling = (2.0 / lam) * self._atan_kappa_c(diff_norm)
         return scaling.unsqueeze(-1) * diff
@@ -645,6 +538,10 @@ class KappaStereographicManifold:
         """Retraction = exponential map (second-order, the geodesic
         itself satisfies the retraction axioms on constant-curvature
         spaces).
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, stereographic metric and maps.
         """
         return self.exp(x, v)
 
@@ -660,16 +557,22 @@ class KappaStereographicManifold:
         (Euclidean parallel transport is trivial).
 
         References:
-          Bachmann et al. (2020), eq. 7; Ungar (2008), Theorem 8.4.
+          Bachmann et al. (2020), §2, κ-stereographic geometry;
+          Ungar (2008), A Gyrovector Space Approach to Hyperbolic Geometry,
+          gyration. The linear formula agrees with Geoopt stereographic.math.
         """
-        if self._branch == "euclidean":
-            return v
-        # Gyrator: gyr[y, -x] · v = -(y ⊕ (-x)) ⊕ (y ⊕ ((-x) ⊕ v))
-        ngx = self.mobius_add(y, -x)
-        inner_add = self.mobius_add(-x, v)
-        outer_add = self.mobius_add(y, inner_add)
-        gyrated = self.mobius_add(-ngx, outer_add)
-        # Conformal factor ratio
-        lam_x = self._conformal_factor(x)
-        lam_y = self._conformal_factor(y)
-        return (lam_x / lam_y).unsqueeze(-1) * gyrated
+        # Gyration is linear on unrestricted tangent vectors. Evaluating
+        # nested Mobius additions would incorrectly treat v as a ball point.
+        a, b = y, -x
+        aa = a.square().sum(dim=-1, keepdim=True)
+        bb = b.square().sum(dim=-1, keepdim=True)
+        ab = (a * b).sum(dim=-1, keepdim=True)
+        av = (a * v).sum(dim=-1, keepdim=True)
+        bv = (b * v).sum(dim=-1, keepdim=True)
+        k = self.kappa
+        coef_a = -k * k * av * bb - k * bv + 2.0 * k * k * ab * bv
+        coef_b = -k * k * bv * aa + k * av
+        denominator = 1.0 - 2.0 * k * ab + k * k * aa * bb
+        gyrated = v + 2.0 * (coef_a * a + coef_b * b) / denominator
+        ratio = self._conformal_factor(x) / self._conformal_factor(y)
+        return ratio.unsqueeze(-1) * gyrated

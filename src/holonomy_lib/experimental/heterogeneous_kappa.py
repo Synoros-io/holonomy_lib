@@ -1,110 +1,34 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Heterogeneous-curvature κ-stereographic manifold.
+"""Experimental per-point curvature operations in stereographic coordinates.
 
-Status: experimental, in progress. `distance` combines the two endpoints'
-curvatures and evaluates a constant-curvature distance at the combined value.
-That is a pair-conditioned dissimilarity, not a metric: it can violate the
-triangle inequality. A true variable-curvature distance needs a different
-construction.
+Status: experimental, in progress. `dissimilarity` evaluates a constant-
+curvature distance under a combined pair curvature. It can violate the
+triangle inequality and is not a variable-curvature geodesic metric.
+Both endpoints must lie in the chart domain under the combined curvature.
+`exp_0` and `log_0` apply the ordinary constant-curvature maps independently
+at each point's supplied curvature; they do not integrate a curvature field.
 
-A κ-stereographic geometry where the curvature `κ` is **not a single
-global scalar but varies per point**. This is the natural ML
-primitive when concepts in an embedding space have different local
-curvatures — e.g. some concepts naturally live in hyperbolic
-neighborhoods (hierarchical), others in spherical neighborhoods
-(cyclical), and the global geometry should adapt.
-
-This class is the **per-point-κ math primitive**, not an opinionated
-"how do you parameterize κ" component. The user owns:
-
-  - the κ values per concept (typically `nn.Parameter` of shape `(N,)`)
-  - any structure on those κ's (smooth field, residuals, gating, …)
-
-and passes effective-κ tensors into the manifold methods. The
-manifold provides the κ-aware math: distance, exp_0, log_0, etc.,
-each with explicit per-point κ arguments. Pair operations combine
-two per-point κ's into an effective pair-κ via a configurable
-`combiner` (default: arithmetic mean).
-
-Concrete usage patterns the user can build on top:
-
-  - **Pure per-point κ.** `κ = nn.Parameter(torch.randn(N))`,
-    `mfd.distance(x[i], κ[i], x[j], κ[j])`.
-
-  - **Smooth κ-field plus per-point residual** (substrate-team
-    suggested design):
-        effective_κ(c) = κ_field(T[c]) + δ[c]
-    where `κ_field` is a callable (small NN / polynomial / radial
-    basis) producing a smooth global curvature profile, and
-    `δ[c]` is a per-concept residual. Both are learnable; either
-    can be disabled (set to 0). The field captures broad structure,
-    the residual captures concept-specific deviations.
-
-  - **Gated mixture-of-curvatures.** Per concept, pick from a
-    discrete set of κ values via a learned gating network. (Cf.
-    GraphMoRE.)
-
-The manifold class implements the math; the parameterization layer
-is the user's modeling choice.
-
-Citations (positioning):
-
-  - **Standard prior art** (well-published, freely citable):
-    * Bachmann–Bécigneul–Ganea (2020) *Constant Curvature Graph
-      Convolutional Networks* (ICML) — the κ-stereographic model
-      with a single learnable κ. We extend to per-point κ.
-    * Skopek et al. (2019) *Mixed-curvature VAEs* (ICLR) — multiple
-      fixed curvatures across components.
-
-  - **Related research on heterogeneous / per-node curvature:**
-    * Di Giovanni, Luise, Bronstein (2022) *Heterogeneous manifolds
-      for curvature-aware graph embedding* (arXiv 2202.01185) —
-      product of a homogeneous factor and a spherically-symmetric
-      factor; allows pointwise curvature variation. Closest prior
-      art in the "manifold-construction" direction.
-    * Fu et al. (2021) *ACE-HGNN* — adaptive global curvature via
-      RL. Single curvature, not per-point.
-    * Yang et al. (2022) *kHGCN* (arXiv 2212.01793) — per-node
-      discrete Ollivier–Ricci curvature as message-passing
-      weights inside a single-curvature hyperbolic embedding.
-      Different mechanism.
-    * Guo et al. (2024) *GraphMoRE* (arXiv 2412.11085, AAAI-2025) —
-      mixture-of-experts gating selects per-node Riemannian
-      expert from a discrete set of constant-curvature spaces.
-      Closest prior art in the "per-node κ" direction; uses
-      discrete gating rather than a continuous κ.
-
-  - **Our contribution** (less-established, our research within an
-    active direction):
-    * **Continuous per-point κ as a real number** (vs. discrete
-      gating in GraphMoRE).
-    * **Pair-κ combiner abstraction** — distance between two
-      points with different κ's reduces to a single effective
-      pair-κ via a configurable rule (arithmetic mean default;
-      caller can pass any commutative `Callable[[κ_x, κ_y], κ_eff]`).
-      This rule isn't standardized in the literature and is a
-      design knob; we ship the most defensible default and let
-      the user override.
-    * **κ-field + per-point residual decomposition** is the
-      substrate-team's suggested pattern; we provide the math
-      primitive that supports it, not the parameterization
-      itself.
+References:
+  Bachmann, Bécigneul, Ganea (2020). Constant Curvature Graph Convolutional
+    Networks, ICML, §2 (the homogeneous formulas used per point/pair).
+  The pair-curvature combination is an experimental modeling choice,
+    not a formula established by that reference.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import torch
 
-from holonomy_lib.manifolds.lorentz import _safe_sqrt
 from holonomy_lib.manifolds.stereographic import (
-    _safe_atanc,
-    _safe_atanhc,
-    _safe_tanc,
-    _safe_tanhc,
+    SPHERICAL_SAMPLE_RADIUS_FRACTION,
+    _kappa_scale,
+    _project_ball,
+    _stereographic_distance,
 )
 
 
@@ -116,24 +40,31 @@ from holonomy_lib.manifolds.stereographic import (
 # (effective κ can pass through 0, dispatching to the Euclidean
 # limit via the dynamic-sign-dispatch helpers).
 #
-# The harmonic mean is the alternative — better-behaved when both
-# κ's are non-zero and same-sign (preserves their geometric mean),
-# but blows up when one κ is 0. Tried but not made default.
+# The harmonic mean preserves equal curvatures of either sign but is singular
+# when their sum vanishes.
 def _combiner_arithmetic_mean(
     kappa_a: torch.Tensor, kappa_b: torch.Tensor,
 ) -> torch.Tensor:
-    """`(κ_a + κ_b) / 2` — the default per-pair κ combiner."""
+    """`(κ_a + κ_b) / 2`; the default per-pair κ combiner."""
     return 0.5 * (kappa_a + kappa_b)
 
 
 def _combiner_harmonic_mean(
     kappa_a: torch.Tensor, kappa_b: torch.Tensor,
 ) -> torch.Tensor:
-    """`2 / (1/κ_a + 1/κ_b)` — preserves same-sign behavior; ill-defined
-    when either κ = 0. Caller is responsible for keeping κ's away
-    from 0 when using this combiner."""
-    tiny = torch.finfo(kappa_a.dtype).tiny
-    return 2.0 / (1.0 / kappa_a.clamp(min=tiny) + 1.0 / kappa_b.clamp(min=tiny))
+    """Signed harmonic mean; zero sum is singular and raises ValueError.
+
+    One zero operand with a nonzero other operand has the continuous
+    extension zero. Opposite operands, including (0, 0), have no such
+    unique extension.
+    """
+    denominator = kappa_a + kappa_b
+    if (denominator == 0).any():
+        raise ValueError(
+            "harmonic curvature mean is undefined when kappa_a + kappa_b = 0"
+        )
+    return 2.0 * kappa_a * (kappa_b / denominator)
+
 
 
 _BUILTIN_COMBINERS = {
@@ -146,17 +77,17 @@ class HeterogeneousKappaManifold:
     """κ-stereographic geometry with per-point curvature.
 
     Args:
-      n: intrinsic / ambient dimension (same — open subset of `R^n`).
+      n: intrinsic / ambient dimension (same; open subset of `R^n`).
       combiner: how to combine two per-point κ's into a single pair-κ
-        for distance / log calculations. Either a built-in name
+        for pairwise dissimilarity calculations. Either a built-in name
         (`"arithmetic_mean"` default, `"harmonic_mean"`) or a callable
         `(κ_a, κ_b) → κ_eff` that's commutative and well-defined for
-        any real κ's.
+        the supplied curvatures (the harmonic mean excludes zero sums).
       device, dtype: tensor placement / precision for `random_point`
         / `origin`.
 
     All methods that involve curvature take an explicit κ tensor (or
-    pair of κ tensors). The class does NOT store κ — that's the
+    pair of κ tensors). The class does NOT store κ; that's the
     user's responsibility. This keeps the manifold a pure math
     primitive and lets the user attach any parameterization on top
     (smooth field, per-point residual, gated mixture, …).
@@ -167,7 +98,7 @@ class HeterogeneousKappaManifold:
       >>> kappas = torch.nn.Parameter(torch.randn(10) * 0.5)
       >>> x = torch.randn(10, 4) * 0.1   # coordinates
       >>> # Pairwise distance: take coord + κ for each side
-      >>> d_01 = mfd.distance(x[0:1], kappas[0:1], x[1:2], kappas[1:2])
+      >>> d_01 = mfd.dissimilarity(x[0:1], kappas[0:1], x[1:2], kappas[1:2])
     """
 
     def __init__(
@@ -220,21 +151,13 @@ class HeterogeneousKappaManifold:
         self, alpha: torch.Tensor, kappa: torch.Tensor,
     ) -> torch.Tensor:
         """`tan_κ(√|κ|·α) / (√|κ|·α)`, smooth across κ ∈ R."""
-        abs_k = torch.abs(kappa).clamp(min=torch.finfo(alpha.dtype).tiny)
-        scaled = torch.sqrt(abs_k) * alpha
-        return torch.where(
-            kappa > 0, _safe_tanc(scaled), _safe_tanhc(scaled),
-        )
+        return _kappa_scale(alpha, kappa)
 
     def _atan_kappa_c(
         self, alpha: torch.Tensor, kappa: torch.Tensor,
     ) -> torch.Tensor:
-        """`arctan_κ(√|κ|·α) / (√|κ|·α)`, smooth across κ ∈ R."""
-        abs_k = torch.abs(kappa).clamp(min=torch.finfo(alpha.dtype).tiny)
-        scaled = torch.sqrt(abs_k) * alpha
-        return torch.where(
-            kappa > 0, _safe_atanc(scaled), _safe_atanhc(scaled),
-        )
+        """Signed-curvature inverse scale, including its derivative at zero."""
+        return _kappa_scale(alpha, kappa, inverse=True)
 
     # ----------------------------------------------------------------
     # Construction
@@ -242,8 +165,13 @@ class HeterogeneousKappaManifold:
 
     def origin(self, batch_size: int = 1) -> torch.Tensor:
         """Origin `(0, …, 0) ∈ R^n`. The origin is the SAME point on
-        every curvature's κ-stereographic — curvature varies what
-        directions look like, not where the origin is."""
+        every curvature's κ-stereographic; curvature varies what
+        directions look like, not where the origin is.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, homogeneous formula applied per point.
+        """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
         return torch.zeros(batch_size, self.n,
@@ -258,26 +186,33 @@ class HeterogeneousKappaManifold:
         """Sample `batch_size` random points on the manifold.
 
         For a heterogeneous-κ manifold the per-point curvature is
-        the user's modeling choice, so this method requires a
+        the user's modeling choice, supplied as a
         `kappa` tensor of shape `(batch_size,)` (or `(batch_size, 1)`
         broadcastable). If `kappa` is omitted, we default to a
-        small standard-normal κ per point — useful for tests but
+        small standard-normal κ per point; useful for tests but
         not a substantively-motivated prior.
 
         The standard sampling pattern: draw a Euclidean tangent
         `v ~ N(0, σ² I)` and apply `exp_0(v, κ)`. This stays
         inside the manifold's domain when `‖v‖` is small enough
         (the typical regime for tangent-at-origin training init).
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, homogeneous formula applied per point.
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
+        draw_device = generator.device if generator is not None else self.device
         # Default κ: per-point standard normal scaled by 0.5
         # (gives a mix of mild spherical / hyperbolic for tests).
         if kappa is None:
             kappa = 0.5 * torch.randn(
                 batch_size, generator=generator,
-                device=self.device, dtype=self.dtype,
-            )
+                device=draw_device, dtype=self.dtype,
+            ).to(self.device)
+        elif kappa.shape == (batch_size, 1):
+            kappa = kappa.squeeze(-1)
         elif kappa.shape != (batch_size,):
             raise ValueError(
                 f"kappa shape {tuple(kappa.shape)} must be ({batch_size},)"
@@ -285,18 +220,36 @@ class HeterogeneousKappaManifold:
         # Small tangent scale so spherical samples stay in-domain.
         v = 0.5 * 0.5 * torch.randn(
             batch_size, self.n, generator=generator,
-            device=self.device, dtype=self.dtype,
+            device=draw_device, dtype=self.dtype,
+        ).to(self.device)
+        kappa = kappa.to(device=v.device, dtype=v.dtype)
+        positive_root = torch.sqrt(
+            torch.where(kappa > 0, kappa, torch.ones_like(kappa))
         )
-        return self.exp_0(v, kappa)
+        cap = SPHERICAL_SAMPLE_RADIUS_FRACTION * math.pi / positive_root
+        norm = torch.linalg.vector_norm(v, dim=-1)
+        safe_norm = torch.where(norm > 0, norm, torch.ones_like(norm))
+        scale = torch.where((kappa > 0) & (norm > cap), cap / safe_norm,
+                            torch.ones_like(norm))
+        return self.exp_0(v * scale.unsqueeze(-1), kappa)
 
     def is_on_manifold(
         self, x: torch.Tensor, kappa: torch.Tensor,
         atol: float = 1e-9,
     ) -> torch.Tensor:
-        """Per-element membership test: `κ · ‖x‖² < 1 − atol` for
-        κ > 0 (spherical domain bound); always True for κ ≤ 0."""
-        norm_sq = (x * x).sum(dim=-1)
-        return (kappa * norm_sq) < (1.0 - atol)
+        """Check finite coordinates and -κ||x||² < 1 - atol for κ < 0.
+
+        Nonnegative curvature admits every finite stereographic coordinate.
+
+        References:
+          Bachmann et al. (2020), §2, homogeneous chart domains.
+        """
+        if x.ndim < 2 or x.shape[-1] != self.n:
+            raise ValueError(f"x must have shape (..., {self.n}); got {tuple(x.shape)}")
+        if kappa.shape != x.shape[:-1]:
+            raise ValueError("kappa must match the point batch shape")
+        domain = (kappa >= 0) | (-kappa * x.square().sum(dim=-1) < 1.0 - atol)
+        return torch.isfinite(x).all(dim=-1) & torch.isfinite(kappa) & domain
 
     # ----------------------------------------------------------------
     # Tangent-at-origin operations (most common substrate use case)
@@ -309,35 +262,46 @@ class HeterogeneousKappaManifold:
           v: `(B, n)` Euclidean tangents at the origin (one per point).
           kappa: `(B,)` per-point curvatures.
         Returns:
-          `(B, n)` embedded points, each at its own curvature.
+          `(B, n)` embedded points, each at its own curvature. Large
+          hyperbolic tangents saturate inside the representable ball.
+          Spherical exp/log are inverses only for ||v|| < π/(2√κ).
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, homogeneous formula applied per point.
         """
-        if v.shape[-1] != self.n:
+        if v.ndim < 2 or v.shape[-1] != self.n:
             raise ValueError(
-                f"v last dim must be n={self.n}, got {v.shape[-1]}"
+                f"v last dim must be n={self.n}, got {tuple(v.shape)}"
             )
         if kappa.shape != v.shape[:-1]:
             raise ValueError(
                 f"kappa shape {tuple(kappa.shape)} must match v.shape[:-1] = "
                 f"{tuple(v.shape[:-1])}"
             )
-        v_sq = (v * v).sum(dim=-1)
-        v_norm = _safe_sqrt(v_sq)
+        v_norm = torch.linalg.vector_norm(v, dim=-1)
         scaling = self._tan_kappa_c(v_norm, kappa)
-        return scaling.unsqueeze(-1) * v
+        return _project_ball(scaling.unsqueeze(-1) * v, kappa)
 
     def log_0(self, y: torch.Tensor, kappa: torch.Tensor) -> torch.Tensor:
         """Per-point log at the origin: `log_0(y_i; κ_i)`. Inverse of
-        `exp_0` at the same κ."""
-        if y.shape[-1] != self.n:
+        `exp_0` at the same κ within its injective, unsaturated range.
+        Positive curvature uses the principal log; hyperbolic saturation
+        cannot be inverted.
+
+        References:
+          Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
+          Convolutional Networks, §2, homogeneous formula applied per point.
+        """
+        if y.ndim < 2 or y.shape[-1] != self.n:
             raise ValueError(
-                f"y last dim must be n={self.n}, got {y.shape[-1]}"
+                f"y last dim must be n={self.n}, got {tuple(y.shape)}"
             )
         if kappa.shape != y.shape[:-1]:
             raise ValueError(
                 f"kappa shape {tuple(kappa.shape)} must match y.shape[:-1]"
             )
-        y_sq = (y * y).sum(dim=-1)
-        y_norm = _safe_sqrt(y_sq)
+        y_norm = torch.linalg.vector_norm(y, dim=-1)
         scaling = self._atan_kappa_c(y_norm, kappa)
         return scaling.unsqueeze(-1) * y
 
@@ -345,57 +309,35 @@ class HeterogeneousKappaManifold:
     # Pair operations: combine two per-point κ's
     # ----------------------------------------------------------------
 
-    def distance(
+    def dissimilarity(
         self,
         x: torch.Tensor, kappa_x: torch.Tensor,
         y: torch.Tensor, kappa_y: torch.Tensor,
     ) -> torch.Tensor:
-        """Geodesic distance between points `x` and `y` with per-point
-        curvatures `κ_x` and `κ_y`.
+        """Pair-conditioned dissimilarity under the combined curvature.
 
-        The two curvatures are combined into a single pair-effective
-        κ via `self.combiner(κ_x, κ_y)`. The standard
-        constant-curvature distance formula at the combined κ is then
-        evaluated, using the unified arcsinh / arctan / arctanh
-        dispatch.
+        This agrees with homogeneous distance when both curvatures agree,
+        but need not obey the triangle inequality. A custom combiner must
+        be commutative for symmetry. Invalid combined domains raise ValueError.
 
         Args:
-          x, y: `(B, n)` coordinate tensors.
-          kappa_x, kappa_y: `(B,)` per-point curvatures.
-
+          x, y: (B, n) coordinates.
+          kappa_x, kappa_y: (B,) endpoint curvatures.
         Returns:
-          `(B,)` non-negative distances.
+          (B,) nonnegative pair-conditioned values, not metric distances.
 
-        **Limit semantics:**
-          - `κ_x = κ_y` (homogeneous case): reduces to the standard
-            constant-curvature distance — matches
-            `KappaStereographicManifold(κ).distance` exactly.
-          - `κ_x = -κ_y` (opposite-sign mix): arithmetic-mean
-            combiner gives `κ_eff = 0`, Euclidean distance. Harmonic
-            combiner gives `κ_eff = 0/0` (blows up, hence the
-            clamp). The arithmetic default is more defensible at
-            sign mixes.
+        References:
+          Bachmann et al. (2020), §2, constant-curvature distance only.
+          Combining endpoint curvatures is an experimental modeling choice.
         """
+        if x.shape != y.shape or kappa_x.shape != kappa_y.shape:
+            raise ValueError(
+                "endpoint coordinates and curvatures must have matching shapes"
+            )
         kappa_pair = self.combiner(kappa_x, kappa_y)
-        # Now compute the distance under the (per-element) pair-κ
-        # using the unified formula `2·d·_atan_kappa_c(d; κ_pair)`.
-        diff = self._mobius_add(-x, y, kappa_pair)
-        diff_sq = (diff * diff).sum(dim=-1)
-        diff_norm = _safe_sqrt(diff_sq)
-        return 2.0 * diff_norm * self._atan_kappa_c(diff_norm, kappa_pair)
-
-    def _mobius_add(
-        self,
-        x: torch.Tensor, y: torch.Tensor, kappa: torch.Tensor,
-    ) -> torch.Tensor:
-        """Möbius `x ⊕_κ y` with per-point κ. Same algebra as
-        `KappaStereographicManifold.mobius_add` but κ is broadcast
-        per-element (each pair has its own κ_pair from the combiner).
-        """
-        xy = (x * y).sum(dim=-1, keepdim=True)
-        xx = (x * x).sum(dim=-1, keepdim=True)
-        yy = (y * y).sum(dim=-1, keepdim=True)
-        k = kappa.unsqueeze(-1)
-        num = (1.0 - 2.0 * k * xy - k * yy) * x + (1.0 + k * xx) * y
-        denom = 1.0 - 2.0 * k * xy + k * k * xx * yy
-        return num / denom
+        if not (self.is_on_manifold(x, kappa_pair, atol=0.0)
+                & self.is_on_manifold(y, kappa_pair, atol=0.0)).all():
+            raise ValueError(
+                "both endpoints must be valid under the combined curvature"
+            )
+        return _stereographic_distance(x, y, kappa_pair)

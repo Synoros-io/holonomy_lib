@@ -6,7 +6,7 @@
 Subclasses implement `step(point, ambient_grad) -> new_point`. The base
 class holds the manifold reference and per-instance hyperparameters.
 
-The "manifold" parameter must expose `projection(point, ambient)` and
+The "manifold" parameter must expose `egrad_to_rgrad(point, ambient)` and
 `retraction(point, tangent)` methods with the same signatures as
 `FixedRankManifold` and `SPDManifold`. The optimizer is otherwise
 agnostic to which manifold it's operating on.
@@ -22,7 +22,7 @@ class RiemannianOptimizer(ABC):
     """Abstract base for Riemannian optimizers.
 
     A subclass owns:
-      - the manifold (provides projection + retraction),
+      - the manifold (provides gradient conversion + retraction),
       - hyperparameters (learning rate, momentum coefficients, etc.),
       - per-instance state (moment buffers, step count) if stateful.
 
@@ -56,5 +56,9 @@ class RiemannianOptimizer(ABC):
 
         Returns:
           new_point: the point after the step.
+
+        References:
+          Bonnabel (2013), Stochastic Gradient Descent on Riemannian
+          Manifolds, §III.
         """
         ...

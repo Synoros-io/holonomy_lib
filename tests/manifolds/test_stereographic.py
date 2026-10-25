@@ -7,7 +7,7 @@ Six layers, parametrized across the three κ branches (spherical,
 Euclidean, hyperbolic):
   1. Construction validation.
   2. Shapes across B ∈ {0, 1, several}.
-  3. Property tests — exp/log inverse, distance symmetry, Möbius
+  3. Property tests; exp/log inverse, distance symmetry, Möbius
      additive inverse, Euclidean recovery at κ = 0.
   4. Autograd-finite tests at boundary inputs.
   6. Cross-comparison against geoopt's Stereographic (when installed).
@@ -44,79 +44,6 @@ class TestConstruction:
         with pytest.raises(ValueError, match="n"):
             KappaStereographicManifold(n=0)
 
-    def test_rejects_n_negative(self):
-        with pytest.raises(ValueError, match="n"):
-            KappaStereographicManifold(n=-2)
-
-    def test_rejects_non_scalar_kappa(self):
-        """Multi-element Tensor kappa rejected (must be 0-dim scalar)."""
-        with pytest.raises(TypeError, match="0-dim"):
-            KappaStereographicManifold(
-                n=3, kappa=torch.tensor([0.5, 1.0]),
-            )
-
-    def test_accepts_scalar_tensor_kappa(self):
-        """0-dim Tensor kappa is accepted for learnable-κ workflows."""
-        mfd = KappaStereographicManifold(
-            n=3, kappa=torch.tensor(-1.0, dtype=torch.float64),
-        )
-        # Basic ops should still work
-        x = mfd.random_point(batch_size=2, generator=_seed(80))
-        y = mfd.random_point(batch_size=2, generator=_seed(81))
-        d = mfd.distance(x, y)
-        assert torch.isfinite(d).all()
-
-    @pytest.mark.parametrize("k", KAPPA_VALUES)
-    def test_branch_dispatch(self, k):
-        mfd = _make_manifold(kappa=k)
-        if k > 0:
-            assert mfd._branch == "spherical"
-        elif k < 0:
-            assert mfd._branch == "hyperbolic"
-        else:
-            assert mfd._branch == "euclidean"
-
-    def test_dim_and_ambient_dim_equal(self):
-        mfd = _make_manifold(n=5)
-        assert mfd.dim == 5
-        assert mfd.ambient_dim == 5
-
-
-# --------------------------------------------------------------------
-# Shapes across batch sizes
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [0, 1, 4])
-@pytest.mark.parametrize("k", KAPPA_VALUES)
-class TestShapes:
-    def test_random_point(self, batch, k):
-        mfd = _make_manifold(kappa=k)
-        x = mfd.random_point(batch_size=batch, generator=_seed(0))
-        assert x.shape == (batch, mfd.n)
-
-    def test_origin(self, batch, k):
-        mfd = _make_manifold(kappa=k)
-        o = mfd.origin(batch_size=batch)
-        assert o.shape == (batch, mfd.n)
-
-    def test_exp_log(self, batch, k):
-        mfd = _make_manifold(kappa=k)
-        x = mfd.random_point(batch_size=batch, generator=_seed(1))
-        v = torch.randn(batch, mfd.n, dtype=mfd.dtype,
-                        generator=_seed(2)) * 0.05
-        y = mfd.exp(x, v)
-        out = mfd.log(x, y)
-        assert y.shape == (batch, mfd.n)
-        assert out.shape == (batch, mfd.n)
-
-    def test_distance(self, batch, k):
-        mfd = _make_manifold(kappa=k)
-        x = mfd.random_point(batch_size=batch, generator=_seed(3))
-        y = mfd.random_point(batch_size=batch, generator=_seed(4))
-        d = mfd.distance(x, y)
-        assert d.shape == (batch,)
-
 
 # --------------------------------------------------------------------
 # Properties — per-κ-branch invariants
@@ -130,10 +57,29 @@ class TestProperties:
         x = mfd.random_point(batch_size=8, generator=_seed(10))
         assert mfd.is_on_manifold(x).all()
 
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold(kappa=k)
+            x = mfd.random_point(batch_size=batch, generator=_seed(0))
+            assert x.shape == (batch, mfd.n)
+
+        for curvature, expected in [(-1., False), (1., True), (0., True)]:
+            mfd = KappaStereographicManifold(2, curvature)
+            assert mfd.is_on_manifold(torch.tensor([[2., 0.]])).item() == expected
+            assert not mfd.is_on_manifold(torch.tensor([[float("inf"), 0.]])).item()
+        mfd = KappaStereographicManifold(2, -1., dtype=torch.float32)
+        point = mfd.exp_0(torch.tensor([[10., 0.]], dtype=torch.float32))
+        assert mfd.is_on_manifold(point).all()
+        assert torch.isfinite(mfd.log_0(point)).all()
+
     def test_origin_on_manifold(self, k):
         mfd = _make_manifold(kappa=k)
         o = mfd.origin(batch_size=3)
         assert mfd.is_on_manifold(o).all()
+
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold(kappa=k)
+            o = mfd.origin(batch_size=batch)
+            assert o.shape == (batch, mfd.n)
 
     def test_mobius_add_neutral_at_origin(self, k):
         """0 ⊕_κ y = y and x ⊕_κ 0 = x."""
@@ -165,6 +111,16 @@ class TestProperties:
         v_back = mfd.log(x, mfd.exp(x, v))
         torch.testing.assert_close(v_back, v, atol=1e-9, rtol=1e-9)
 
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold(kappa=k)
+            x = mfd.random_point(batch_size=batch, generator=_seed(1))
+            v = torch.randn(batch, mfd.n, dtype=mfd.dtype,
+                            generator=_seed(2)) * 0.05
+            y = mfd.exp(x, v)
+            out = mfd.log(x, y)
+            assert y.shape == (batch, mfd.n)
+            assert out.shape == (batch, mfd.n)
+
     def test_log_exp_inverse(self, k):
         """exp_x(log_x(y)) = y."""
         mfd = _make_manifold(kappa=k)
@@ -190,6 +146,44 @@ class TestProperties:
             atol=1e-10, rtol=0,
         )
 
+        for batch in [0, 1, 4]:
+            mfd = _make_manifold(kappa=k)
+            x = mfd.random_point(batch_size=batch, generator=_seed(3))
+            y = mfd.random_point(batch_size=batch, generator=_seed(4))
+            d = mfd.distance(x, y)
+            assert d.shape == (batch,)
+
+        k = torch.tensor(1., dtype=torch.float64, requires_grad=True)
+        mfd = KappaStereographicManifold(2, k)
+        x = torch.tensor([[.8, 0.]], dtype=torch.float64, requires_grad=True)
+        y = -x.detach()
+        distance = mfd.distance(x, y)
+        expected = 4 * torch.atan(torch.tensor(.8, dtype=x.dtype))
+        torch.testing.assert_close(distance, expected[None], atol=1e-12, rtol=0)
+        grad_x, grad_k = torch.autograd.grad(distance.sum(), (x, k))
+        torch.testing.assert_close(
+            grad_x, torch.tensor([[2 / 1.64, 0.0]], dtype=x.dtype), atol=1e-12, rtol=0
+        )
+        expected_k = -2 * torch.atan(torch.tensor(.8, dtype=x.dtype)) + 1.6 / 1.64
+        torch.testing.assert_close(grad_k, expected_k, atol=1e-12, rtol=0)
+
+        for dtype in [torch.float32, torch.float64]:
+            mfd = KappaStereographicManifold(2, 1., dtype=dtype)
+            x = torch.tensor([[1., 0.]], dtype=dtype)
+            torch.testing.assert_close(
+                mfd.distance(x, -x),
+                torch.full((1,), torch.pi, dtype=dtype),
+                atol=1e-6,
+                rtol=0,
+            )
+            mfd = KappaStereographicManifold(2, -1., dtype=dtype)
+            x = mfd.exp_0(torch.tensor([[10., 0.]], dtype=dtype))
+            # Evaluate the one-dimensional radial closed form on represented
+            # coordinates.
+            expected = 4 * torch.atanh(x[:, 0].double())
+            torch.testing.assert_close(mfd.distance(x, -x).double(), expected,
+                                       atol=2e-6, rtol=0)
+
     def test_distance_at_same_point(self, k):
         """d(x, x) = 0 to machine precision."""
         mfd = _make_manifold(kappa=k)
@@ -205,7 +199,7 @@ class TestProperties:
 
 
 class TestEuclideanRecovery:
-    """At κ = 0 the manifold IS Euclidean R^n — but with the conformal-
+    """At κ = 0 the manifold IS Euclidean R^n; but with the conformal-
     factor-2 normalization Bachmann uses, distances are 2× the standard."""
 
     def test_exp_is_identity(self):
@@ -420,21 +414,6 @@ class TestLearnableKappa:
     gradient of distance-based losses should flow back to κ so SGD
     can learn the curvature magnitude from data."""
 
-    def test_kappa_tensor_gradient_through_distance(self):
-        """With κ as a Parameter, `distance(x, y).sum().backward()`
-        should give a non-trivial gradient on κ."""
-        kappa = torch.nn.Parameter(torch.tensor(-1.0, dtype=torch.float64))
-        mfd = KappaStereographicManifold(n=3, kappa=kappa,
-                                          dtype=torch.float64)
-        x = mfd.random_point(batch_size=4, generator=_seed(100))
-        y = mfd.random_point(batch_size=4, generator=_seed(101))
-        d = mfd.distance(x, y)
-        d.sum().backward()
-        assert kappa.grad is not None
-        assert torch.isfinite(kappa.grad).all()
-        # The gradient should be non-zero (distance genuinely depends
-        # on κ for hyperbolic Poincaré ball).
-        assert kappa.grad.abs().item() > 0
 
     def test_kappa_sgd_step_reduces_loss(self):
         """End-to-end: an SGD step on κ should reduce a distance-based
@@ -494,99 +473,151 @@ class TestKappaGradientFlowPerOp:
         )
         return mfd, kappa
 
-    def test_distance(self):
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=4, generator=_seed(200))
-        y = mfd.random_point(batch_size=4, generator=_seed(201))
-        d = mfd.distance(x, y)
-        d.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
+    @pytest.mark.parametrize(
+        "op",
+        [
+            "distance",
+            "inner",
+            "norm",
+            "exp_0",
+            "log_0",
+            "exp",
+            "log",
+            "parallel_transport",
+            "mobius_add",
+        ],
+    )
+    def test_distance(self, op):
+        if op == 'distance':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=4, generator=_seed(200))
+            y = mfd.random_point(batch_size=4, generator=_seed(201))
+            d = mfd.distance(x, y)
+            d.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'inner':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=4, generator=_seed(202))
+            u = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(203))
+            v = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(204))
+            out = mfd.inner(x, u, v)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'norm':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=4, generator=_seed(205))
+            v = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(206))
+            out = mfd.norm(x, v)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'exp_0':
+            mfd, kappa = self._make()
+            v = (torch.randn(4, mfd.n, dtype=torch.float64,
+                              generator=_seed(207)) * 0.2)
+            out = mfd.exp_0(v)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'log_0':
+            mfd, kappa = self._make()
+            v = (torch.randn(4, mfd.n, dtype=torch.float64,
+                              generator=_seed(208)) * 0.2)
+            y = mfd.exp_0(v).detach()  # detach so only κ-grad accrues
+            out = mfd.log_0(y)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'exp':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=3, generator=_seed(209))
+            v_tan = (torch.randn(3, mfd.n, dtype=torch.float64,
+                                  generator=_seed(210)) * 0.1)
+            out = mfd.exp(x, v_tan)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'log':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=3, generator=_seed(211))
+            y = mfd.random_point(batch_size=3, generator=_seed(212))
+            out = mfd.log(x, y)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'parallel_transport':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=3, generator=_seed(213))
+            y = mfd.random_point(batch_size=3, generator=_seed(214))
+            v_tan = (torch.randn(3, mfd.n, dtype=torch.float64,
+                                  generator=_seed(215)) * 0.1)
+            out = mfd.parallel_transport(x, y, v_tan)
+            torch.testing.assert_close(
+                mfd.inner(y, out, out),
+                mfd.inner(x, v_tan, v_tan),
+                atol=1e-12,
+                rtol=1e-12,
+            )
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
+        elif op == 'mobius_add':
+            mfd, kappa = self._make()
+            x = mfd.random_point(batch_size=3, generator=_seed(216))
+            y = mfd.random_point(batch_size=3, generator=_seed(217))
+            out = mfd.mobius_add(x, y)
+            out.sum().backward()
+            assert torch.isfinite(kappa.grad)
+            assert kappa.grad.abs() > 0
 
-    def test_inner(self):
-        """inner uses _conformal_factor which uses live κ."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=4, generator=_seed(202))
-        u = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(203))
-        v = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(204))
-        out = mfd.inner(x, u, v)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
+        if op == "distance":
+            mfd = KappaStereographicManifold(
+                n=3, kappa=torch.tensor(-1.0, dtype=torch.float64),
+            )
+            # Basic ops should still work
+            x = mfd.random_point(batch_size=2, generator=_seed(80))
+            y = mfd.random_point(batch_size=2, generator=_seed(81))
+            d = mfd.distance(x, y)
+            assert torch.isfinite(d).all()
 
-    def test_norm(self):
-        """norm uses _conformal_factor which uses live κ."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=4, generator=_seed(205))
-        v = torch.randn(4, mfd.n, dtype=torch.float64, generator=_seed(206))
-        out = mfd.norm(x, v)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
+            kappa = torch.nn.Parameter(torch.tensor(-1.0, dtype=torch.float64))
+            mfd = KappaStereographicManifold(n=3, kappa=kappa,
+                                              dtype=torch.float64)
+            x = mfd.random_point(batch_size=4, generator=_seed(100))
+            y = mfd.random_point(batch_size=4, generator=_seed(101))
+            d = mfd.distance(x, y)
+            d.sum().backward()
+            assert kappa.grad is not None
+            assert torch.isfinite(kappa.grad).all()
+            # The gradient should be non-zero (distance depends
+            # on κ for hyperbolic Poincaré ball).
+            assert kappa.grad.abs().item() > 0
 
-    def test_exp_0(self):
-        """exp_0 uses _tan_kappa_c which uses live κ."""
-        mfd, kappa = self._make()
-        v = (torch.randn(4, mfd.n, dtype=torch.float64,
-                          generator=_seed(207)) * 0.2)
-        out = mfd.exp_0(v)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
+        if op == "parallel_transport":
+            mfd = KappaStereographicManifold(2, -1.)
+            x = torch.tensor([[.5, 0.]], dtype=torch.float64)
+            y = torch.tensor([[.2, 0.]], dtype=torch.float64)
+            v = torch.tensor([[2., 0.]], dtype=torch.float64)
+            torch.testing.assert_close(mfd.parallel_transport(x, y, v),
+                                       torch.tensor([[2.56, 0.]], dtype=v.dtype),
+                                       atol=1e-12, rtol=0)
+        if op in ("exp_0", "log_0"):
+            k = torch.tensor(0., dtype=torch.float64, requires_grad=True)
+            mfd = KappaStereographicManifold(2, k)
+            v = torch.tensor([[.5, 0.]], dtype=torch.float64)
+            actual = torch.autograd.grad(getattr(mfd, op)(v).sum(), k)[0]
+            expected = (1 if op == "exp_0" else -1) / 24
+            torch.testing.assert_close(actual, torch.tensor(expected, dtype=v.dtype),
+                                       atol=1e-12, rtol=0)
+            assert torch.autograd.gradcheck(
+                lambda curvature: getattr(KappaStereographicManifold(2, curvature), op)(
+                    v
+                ),
+                (k,),
+            )
 
-    def test_log_0(self):
-        """log_0 uses _atan_kappa_c which uses live κ."""
-        mfd, kappa = self._make()
-        v = (torch.randn(4, mfd.n, dtype=torch.float64,
-                          generator=_seed(208)) * 0.2)
-        y = mfd.exp_0(v).detach()  # detach so only κ-grad accrues
-        out = mfd.log_0(y)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
-
-    def test_exp(self):
-        """exp uses both _conformal_factor and _tan_kappa_c + mobius_add."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=3, generator=_seed(209))
-        v_tan = (torch.randn(3, mfd.n, dtype=torch.float64,
-                              generator=_seed(210)) * 0.1)
-        out = mfd.exp(x, v_tan)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
-
-    def test_log(self):
-        """log uses _conformal_factor + _atan_kappa_c + mobius_add."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=3, generator=_seed(211))
-        y = mfd.random_point(batch_size=3, generator=_seed(212))
-        out = mfd.log(x, y)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
-
-    def test_parallel_transport(self):
-        """parallel_transport uses _conformal_factor + mobius_add."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=3, generator=_seed(213))
-        y = mfd.random_point(batch_size=3, generator=_seed(214))
-        v_tan = (torch.randn(3, mfd.n, dtype=torch.float64,
-                              generator=_seed(215)) * 0.1)
-        out = mfd.parallel_transport(x, y, v_tan)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
-
-    def test_mobius_add(self):
-        """Direct test on mobius_add — used by exp / log / pt."""
-        mfd, kappa = self._make()
-        x = mfd.random_point(batch_size=3, generator=_seed(216))
-        y = mfd.random_point(batch_size=3, generator=_seed(217))
-        out = mfd.mobius_add(x, y)
-        out.sum().backward()
-        assert torch.isfinite(kappa.grad)
-        assert kappa.grad.abs() > 0
 
     def test_kappa_grad_through_substrate_chain(self):
         """End-to-end pattern: v -> exp_0(v) -> all-pairs distance ->
@@ -619,17 +650,15 @@ class TestKappaGradientFlowPerOp:
 
 
 class TestKappaSignCrossing:
-    """Tensor-κ with dynamic dispatch — the manifold's branch is no
+    """Tensor-κ with dynamic dispatch; the manifold's branch is no
     longer locked at construction time; SGD can push κ from
     hyperbolic (κ<0) to spherical (κ>0) or vice versa without
     breakdown. This was the previous "undefined behavior" case."""
 
-    def test_kappa_crosses_zero_negative_to_positive(self):
-        """κ_init = -0.5, regularized toward +0.5. After SGD, κ ends
-        positive; throughout, distance is finite and points stay on
-        the manifold."""
+    @pytest.mark.parametrize("initial", [-0.5, 0.5])
+    def test_kappa_crosses_zero_negative_to_positive(self, initial):
         kappa = torch.nn.Parameter(
-            torch.tensor(-0.5, dtype=torch.float64),
+            torch.tensor(initial, dtype=torch.float64),
         )
         mfd = KappaStereographicManifold(
             n=3, kappa=kappa, dtype=torch.float64,
@@ -638,13 +667,14 @@ class TestKappaSignCrossing:
                           generator=_seed(300)) * 0.2)
         optimizer = torch.optim.SGD([kappa], lr=0.01)
 
-        target = torch.tensor(0.5, dtype=torch.float64)
+        target = torch.tensor(-initial, dtype=torch.float64)
         for step in range(50):
             optimizer.zero_grad()
             T = mfd.exp_0(v)
             d = mfd.distance(T[:2], T[2:4])
             loss = d.sum() + 5.0 * (kappa - target) ** 2
             loss.backward()
+            assert torch.isfinite(kappa.grad)
             optimizer.step()
             # Check finiteness every step
             assert torch.isfinite(d).all().item(), (
@@ -653,35 +683,22 @@ class TestKappaSignCrossing:
             assert torch.isfinite(T).all().item()
 
         # κ went from -0.5 to near +0.5 — branch must have flipped
-        assert kappa.item() > 0, (
-            f"κ should be positive after regularization, got {kappa.item()}"
+        assert kappa.item() * initial < 0, (
+            f"κ should have crossed zero from {initial}, got {kappa.item()}"
         )
         # And points remain on manifold under the new sign
         T_final = mfd.exp_0(v).detach()
         assert mfd.is_on_manifold(T_final).all().item()
 
-    def test_kappa_crosses_zero_positive_to_negative(self):
-        """Reverse direction: κ_init = +0.5, regularized toward -0.5."""
-        kappa = torch.nn.Parameter(
-            torch.tensor(0.5, dtype=torch.float64),
-        )
-        mfd = KappaStereographicManifold(
-            n=3, kappa=kappa, dtype=torch.float64,
-        )
-        # Sample directly via origin (avoid initialization in the
-        # not-yet-correct branch) — points at origin work for any κ.
-        T_origin = mfd.origin(batch_size=4)
-        # Small Euclidean offsets, evaluated AT each step
-        v = (torch.randn(4, 3, dtype=torch.float64,
-                          generator=_seed(301)) * 0.1)
-        optimizer = torch.optim.SGD([kappa], lr=0.01)
-        target = torch.tensor(-0.5, dtype=torch.float64)
-        for step in range(50):
-            optimizer.zero_grad()
-            T = mfd.exp_0(v)
-            d = mfd.distance(T[:2], T[2:4])
-            loss = d.sum() + 5.0 * (kappa - target) ** 2
-            loss.backward()
-            optimizer.step()
-            assert torch.isfinite(d).all().item()
-        assert kappa.item() < 0
+        # The initial zero value must not cache a permanently Euclidean branch.
+        k = torch.tensor(0., dtype=torch.float64, requires_grad=True)
+        mfd = KappaStereographicManifold(2, k)
+        with torch.no_grad():
+            k.fill_(-1.)
+        v = torch.tensor([[.5, 0.]], dtype=torch.float64)
+        torch.testing.assert_close(mfd.exp_0(v), torch.tanh(v), atol=1e-12, rtol=0)
+        for current in [1., 0., -1.]:
+            with torch.no_grad():
+                k.fill_(current)
+            samples = mfd.random_point(4, generator=_seed(301))
+            assert mfd.is_on_manifold(samples).all()

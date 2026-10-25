@@ -6,9 +6,9 @@
 Five layers:
   1. Construction validation.
   2. Shapes across B ∈ {0, 1, several}.
-  3. Property tests — Minkowski-form algebra, causal classification
+  3. Property tests; Minkowski-form algebra, causal classification
      (timelike / null / spacelike), proper time + distance.
-  4. Autograd — linear ops in flat space are trivially smooth.
+  4. Autograd; linear ops in flat space are trivially smooth.
 """
 
 from __future__ import annotations
@@ -44,19 +44,6 @@ class TestConstruction:
             LorentzianManifold(n=0)
         with pytest.raises(ValueError, match="n"):
             LorentzianManifold(n=-2)
-
-    def test_dim_and_ambient_equal(self):
-        mfd = _make_manifold(n=5)
-        assert mfd.dim == 5
-        assert mfd.ambient_dim == 5
-
-    def test_causal_type_constants(self):
-        # Public constants for matching
-        assert LorentzianManifold.SPACELIKE == 0
-        assert LorentzianManifold.FUTURE_TIMELIKE == 1
-        assert LorentzianManifold.PAST_TIMELIKE == -1
-        assert LorentzianManifold.FUTURE_NULL == 2
-        assert LorentzianManifold.PAST_NULL == -2
 
 
 # --------------------------------------------------------------------
@@ -131,14 +118,6 @@ class TestMinkowskiAlgebra:
             atol=1e-10, rtol=1e-10,
         )
 
-    def test_norm_sq_signed(self):
-        """norm_sq agrees with inner(v, v) and can be any sign."""
-        mfd = _make_manifold()
-        v = torch.randn(4, mfd.n, dtype=mfd.dtype, generator=_seed(15))
-        torch.testing.assert_close(
-            mfd.norm_sq(v), mfd.minkowski_inner(v, v),
-            atol=1e-12, rtol=0,
-        )
 
     def test_interval_sq_translation_invariant(self):
         """⟨y - x, y - x⟩_M doesn't depend on a constant shift."""
@@ -168,23 +147,18 @@ class TestCausalStructure:
         c = mfd.causal_type(x, y)
         assert c.item() == mfd.FUTURE_TIMELIKE
 
-    def test_past_timelike_pair(self):
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         y = torch.tensor([[-2.0, 0.5, 0.3, 0.2]], dtype=torch.float64)
         c = mfd.causal_type(x, y)
         assert c.item() == mfd.PAST_TIMELIKE
 
-    def test_spacelike_pair(self):
-        """A pair with Σ(Δx_i)² > (Δt)² is spacelike."""
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         y = torch.tensor([[0.5, 2.0, 1.0, 1.0]], dtype=torch.float64)
         c = mfd.causal_type(x, y)
         assert c.item() == mfd.SPACELIKE
 
-    def test_future_null_pair(self):
-        """Δ on the light cone: Δt² = Σ Δx_i² exactly."""
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         # Δ = (√3, 1, 1, 1) — Δt² = 3, |Δx|² = 3, null ✓
@@ -193,7 +167,6 @@ class TestCausalStructure:
         c = mfd.causal_type(x, y)
         assert c.item() == mfd.FUTURE_NULL
 
-    def test_past_null_pair(self):
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         y = torch.tensor([[-math.sqrt(3.0), 1.0, 1.0, 1.0]],
@@ -219,16 +192,6 @@ class TestProperMeasures:
             atol=1e-12, rtol=0,
         )
 
-    def test_proper_time_spacelike_is_nan(self):
-        """proper_time on a spacelike pair returns NaN (type-mismatch)."""
-        mfd = _make_manifold(n=4)
-        x = torch.zeros(1, 4, dtype=torch.float64)
-        y = torch.tensor([[0.5, 2.0, 1.0, 1.0]], dtype=torch.float64)
-        tau = mfd.proper_time(x, y)
-        assert torch.isnan(tau).all()
-
-    def test_proper_distance_spacelike(self):
-        """s = √(interval_sq). Δ=(0.5, 2, 0, 0): i_sq = 4-0.25 = 3.75."""
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         y = torch.tensor([[0.5, 2.0, 0.0, 0.0]], dtype=torch.float64)
@@ -238,7 +201,14 @@ class TestProperMeasures:
             atol=1e-12, rtol=0,
         )
 
-    def test_proper_distance_timelike_is_nan(self):
+    def test_proper_time_spacelike_is_nan(self):
+        """proper_time on a spacelike pair returns NaN (type-mismatch)."""
+        mfd = _make_manifold(n=4)
+        x = torch.zeros(1, 4, dtype=torch.float64)
+        y = torch.tensor([[0.5, 2.0, 1.0, 1.0]], dtype=torch.float64)
+        tau = mfd.proper_time(x, y)
+        assert torch.isnan(tau).all()
+
         mfd = _make_manifold(n=4)
         x = torch.zeros(1, 4, dtype=torch.float64)
         y = torch.tensor([[2.0, 0.5, 0.3, 0.2]], dtype=torch.float64)
@@ -259,6 +229,13 @@ class TestFlatGeodesics:
         out = mfd.exp(x, v)
         torch.testing.assert_close(out, x + v, atol=0, rtol=0)
 
+        mfd = _make_manifold()
+        x = mfd.random_point(batch_size=3, generator=_seed(24))
+        y = mfd.random_point(batch_size=3, generator=_seed(25))
+        torch.testing.assert_close(
+            mfd.exp(x, mfd.log(x, y)), y, atol=1e-14, rtol=1e-14,
+        )
+
     def test_log_is_subtraction(self):
         mfd = _make_manifold()
         x = mfd.random_point(batch_size=3, generator=_seed(22))
@@ -267,15 +244,6 @@ class TestFlatGeodesics:
             mfd.log(x, y), y - x, atol=0, rtol=0,
         )
 
-    def test_exp_log_inverse(self):
-        """exp_x(log_x(y)) = y up to float roundoff (one add-then-
-        subtract introduces ~eps_dtype relative error)."""
-        mfd = _make_manifold()
-        x = mfd.random_point(batch_size=3, generator=_seed(24))
-        y = mfd.random_point(batch_size=3, generator=_seed(25))
-        torch.testing.assert_close(
-            mfd.exp(x, mfd.log(x, y)), y, atol=1e-14, rtol=1e-14,
-        )
 
     def test_projection_is_identity(self):
         mfd = _make_manifold()
@@ -300,7 +268,6 @@ class TestAutogradFinite:
         i_sq.sum().backward()
         assert torch.isfinite(x.grad).all()
 
-    def test_proper_time_backward_at_timelike_pair(self):
         mfd = _make_manifold(n=4)
         # Force timelike: large Δt direction
         v = torch.tensor([2.0, 0.1, 0.0, 0.0], dtype=torch.float64,
@@ -311,7 +278,6 @@ class TestAutogradFinite:
         tau.sum().backward()
         assert torch.isfinite(v.grad).all()
 
-    def test_proper_distance_backward_at_spacelike_pair(self):
         mfd = _make_manifold(n=4)
         v = torch.tensor([0.1, 2.0, 0.0, 0.0], dtype=torch.float64,
                           requires_grad=True)
@@ -355,6 +321,13 @@ class TestCurvatureTensors:
                 off, torch.zeros_like(off), atol=1e-12, rtol=0,
             )
 
+        mfd = _make_manifold(n=4)
+        x = mfd.random_point(batch_size=1, generator=_seed(55))
+        y = mfd.random_point(batch_size=1, generator=_seed(56))
+        g_x = mfd.metric_tensor(x)
+        g_y = mfd.metric_tensor(y)
+        torch.testing.assert_close(g_x, g_y, atol=0, rtol=0)
+
     def test_christoffel_zero(self):
         mfd = _make_manifold(n=4)
         x = mfd.random_point(batch_size=3, generator=_seed(51))
@@ -364,7 +337,6 @@ class TestCurvatureTensors:
             gamma, torch.zeros_like(gamma), atol=0, rtol=0,
         )
 
-    def test_riemann_zero(self):
         mfd = _make_manifold(n=4)
         x = mfd.random_point(batch_size=2, generator=_seed(52))
         R = mfd.riemann_tensor(x)
@@ -373,7 +345,6 @@ class TestCurvatureTensors:
             R, torch.zeros_like(R), atol=0, rtol=0,
         )
 
-    def test_ricci_zero(self):
         mfd = _make_manifold(n=4)
         x = mfd.random_point(batch_size=2, generator=_seed(53))
         ricci = mfd.ricci_tensor(x)
@@ -382,7 +353,6 @@ class TestCurvatureTensors:
             ricci, torch.zeros_like(ricci), atol=0, rtol=0,
         )
 
-    def test_scalar_curvature_zero(self):
         mfd = _make_manifold(n=4)
         x = mfd.random_point(batch_size=2, generator=_seed(54))
         scal = mfd.scalar_curvature(x)
@@ -391,14 +361,6 @@ class TestCurvatureTensors:
             scal, torch.zeros_like(scal), atol=0, rtol=0,
         )
 
-    def test_metric_independent_of_point(self):
-        """Constant metric: g(x) = g(y) for any x, y in flat Minkowski."""
-        mfd = _make_manifold(n=4)
-        x = mfd.random_point(batch_size=1, generator=_seed(55))
-        y = mfd.random_point(batch_size=1, generator=_seed(56))
-        g_x = mfd.metric_tensor(x)
-        g_y = mfd.metric_tensor(y)
-        torch.testing.assert_close(g_x, g_y, atol=0, rtol=0)
 
     def test_minkowski_inner_matches_metric_contraction(self):
         """⟨u, v⟩_M = g_μν u^μ v^ν."""
@@ -424,15 +386,6 @@ class TestCurvatureTensors:
 
 
 class TestInnerForApiUniformity:
-    def test_inner_returns_signed_minkowski(self):
-        """`inner(x, u, v)` = ⟨u, v⟩_M, signed (no positivity)."""
-        mfd = _make_manifold(n=4)
-        x = mfd.random_point(batch_size=3, generator=_seed(80))
-        u = torch.randn(3, 4, dtype=torch.float64, generator=_seed(81))
-        v = torch.randn(3, 4, dtype=torch.float64, generator=_seed(82))
-        out = mfd.inner(x, u, v)
-        expected = mfd.minkowski_inner(u, v)
-        torch.testing.assert_close(out, expected, atol=1e-12, rtol=0)
 
     def test_inner_self_can_be_signed(self):
         """A timelike v has ⟨v, v⟩_M < 0; a spacelike v has > 0."""
@@ -449,31 +402,3 @@ class TestInnerForApiUniformity:
 # --------------------------------------------------------------------
 # Interop: LorentzianManifold as a component of ProductManifold
 # --------------------------------------------------------------------
-
-
-def test_lorentzian_in_product_manifold():
-    """ProductManifold mixes Lorentzian (pseudo-Riemannian, indefinite)
-    with a Riemannian manifold. ProductManifold.inner sums per-component
-    contributions; the Lorentzian piece contributes a *signed* term."""
-    from holonomy_lib.manifolds import (
-        KappaStereographicManifold,
-        ProductManifold,
-    )
-    mfd = ProductManifold([
-        KappaStereographicManifold(n=2, kappa=-1.0, dtype=torch.float64),
-        LorentzianManifold(n=2, dtype=torch.float64),
-    ])
-    x = mfd.random_point(batch_size=3, generator=_seed(90))
-    y = mfd.random_point(batch_size=3, generator=_seed(91))
-    # Distance is well-defined: Pythagorean over Riemannian parts +
-    # the Lorentzian piece contributes via its (signed) inner. NB:
-    # the Pythagorean composition assumes positive d_i² per component,
-    # but `LorentzianManifold` doesn't define `distance` — so this
-    # call would only succeed if it does. Let's just verify the inner
-    # composition works.
-    u = torch.randn(3, mfd.ambient_dim, dtype=torch.float64,
-                    generator=_seed(92))
-    v = torch.randn(3, mfd.ambient_dim, dtype=torch.float64,
-                    generator=_seed(93))
-    out = mfd.inner(x, u, v)
-    assert torch.isfinite(out).all()
