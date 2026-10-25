@@ -401,6 +401,14 @@ def lsqr(
     def _denominator(t: torch.Tensor) -> torch.Tensor:
         return torch.where(t != 0, t, torch.ones_like(t))
 
+    def _hypot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # hypot(0, 0) has undefined derivatives even when a later mask
+        # discards its value. Supply a safe pair before calling it.
+        nonzero = (a != 0) | (b != 0)
+        safe_a = torch.where(nonzero, a, torch.ones_like(a))
+        safe_b = torch.where(nonzero, b, torch.zeros_like(b))
+        return torch.where(nonzero, torch.hypot(safe_a, safe_b), 0.0)
+
     u, beta = _safe_normalize(rhs)
     bnorm = beta.clone()
     v, alfa = _safe_normalize(rmatvec(u))
@@ -417,16 +425,23 @@ def lsqr(
     for itn in range(1, maxiter + 1):
         active = ~(done | failed)
         u, beta = _safe_normalize(matvec(v) - alfa.unsqueeze(-1) * u)
-        anorm = torch.hypot(torch.hypot(anorm, alfa), torch.hypot(beta, damping))
+        anorm = _hypot(_hypot(anorm, alfa), _hypot(beta, damping))
         v, alfa = _safe_normalize(rmatvec(u) - beta.unsqueeze(-1) * v)
 
+        # Finished members still participate until the next host sync.
+        # Give them an identity rotation before any hypot or division.
+        rhobar = torch.where(active, rhobar, torch.ones_like(rhobar))
+        beta = torch.where(active, beta, 0.0)
+        alfa = torch.where(active, alfa, 0.0)
+        active_damping = torch.where(active, damping, 0.0)
+        phibar = torch.where(active, phibar, 0.0)
         # Both rotations use hypot: squaring a finite coefficient need not
         # produce a finite intermediate, even when the rotation is well-defined.
-        rhobar1 = torch.hypot(rhobar, damping)
+        rhobar1 = _hypot(rhobar, active_damping)
         cs1 = rhobar / _denominator(rhobar1)
-        psi = (damping / _denominator(rhobar1)) * phibar
+        psi = (active_damping / _denominator(rhobar1)) * phibar
         phibar = cs1 * phibar
-        rho = torch.hypot(rhobar1, beta)
+        rho = _hypot(rhobar1, beta)
         cs = rhobar1 / _denominator(rho)
         sn = beta / _denominator(rho)
         theta = sn * alfa
@@ -437,8 +452,8 @@ def lsqr(
         candidate = x + (phi / _denominator(rho)).unsqueeze(-1) * w
         x = torch.where(active.unsqueeze(-1), candidate, x)
         w = v - (theta / _denominator(rho)).unsqueeze(-1) * w
-        damped_residual = torch.hypot(damped_residual, psi)
-        rnorm = torch.hypot(phibar, damped_residual)
+        damped_residual = _hypot(damped_residual, psi)
+        rnorm = _hypot(phibar, damped_residual)
         arnorm = alfa * (sn * phi).abs()
         finite = (torch.isfinite(x).all(dim=-1) & torch.isfinite(rnorm)
                   & torch.isfinite(arnorm) & torch.isfinite(anorm)

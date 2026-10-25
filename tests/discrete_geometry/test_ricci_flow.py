@@ -89,6 +89,21 @@ class TestFlow:
         )
         looped = discrete_ricci_flow(path + 5 * torch.eye(3), n_steps=1)
         torch.testing.assert_close(looped, path, atol=1e-12, rtol=0)
+        # Normalization is relative to the graph's own scale, including
+        # lengths below the old absolute norm floor.
+        for dtype in (torch.float64, torch.float32):
+            for scale in (1e-12, 1.0):
+                tiny = _complete_graph(3, dtype=dtype) * scale
+                for flow in (discrete_ricci_flow, ricci_flow_with_surgery):
+                    result = flow(
+                        tiny, n_steps=1, dt=.2, normalize=True,
+                        reg=.4 * scale, n_sinkhorn_iters=1000, sinkhorn_tol=1e-6,
+                    )
+                    torch.testing.assert_close(result.norm() / tiny.norm(),
+                                               tiny.new_tensor(1.))
+                    zero = torch.zeros_like(tiny)
+                    torch.testing.assert_close(flow(zero, n_steps=1), zero,
+                                               atol=0, rtol=0)
 
 
 class TestFlowDynamics:

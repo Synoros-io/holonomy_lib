@@ -172,6 +172,34 @@ class TestLSQR:
             lsqr(torch.tensor([[1e20]]), torch.tensor([1e20])), torch.ones(1),
         )
         assert lsqr(torch.empty(2, 0, 0), torch.empty(2, 0)).shape == (2, 0)
+        if B == 1:
+            # An identity solve finishes before a delayed host check.
+            # Its RHS derivative must remain the identity, not NaN.
+            for dtype in (torch.float32, torch.float64):
+                identity = torch.eye(2, dtype=dtype)
+                rhs = torch.tensor([1., 2.], dtype=dtype, requires_grad=True)
+                solution = lsqr(identity, rhs)
+                torch.testing.assert_close(solution, rhs, atol=0, rtol=0)
+                gradient, = torch.autograd.grad(solution.sum(), rhs)
+                torch.testing.assert_close(gradient, torch.ones_like(rhs))
+            for sync_every in (1, 2, 8):
+                assert torch.autograd.gradcheck(
+                    lambda rhs, sync_every=sync_every: lsqr(
+                        identity, rhs, sync_every=sync_every,
+                    ),
+                    (rhs,),
+                )
+                # Batch members finish on different iterations.
+                operators = torch.stack((identity, torch.diag(rhs.detach())))
+                batched_rhs = rhs.detach().expand(2, -1).clone().requires_grad_()
+                solution = lsqr(operators, batched_rhs, sync_every=sync_every)
+                reference = torch.linalg.solve(operators, batched_rhs)
+                torch.testing.assert_close(solution, reference, atol=1e-12, rtol=0)
+                gradient, = torch.autograd.grad(solution.sum(), batched_rhs)
+                torch.testing.assert_close(
+                    gradient, operators.diagonal(dim1=-2, dim2=-1).reciprocal(),
+                    atol=1e-12, rtol=0,
+                )
 
 
     def test_damped_matches_augmented_system(self):

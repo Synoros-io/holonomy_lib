@@ -67,8 +67,10 @@ def effective_resistance(A: torch.Tensor) -> torch.Tensor:
         connected components have infinite resistance.
 
     Notes:
-      The pseudoinverse uses torch.linalg.pinv with hermitian=True and its
-      default relative rank tolerance n * eps(dtype). Connectivity uses
+      Each component is scaled by its maximum weighted degree. Adding the
+      projector onto component constants makes the scaled Laplacian positive
+      definite; Cholesky inversion and projector subtraction give its
+      pseudoinverse without a spectral rank cutoff. Connectivity uses
       Boolean reachability by repeated matrix squaring, with O(log n)
       sequential rounds and O(B · n³ log n) dense work. Each round doubles
       the path lengths represented, so there are no node or batch loops.
@@ -144,7 +146,18 @@ def _resistance_and_reachability(
         paths = connected.to(A.dtype)
         connected = connected | (paths @ paths > 0)
     laplacian = _L.combinatorial(A)
-    inverse = torch.linalg.pinv(laplacian, hermitian=True)
+    degree = A.sum(dim=-1)
+    component_scale = torch.where(connected, degree.unsqueeze(-2), 0.0).amax(-1)
+    # One scale per component preserves symmetry. Isolates have zero
+    # Laplacian and a unit projector, so their inverse needs no rescaling.
+    component_scale = torch.where(
+        component_scale > 0, component_scale, torch.ones_like(component_scale),
+    ).unsqueeze(-1)
+    projector = connected.to(A.dtype) / connected.sum(dim=-1, keepdim=True)
+    grounded = laplacian / component_scale + projector
+    inverse = (
+        torch.cholesky_inverse(torch.linalg.cholesky(grounded)) - projector
+    ) / component_scale
     diagonal = inverse.diagonal(dim1=-2, dim2=-1)
     resistance = diagonal.unsqueeze(-1) + diagonal.unsqueeze(-2) - 2.0 * inverse
     return torch.where(connected, resistance, float("inf")), connected

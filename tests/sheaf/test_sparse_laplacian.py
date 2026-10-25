@@ -150,6 +150,18 @@ def test_bottom_spectrum_drops_kernel_and_matches_dense():
     reference = 2 - 2 * torch.cos(torch.tensor([2 * torch.pi / 7],
                                               dtype=torch.float32))
     torch.testing.assert_close(vals, reference, atol=2e-6, rtol=0)
+    # Sparse LOBPCG leaves a small positive Rayleigh quotient for the
+    # constant mode. Its residual uncertainty still overlaps zero.
+    for n in (60, 120):
+        edges = torch.stack((torch.arange(n - 1), torch.arange(1, n)), -1)
+        path = GraphSheaf.trivial(n, edges, dtype=DT)
+        reference = 2 - 2 * torch.cos(torch.tensor([torch.pi / n], dtype=DT))
+        for seed in (3, 9, 22):
+            vals, _, _ = sheaf_bottom_spectrum(
+                path, 1, solver="torch_lobpcg",
+                generator=torch.Generator(device=path.device).manual_seed(seed),
+            )
+            torch.testing.assert_close(vals, reference, atol=1e-9, rtol=0)
 
 
 def test_bottom_spectrum_keep_kernel():

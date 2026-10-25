@@ -359,10 +359,12 @@ def sheaf_bottom_spectrum(
     (with `drop_kernel=True`, the default): the kernel of `L_F` is the
     space of global sections. For a trivial sheaf these are constant
     in each stalk channel on each connected component. Dropping them
-    starts the returned spectrum at the first positive mode. Kernel modes are
-    identified at `λ ≤ n · eps(dtype) · scale`, where `scale` is
-    the full spectral norm on the dense path and its upper bound
-    `max_i Σ_j |L[i,j]|` on sparse paths.
+    starts the returned spectrum at the first resolved positive mode. A mode
+    is positive only above both its residual bound `||Lv - λv|| / ||v||`
+    and a matrix-scale tolerance. That tolerance is at least
+    `n · eps(dtype) · scale`, and at least `LOBPCG_TOL · scale` for
+    LOBPCG, where `scale` is the full spectral norm on the dense path
+    and its upper bound `max_i Σ_j |L[i,j]|` on sparse paths.
 
     The eigensolve runs on the SPARSE Laplacian via
     `algebra.lanczos_eigsh(which="SA")`; see `algebra.eigsh_sparse` for
@@ -395,6 +397,7 @@ def sheaf_bottom_spectrum(
       Ericsson-Ruhe (1980); Knyazev (2001), for the sparse bottom-k
         backends, via `algebra.eigsh_sparse`.
     """
+    from holonomy_lib.algebra.eigsh_sparse import LOBPCG_TOL, SPARSE_SA_ITER_SOLVER_N
     from holonomy_lib.algebra.lanczos import lanczos_eigsh
 
     if not isinstance(k, int) or isinstance(k, bool) or k < 1:
@@ -417,6 +420,7 @@ def sheaf_bottom_spectrum(
             "maps or use torch.linalg.eigh(sheaf_laplacian(sheaf))"
         )
     k_req = min(k + kernel_headroom, n) if drop_kernel else k
+    relative_tol = n * torch.finfo(sheaf.dtype).eps
     # A zero sheaf has no positive modes. Avoid a singular sparse
     # factorization and keep the output allocation at n * k_req.
     if L._nnz() == 0 or not torch.any(L.values()):
@@ -437,6 +441,13 @@ def sheaf_bottom_spectrum(
             0, L.indices()[0], L.values().abs(),
         )
         kernel_scale = row_magnitudes.max()
+        uses_lobpcg = solver in ("lobpcg", "torch_lobpcg") or (
+            solver == "auto" and (
+                L.device.type != "cpu" or n > SPARSE_SA_ITER_SOLVER_N
+            )
+        )
+        if uses_lobpcg:
+            relative_tol = max(relative_tol, LOBPCG_TOL)
 
     if not drop_kernel:
         return vals[:k], vecs[:, :k], _node_offsets(sheaf)
@@ -444,17 +455,24 @@ def sheaf_bottom_spectrum(
     # Partial bottom spectra do not contain the largest mode, so their
     # maximum cannot set a matrix-scale rank tolerance. The sparse row
     # norm bounds the spectral norm without another eigensolve.
-    nonzero = vals > n * torch.finfo(sheaf.dtype).eps * kernel_scale
+    residual_bounds = torch.linalg.vector_norm(
+        torch.sparse.mm(L, vecs) - vecs * vals, dim=0,
+    ) / torch.linalg.vector_norm(vecs, dim=0)
+    cutoff = torch.maximum(relative_tol * kernel_scale, residual_bounds)
+    nonzero = vals > cutoff
     n_nonzero = int(nonzero.sum())
     if n_nonzero < k:
         reason = (
-            "the full spectrum contains too few positive modes"
+            "the full spectrum contains too few resolved positive modes"
             if k_req == n else
             f"increase kernel_headroom={kernel_headroom} to inspect more modes"
         )
         raise ValueError(
-            f"only {n_nonzero} nonzero modes among the {k_req} computed "
-            f"for k={k}; {reason} (the remaining modes are in the sheaf kernel)"
+            f"only {n_nonzero} resolved positive modes among the {k_req} computed "
+            f"for k={k}; {reason} (remaining modes are in the sheaf kernel "
+            f"or unresolved at the solver accuracy; scale cutoff="
+            f"{float(relative_tol * kernel_scale):.6g}, "
+            f"max residual={float(residual_bounds.max()):.6g})"
         )
     vals = vals[nonzero][:k]
     vecs = vecs[:, nonzero][:, :k]

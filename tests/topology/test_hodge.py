@@ -176,6 +176,31 @@ class TestBettiNumbersSparse:
              1: torch.empty(0, 2, dtype=torch.int64)}, n_vertices=3,
         )
         assert betti_numbers(empty_edges, 1).tolist() == [3, 0]
+        if representation == "dense" and dtype == torch.float32:
+            # A path has one component and no cycles. Long paths expose
+            # the loss of rank from squaring boundary conditioning.
+            for n in (300, 512):
+                points = torch.arange(n, dtype=dtype)
+                distances = (points[:, None] - points[None, :]).abs()[None]
+                path = vietoris_rips_dense(distances, 1.0, 1)
+                assert betti_numbers(path, 1).tolist() == [[1, 0]]
+                assert betti_numbers(path, 0).tolist() == [[1]]
+
+            # A larger edge table in another member cannot change this
+            # path's rank tolerance or contribute padding as topology.
+            n = 256
+            points = torch.arange(n, dtype=dtype)
+            distances = (points[:, None] - points[None, :]).abs()[None]
+            other = torch.full((n, n), 2.0, dtype=dtype)
+            other.fill_diagonal_(0)
+            rows, cols = torch.triu_indices(n, n, offset=1)[:, :600]
+            other[rows, cols] = other[cols, rows] = 1.0
+            alone = vietoris_rips_dense(distances, 1.0, 1)
+            padded = vietoris_rips_dense(
+                torch.cat((distances, other[None])), 1.0, 1,
+            )
+            assert betti_numbers(alone, 1).tolist() == [[1, 0]]
+            assert betti_numbers(padded, 1)[0].tolist() == [1, 0]
 
 
 # --------------------------------------------------------------------

@@ -97,6 +97,27 @@ class TestClosedForms:
                     torch.testing.assert_close(
                         R[batch_index], effective_resistance(singleton)[0],
                     )
+        generator = torch.Generator().manual_seed(4)
+        weights = torch.rand(3, 6, 6, generator=generator, dtype=torch.float64)
+        A = weights + weights.mT
+        A.diagonal(dim1=-2, dim2=-1).zero_()
+        laplacian = torch.diag_embed(A.sum(-1)) - A
+        inverse = torch.linalg.pinv(laplacian, hermitian=True)
+        diagonal = inverse.diagonal(dim1=-2, dim2=-1)
+        reference = diagonal[..., None] + diagonal[..., None, :] - 2 * inverse
+        torch.testing.assert_close(effective_resistance(A), reference,
+                                   atol=1e-10, rtol=0)
+
+        # Differentiate independent conductances while preserving symmetry.
+        rows, cols = torch.triu_indices(3, 3, offset=1)
+        conductances = torch.tensor([0.7, 1.2, 0.9], dtype=torch.float64,
+                                    requires_grad=True)
+
+        def from_conductances(weights):
+            upper = weights.new_zeros(3, 3).index_put((rows, cols), weights)
+            return effective_resistance((upper + upper.mT)[None])
+
+        assert torch.autograd.gradcheck(from_conductances, (conductances,))
 
     def test_path_graph_endpoint_resistance(self):
         """On P_n (unweighted path 0,1,...,(n−1)), the resistance
@@ -175,3 +196,15 @@ class TestEdgeCases:
         assert commute[0, 0, 1] == pytest.approx(2.0)
         assert torch.isinf(resistance[0, 0, 2])
         assert torch.isinf(commute[0, 0, 2])
+        # The strong component cannot erase the weak component's spectrum.
+        for dtype in (torch.float32, torch.float64):
+            different_scales = disjoint_edges.to(dtype)
+            different_scales[:, :2, :2] *= 1e-7
+            resistance = effective_resistance(different_scales)
+            commute = commute_time(different_scales)
+            torch.testing.assert_close(resistance[0, 0, 1],
+                                       torch.tensor(1e7, dtype=dtype))
+            torch.testing.assert_close(commute[0, 0, 1],
+                                       torch.tensor(2., dtype=dtype))
+            assert torch.isinf(resistance[0, 0, 2])
+            assert torch.isinf(commute[0, 0, 2])

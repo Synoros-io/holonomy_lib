@@ -229,7 +229,6 @@ def discrete_ricci_flow(
     )
     if normalize:
         initial_norm = torch.linalg.matrix_norm(W, dim=(-2, -1), keepdim=True)
-        initial_norm = initial_norm.clamp(min=1e-9)
 
     for _ in range(n_steps):
         # Compute curvature on current edge weights
@@ -250,7 +249,12 @@ def discrete_ricci_flow(
         if normalize:
             current_norm = torch.linalg.matrix_norm(
                 W, dim=(-2, -1), keepdim=True,
-            ).clamp(min=1e-9)
+            )
+            # A positive norm keeps its own scale, however small. If the
+            # step removes every edge, zero weights must remain zero.
+            current_norm = torch.where(
+                current_norm == 0, torch.ones_like(current_norm), current_norm,
+            )
             W = W * (initial_norm / current_norm)
     return W
 
@@ -325,7 +329,7 @@ def ricci_flow_with_surgery(
     if normalize:
         initial_norm = torch.linalg.matrix_norm(
             W, dim=(-2, -1), keepdim=True,
-        ).clamp(min=1e-9)
+        )
 
     for step in range(n_steps):
         # One Ricci-flow step
@@ -342,7 +346,10 @@ def ricci_flow_with_surgery(
         if normalize:
             current_norm = torch.linalg.matrix_norm(
                 W, dim=(-2, -1), keepdim=True,
-            ).clamp(min=1e-9)
+            )
+            current_norm = torch.where(
+                current_norm == 0, torch.ones_like(current_norm), current_norm,
+            )
             W = W * (initial_norm / current_norm)
 
         # Surgery: remove edges that have stretched past the cutoff.

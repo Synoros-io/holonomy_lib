@@ -33,8 +33,8 @@ Two paths share the same public function `hodge_laplacian(complex, k)`:
     boundary storage but still requires space for the final dense L_k.
 
 `betti_numbers(complex, max_dim)` returns the Betti numbers for dims
-0..max_dim using the dtype- and size-aware rank tolerance of
-`torch.linalg.matrix_rank(..., hermitian=True)`.
+0..max_dim from float64 boundary ranks. Rank tolerances use each
+member's real simplex counts, independently of batch padding.
 
 References:
   Eckmann, B. (1944). Harmonische Funktionen und Randwertaufgaben in
@@ -101,28 +101,28 @@ def betti_numbers(
 ) -> torch.Tensor:
     """Betti numbers `(β_0, β_1, …, β_max_dim)` for a simplicial complex.
 
-    `β_k = n_k - rank(L_k)`; equivalently, the multiplicity of zero
-    in `spec(L_k)`. The default rank tolerance scales with matrix size,
-    dtype epsilon and spectral norm, as in `torch.linalg.matrix_rank`.
+    `β_k = n_k - rank(∂_k) - rank(∂_{k+1})`. Boundary entries are
+    exactly 0 or ±1, so ranks are computed in float64 regardless of
+    the complex's storage dtype. This avoids squaring the conditioning
+    by forming a Hodge Laplacian.
 
     Args:
       complex: a `DenseSimplicialComplex` or `SparseSimplicialComplex`.
       max_dim: highest dim to return Betti numbers for. Must satisfy
         `0 ≤ max_dim ≤ complex.max_dim`.
       threshold: optional positive relative rank tolerance. With `None`,
-        PyTorch uses `n_k * torch.finfo(dtype).eps`. An explicit value
-        is passed as `rtol` with zero absolute tolerance.
+        each boundary uses `max(n_{k-1}, n_k) * eps(float64)`, with
+        real simplex counts for that batch member. An explicit value
+        applies to boundary singular values, with zero absolute tolerance.
 
     Returns:
       Dense complex  → `(B, max_dim + 1)` Tensor of int64 Betti numbers.
       Sparse complex → `(max_dim + 1,)` Tensor.
 
     Notes:
-      Rank uses the full Hermitian eigenspectrum. Padding rows are zero
-      and do not contribute rank; subtracting rank from the valid simplex
-      count gives the Betti number without counting padding as topology.
-      Half and bfloat16 operators are promoted to float32 for the eigensolve;
-      the default rank tolerance then uses float32 epsilon.
+      Dense boundaries retain zero padding for batched SVD; it adds only
+      zero singular values and does not enter the per-member tolerance.
+      Sparse boundaries are materialized for the rank computation.
 
     References:
       Eckmann (1944); kernel of L_k equals harmonic k-forms.
@@ -139,33 +139,33 @@ def betti_numbers(
 
     if isinstance(complex, DenseSimplicialComplex):
         B = complex.batch_size
-        out = torch.zeros(B, max_dim + 1, dtype=torch.int64,
-                           device=complex.device)
-        for k in range(max_dim + 1):
-            L_k = hodge_laplacian(complex, k)            # (B, n_k_max, n_k_max)
-            if L_k.shape[-1] and B:
-                # PyTorch's Hermitian eigensolver needs at least float32.
-                # Boundary entries are integers, so promotion preserves them.
-                rank_input = (
-                    L_k.float() if L_k.dtype in (torch.float16, torch.bfloat16)
-                    else L_k
+        ranks = torch.zeros(B, max_dim + 2, dtype=torch.int64,
+                            device=complex.device)
+        for k in range(1, min(max_dim + 1, complex.max_dim) + 1):
+            boundary = complex.boundary(k).to(torch.float64)
+            relative_tol: float | torch.Tensor | None = threshold
+            if relative_tol is None:
+                real_size = torch.maximum(
+                    complex.n_simplices(k - 1), complex.n_simplices(k),
                 )
-                rank = torch.linalg.matrix_rank(
-                    rank_input, hermitian=True, rtol=threshold,
-                )
-                out[:, k] = complex.valid_mask[k].sum(dim=-1) - rank
-        return out
+                relative_tol = real_size.to(torch.float64) * torch.finfo(
+                    torch.float64,
+                ).eps
+            ranks[:, k] = torch.linalg.matrix_rank(boundary, rtol=relative_tol)
+        counts = torch.stack([
+            complex.n_simplices(k) for k in range(max_dim + 1)
+        ], dim=-1)
+        return counts - ranks[:, :-1] - ranks[:, 1:]
 
     if isinstance(complex, SparseSimplicialComplex):
-        out = torch.zeros(max_dim + 1, dtype=torch.int64,
-                           device=complex.device)
-        for k in range(max_dim + 1):
-            L_k = hodge_laplacian(complex, k)            # (n_k, n_k)
-            if L_k.shape[-1]:
-                out[k] = L_k.shape[-1] - torch.linalg.matrix_rank(
-                    L_k, hermitian=True, rtol=threshold,
-                )
-        return out
+        ranks = torch.zeros(max_dim + 2, dtype=torch.int64, device=complex.device)
+        for k in range(1, min(max_dim + 1, complex.max_dim) + 1):
+            boundary = complex.boundary(k, dtype=torch.float64).to_dense()
+            ranks[k] = torch.linalg.matrix_rank(boundary, rtol=threshold)
+        counts = torch.tensor([
+            complex.n_simplices(k) for k in range(max_dim + 1)
+        ], dtype=torch.int64, device=complex.device)
+        return counts - ranks[:-1] - ranks[1:]
 
     raise TypeError(
         f"complex must be a Dense or Sparse SimplicialComplex; "
