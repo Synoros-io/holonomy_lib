@@ -32,7 +32,6 @@ MODULES = [
     "bench_spectral",
     "bench_tensor_calculus",
     "bench_discrete_geometry",
-    "bench_provenance",
     "bench_info_geometry",
     "bench_topology",
 ]

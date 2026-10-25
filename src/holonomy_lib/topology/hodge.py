@@ -59,16 +59,12 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial import (
     DenseSimplicialComplex,
     SparseSimplicialComplex,
 )
 
 
-@with_provenance(
-    "holonomy_lib.topology.hodge_laplacian", op_version="0.1",
-)
 def hodge_laplacian(
     complex: DenseSimplicialComplex | SparseSimplicialComplex,
     k: int,
@@ -97,9 +93,6 @@ def hodge_laplacian(
     )
 
 
-@with_provenance(
-    "holonomy_lib.topology.betti_numbers", op_version="0.1",
-)
 def betti_numbers(
     complex: DenseSimplicialComplex | SparseSimplicialComplex,
     max_dim: int,

@@ -32,7 +32,6 @@ from typing import Literal
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.sheaf.graph_sheaf import GraphSheaf, HeterogeneousGraphSheaf
 
 # Dense-coboundary allocation guard: refuse to allocate beyond this
@@ -165,9 +164,6 @@ def _heterogeneous_coboundary(sheaf: HeterogeneousGraphSheaf) -> torch.Tensor:
     return delta
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_coboundary", op_version="0.1",
-)
 def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor:
     """Build the sheaf coboundary `δ` as a dense `(n_e·d_e, n_v·d_v)`
     tensor.
@@ -247,9 +243,6 @@ def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tenso
     return block.reshape(n_e * d_e, n_v * d_v)
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_laplacian", op_version="0.1",
-)
 def sheaf_laplacian(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor:
     """Sheaf Laplacian `L_F = δ^T δ`, a symmetric PSD operator of
     shape `(n_v · d_v, n_v · d_v)`.
@@ -280,9 +273,6 @@ def sheaf_laplacian(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor
     return 0.5 * (L + L.mT)
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_coboundary_sparse", op_version="0.1",
-)
 def sheaf_coboundary_sparse(
     sheaf: GraphSheaf | HeterogeneousGraphSheaf,
 ) -> torch.Tensor:
@@ -311,9 +301,6 @@ def sheaf_coboundary_sparse(
     ).coalesce()
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_laplacian_sparse", op_version="0.1",
-)
 def sheaf_laplacian_sparse(
     sheaf: GraphSheaf | HeterogeneousGraphSheaf,
 ) -> torch.Tensor:
@@ -356,9 +343,6 @@ def _node_offsets(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor:
     ) * sheaf.node_stalk_dim
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_bottom_spectrum", op_version="0.1",
-)
 def sheaf_bottom_spectrum(
     sheaf: GraphSheaf | HeterogeneousGraphSheaf,
     k: int,
@@ -453,9 +437,6 @@ def sheaf_bottom_spectrum(
     return vals, vecs, _node_offsets(sheaf)
 
 
-@with_provenance(
-    "holonomy_lib.sheaf.sheaf_dirichlet_energy", op_version="0.1",
-)
 def sheaf_dirichlet_energy(
     sheaf: GraphSheaf | HeterogeneousGraphSheaf, x: torch.Tensor,
 ) -> torch.Tensor:

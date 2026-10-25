@@ -63,12 +63,7 @@ from collections.abc import Callable
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 
-
-@with_provenance(
-    "holonomy_lib.info_geometry.bregman_divergence", op_version="0.1",
-)
 def bregman_divergence(
     p: torch.Tensor,
     q: torch.Tensor,
@@ -111,9 +106,6 @@ def bregman_divergence(
     return F_p - F_q - inner
 
 
-@with_provenance(
-    "holonomy_lib.info_geometry.kl_divergence_categorical", op_version="0.1",
-)
 def kl_divergence_categorical(
     p: torch.Tensor,
     q: torch.Tensor,
@@ -163,9 +155,6 @@ def kl_divergence_categorical(
     return contributions.sum(dim=-1)
 
 
-@with_provenance(
-    "holonomy_lib.info_geometry.kl_divergence_gaussian", op_version="0.1",
-)
 def kl_divergence_gaussian(
     mu_p: torch.Tensor,
     Sigma_p: torch.Tensor,

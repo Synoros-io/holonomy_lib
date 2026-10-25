@@ -66,7 +66,6 @@ import warnings
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.provenance import with_provenance
 
 # Forman's "node weights" — Samal et al. (2018), §2.1: the standard
 # choice for unweighted simple graphs is w_u = 1 for every node, so the
@@ -86,9 +85,6 @@ FORMAN_NODE_WEIGHT_DEFAULT: float = 1.0
 FORMAN_TRIANGLE_CONTRIBUTION: float = 3.0
 
 
-@with_provenance(
-    "holonomy_lib.discrete_geometry.forman_ricci_simple", op_version="0.1",
-)
 def forman_ricci_simple(A: torch.Tensor) -> torch.Tensor:
     """Forman-Ricci curvature on every edge of a batched weighted graph.
 
@@ -179,9 +175,6 @@ def forman_ricci_simple(A: torch.Tensor) -> torch.Tensor:
     return kappa
 
 
-@with_provenance(
-    "holonomy_lib.discrete_geometry.forman_ricci_augmented", op_version="0.1",
-)
 def forman_ricci_augmented(A: torch.Tensor) -> torch.Tensor:
     """Augmented Forman-Ricci curvature: simple Forman + 2-face term.
 

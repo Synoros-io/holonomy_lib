@@ -62,8 +62,6 @@ from typing import Literal
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 # Default oversampling: extra Lanczos iterations beyond `k` to improve
 # accuracy of the top-k Ritz values. Saad (2011), §6.5 recommends
 # ~5–10 extra for reliable top-k convergence. Halko-Martinsson-Tropp
@@ -78,9 +76,6 @@ _SPARSE_LAYOUTS = (
 )
 
 
-@with_provenance(
-    "holonomy_lib.algebra.lanczos_eigsh", op_version="0.4",
-)
 def lanczos_eigsh(
     A: torch.Tensor,
     k: int,
@@ -303,10 +298,6 @@ def _lanczos_sparse(
 
     Limitations:
       - 2-D only (no batch). Caller wraps for batched sparse cases.
-      - Provenance recording of sparse `A` reads its dense form via
-        `to_dense()` before hashing, which negates the memory win of
-        sparse inputs inside `record()`. Outside `record()` the
-        decorator is transparent and this doesn't matter.
     """
     if A.ndim != 2 or A.shape[-1] != A.shape[-2]:
         raise ValueError(

@@ -36,12 +36,7 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 
-
-@with_provenance(
-    "holonomy_lib.hyperbolic.manifold_aware_inner", op_version="0.1",
-)
 def manifold_aware_inner(
     x: torch.Tensor,
     y: torch.Tensor,

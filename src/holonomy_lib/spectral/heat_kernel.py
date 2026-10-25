@@ -59,8 +59,6 @@ import numpy as np
 import scipy.special
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 # Default Chebyshev expansion order. Empirically (Hammond-Vandergheynst-
 # Gribonval 2011 §6 Fig. 4, and our own audit), `K = 30` gives sub-1e-12
 # relative error for diffusion times `t ≤ 5` on the symmetric-normalized
@@ -80,9 +78,6 @@ CHEBYSHEV_ORDER_DEFAULT: int = 30
 LAMBDA_MAX_L_SYM: float = 2.0
 
 
-@with_provenance(
-    "holonomy_lib.spectral.heat_kernel_chebyshev", op_version="0.1",
-)
 def heat_kernel_chebyshev(
     L: torch.Tensor,
     t: float,

@@ -34,12 +34,7 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 
-
-@with_provenance(
-    "holonomy_lib.hyperbolic.frechet_mean", op_version="0.1",
-)
 def frechet_mean(
     points: torch.Tensor,
     manifold,

@@ -28,12 +28,9 @@ v1 restrictions:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 
 import torch
-
-from holonomy_lib.provenance.protocol import HEX_PREFIX_LEN
 
 
 @dataclass(frozen=True)
@@ -142,35 +139,6 @@ class GraphSheaf:
     def dtype(self) -> torch.dtype:
         return self.F_left.dtype
 
-    def _provenance_signature(self) -> dict:
-        """Deterministic canonical form for `@with_provenance` hashing.
-
-        Sheaf identity = topology (n_nodes + edges) + stalk dims +
-        device + dtype. The restriction maps are themselves tensors,
-        so they pass through `_resolve_tensor_hex` separately and
-        carry their content into the input_hexes of any decorated
-        sheaf op; we do NOT put them in the signature dict.
-
-        We summarize the edge list as a content hash (sha256 over the
-        contiguous int64 bytes) rather than as a Python tuple. The
-        provenance hot path canonicalizes this dict to JSON on every
-        decorated call; an O(n_edges) tuple would dominate runtime
-        for sheaves with tens of thousands of edges.
-        """
-        edges_bytes = self.edges.cpu().contiguous().numpy().tobytes()
-        # Same prefix length as the library-wide content-hash convention
-        # (HEX_PREFIX_LEN cataloged in `magic_numbers.md`).
-        edges_hash = hashlib.sha256(edges_bytes).hexdigest()[:HEX_PREFIX_LEN]
-        return {
-            "class": "GraphSheaf",
-            "n_nodes": self.n_nodes,
-            "node_stalk_dim": self.node_stalk_dim,
-            "edge_stalk_dim": self.edge_stalk_dim,
-            "n_edges": self.n_edges,
-            "edges_sha256_prefix": edges_hash,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
 
     @staticmethod
     def trivial(
@@ -326,22 +294,3 @@ class HeterogeneousGraphSheaf:
     @property
     def dtype(self) -> torch.dtype:
         return self.F_left[0].dtype if self.n_edges else torch.float64
-
-    def _provenance_signature(self) -> dict:
-        """Deterministic canonical form for `@with_provenance` hashing: topology
-        (n_nodes + edges) + the per-node/per-edge stalk dims + device/dtype. As
-        in `GraphSheaf`, the restriction-map tensors are not put in the dict."""
-        edges_bytes = self.edges.cpu().contiguous().numpy().tobytes()
-        dims_bytes = (
-            self.node_stalk_dims.cpu().contiguous().numpy().tobytes()
-            + self.edge_stalk_dims.cpu().contiguous().numpy().tobytes()
-        )
-        return {
-            "class": "HeterogeneousGraphSheaf",
-            "n_nodes": self.n_nodes,
-            "n_edges": self.n_edges,
-            "edges_sha256_prefix": hashlib.sha256(edges_bytes).hexdigest()[:HEX_PREFIX_LEN],
-            "stalk_dims_sha256_prefix": hashlib.sha256(dims_bytes).hexdigest()[:HEX_PREFIX_LEN],
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }

@@ -58,10 +58,7 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import register_provenance_class, with_provenance
 
-
-@register_provenance_class("LorentzianManifold")
 class LorentzianManifold:
     """Flat pseudo-Riemannian manifold `R^{1, n-1}`.
 
@@ -114,22 +111,6 @@ class LorentzianManifold:
         """Ambient dimension `n`. Same as `.dim` for flat space."""
         return self.n
 
-    def _provenance_signature(self) -> dict:
-        return {
-            "class": "LorentzianManifold",
-            "n": self.n,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> LorentzianManifold:
-        dtype_name = sig["dtype"].split(".")[-1]
-        return cls(
-            n=sig["n"],
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-        )
 
     # ----------------------------------------------------------------
     # Minkowski form
@@ -151,10 +132,6 @@ class LorentzianManifold:
         """
         return (u[..., 1:] * v[..., 1:]).sum(dim=-1) - u[..., 0] * v[..., 0]
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.inner",
-        op_version="0.1",
-    )
     def inner(
         self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -184,10 +161,6 @@ class LorentzianManifold:
         del x
         return self.minkowski_inner(u, v)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.norm_sq",
-        op_version="0.1",
-    )
     def norm_sq(self, v: torch.Tensor) -> torch.Tensor:
         """Signed `⟨v, v⟩_M`. Negative = timelike, zero = null,
         positive = spacelike.
@@ -201,10 +174,6 @@ class LorentzianManifold:
         """
         return self.minkowski_inner(v, v)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.interval_sq",
-        op_version="0.1",
-    )
     def interval_sq(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -226,10 +195,6 @@ class LorentzianManifold:
     # Causal classification
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.causal_type",
-        op_version="0.1",
-    )
     def causal_type(
         self,
         x: torch.Tensor,
@@ -292,10 +257,6 @@ class LorentzianManifold:
     # Proper time / distance
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.proper_time",
-        op_version="0.1",
-    )
     def proper_time(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -327,10 +288,6 @@ class LorentzianManifold:
         )
         return tau
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.proper_distance",
-        op_version="0.1",
-    )
     def proper_distance(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -372,10 +329,6 @@ class LorentzianManifold:
     #   R_μν          (n, n)    Ricci tensor
     #   R             ( )       Ricci scalar (scalar curvature)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.metric_tensor",
-        op_version="0.1",
-    )
     def metric_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """Minkowski metric `g_μν = diag(-1, +1, +1, …, +1)`.
 
@@ -393,10 +346,6 @@ class LorentzianManifold:
         out_shape = x.shape[:-1] + (self.n, self.n)
         return torch.diag_embed(eta).expand(out_shape).contiguous()
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.christoffel_symbols",
-        op_version="0.1",
-    )
     def christoffel_symbols(self, x: torch.Tensor) -> torch.Tensor:
         """Christoffel symbols `Γ^σ_μν` of the Levi-Civita connection.
 
@@ -417,10 +366,6 @@ class LorentzianManifold:
             device=x.device, dtype=x.dtype,
         )
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.riemann_tensor",
-        op_version="0.1",
-    )
     def riemann_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """Riemann curvature tensor `R^σ_ρμν`.
 
@@ -437,10 +382,6 @@ class LorentzianManifold:
             device=x.device, dtype=x.dtype,
         )
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.ricci_tensor",
-        op_version="0.1",
-    )
     def ricci_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """Ricci tensor `R_μν = R^σ_μσν`.
 
@@ -459,10 +400,6 @@ class LorentzianManifold:
             device=x.device, dtype=x.dtype,
         )
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.scalar_curvature",
-        op_version="0.1",
-    )
     def scalar_curvature(self, x: torch.Tensor) -> torch.Tensor:
         """Ricci scalar `R = g^μν R_μν`.
 
@@ -507,10 +444,6 @@ class LorentzianManifold:
     # with the Riemannian manifolds)
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.projection",
-        op_version="0.1",
-    )
     def projection(
         self, x: torch.Tensor, w: torch.Tensor,
     ) -> torch.Tensor:
@@ -521,10 +454,6 @@ class LorentzianManifold:
         del x
         return w
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.exp",
-        op_version="0.1",
-    )
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -536,10 +465,6 @@ class LorentzianManifold:
         """
         return x + v
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.log",
-        op_version="0.1",
-    )
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -548,10 +473,6 @@ class LorentzianManifold:
         """
         return y - x
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzianManifold.retraction",
-        op_version="0.1",
-    )
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:

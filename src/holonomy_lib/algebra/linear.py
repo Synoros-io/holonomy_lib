@@ -21,8 +21,6 @@ from typing import Literal
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 # Default oversampling parameter for randomized SVD, per
 # Halko-Martinsson-Tropp (2011) §1.2. The catalog entry is
 # `randomized_svd_oversample`. Five additional projection columns
@@ -40,7 +38,6 @@ RANDOMIZED_SVD_OVERSAMPLE_DEFAULT: int = 5
 RANDOMIZED_SVD_N_ITER_DEFAULT: int = 2
 
 
-@with_provenance("holonomy_lib.algebra.linear.truncated_svd", op_version="0.1")
 def truncated_svd(
     M: torch.Tensor,
     r: int,

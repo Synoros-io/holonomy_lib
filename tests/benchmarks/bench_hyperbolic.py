@@ -24,10 +24,8 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.hyperbolic import (
-    frechet_mean,
-    hyperbolic_laplacian_eigenmaps,
-)
+from holonomy_lib.experimental import hyperbolic_laplacian_eigenmaps
+from holonomy_lib.hyperbolic import frechet_mean
 from holonomy_lib.manifolds import LorentzManifold
 from tests.benchmarks.harness import Bench
 

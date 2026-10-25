@@ -127,20 +127,6 @@ def test_weights_shift_the_mean():
     )
 
 
-def test_provenance_signature():
-    """Op is registered and emits a provenance node."""
-    from holonomy_lib import provenance
-
-    mfd = LorentzManifold(n=3)
-    with provenance.record() as reg:
-        P = mfd.random_point(batch_size=5, generator=_seed(9)).reshape(
-            1, 5, mfd.n + 1,
-        )
-        _ = frechet_mean(P, mfd, max_iter=5)
-    ops = {n.op_id for n in reg}
-    assert "holonomy_lib.hyperbolic.frechet_mean" in ops
-
-
 # --------------------------------------------------------------------
 # Autograd-finite — Fréchet mean backward through a parameterized
 # tangent-at-origin embedding chain.

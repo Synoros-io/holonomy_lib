@@ -29,14 +29,10 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial.complex import DenseSimplicialComplex
 from holonomy_lib.simplicial.sparse_complex import SparseSimplicialComplex
 
 
-@with_provenance(
-    "holonomy_lib.simplicial.vietoris_rips_sparse", op_version="0.1",
-)
 def vietoris_rips_sparse(
     distances: torch.Tensor,
     max_radius: float,
@@ -139,9 +135,6 @@ def vietoris_rips_sparse(
     )
 
 
-@with_provenance(
-    "holonomy_lib.simplicial.vietoris_rips_dense", op_version="0.1",
-)
 def vietoris_rips_dense(
     distances: torch.Tensor,
     max_radius: float,
@@ -220,9 +213,6 @@ def vietoris_rips_dense(
     )
 
 
-@with_provenance(
-    "holonomy_lib.simplicial.pairwise_distances", op_version="0.1",
-)
 def pairwise_distances(points: torch.Tensor) -> torch.Tensor:
     """Pairwise Euclidean distances.
 

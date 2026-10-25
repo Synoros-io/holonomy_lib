@@ -44,8 +44,6 @@ from typing import Union
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 # Cadence of the host-syncing convergence check inside the solver
 # loops. Same value and rationale as the established
 # `SINKHORN_SYNC_EVERY_DEFAULT` (CONVENTIONS §4.1): checking every
@@ -108,9 +106,6 @@ def _normalize_rhs(b: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return b, False
 
 
-@with_provenance(
-    "holonomy_lib.algebra.cg", op_version="0.1",
-)
 def cg(
     A: Operator,
     b: torch.Tensor,
@@ -132,8 +127,7 @@ def cg(
       A: the operator. One of: dense `(n, n)` or `(B, n, n)` tensor;
         sparse `(n, n)` (COO/CSR/CSC; applied to the whole batch in one
         sparse matmul); or a callable `(B, n) → (B, n)` matvec (for
-        never-materialized operators — provenance records callables by
-        `str()`, which is not content-stable). Symmetric PD assumed,
+        never-materialized operators). Symmetric PD assumed,
         not checked.
       b: `(B, n)` or `(n,)` right-hand sides.
       M: optional preconditioner as a callable `(B, n) → (B, n)`
@@ -248,9 +242,6 @@ def _lsqr_matvecs(
     )
 
 
-@with_provenance(
-    "holonomy_lib.algebra.lsqr", op_version="0.1",
-)
 def lsqr(
     A: torch.Tensor,
     b: torch.Tensor,

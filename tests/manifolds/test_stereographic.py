@@ -10,7 +10,6 @@ Euclidean, hyperbolic):
   3. Property tests — exp/log inverse, distance symmetry, Möbius
      additive inverse, Euclidean recovery at κ = 0.
   4. Autograd-finite tests at boundary inputs.
-  5. Provenance signature roundtrip.
   6. Cross-comparison against geoopt's Stereographic (when installed).
 """
 
@@ -294,37 +293,6 @@ class TestAutogradFinite:
         loss.backward()
         assert torch.isfinite(v.grad).all(), (
             f"κ={k}: NaN {torch.isnan(v.grad).sum().item()}"
-        )
-
-
-# --------------------------------------------------------------------
-# Provenance roundtrip
-# --------------------------------------------------------------------
-
-
-class TestProvenance:
-    def test_signature_roundtrip(self):
-        mfd = KappaStereographicManifold(n=5, kappa=-0.7,
-                                          dtype=torch.float32)
-        sig = mfd._provenance_signature()
-        mfd2 = KappaStereographicManifold._from_signature(sig)
-        assert mfd2.n == mfd.n
-        assert mfd2.kappa == mfd.kappa
-        assert mfd2._branch == mfd._branch
-        assert mfd2.dtype == mfd.dtype
-
-    def test_record_in_context(self):
-        from holonomy_lib import provenance
-
-        mfd = _make_manifold(kappa=-1.0)
-        with provenance.record() as reg:
-            x = mfd.random_point(batch_size=2, generator=_seed(60))
-            y = mfd.random_point(batch_size=2, generator=_seed(61))
-            _ = mfd.distance(x, y)
-        ops = {n.op_id for n in reg}
-        assert (
-            "holonomy_lib.manifolds.KappaStereographicManifold.distance"
-            in ops
         )
 
 

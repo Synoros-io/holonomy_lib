@@ -57,8 +57,6 @@ import math
 
 import torch
 
-from holonomy_lib.provenance import register_provenance_class, with_provenance
-
 
 def _safe_sqrt(x: torch.Tensor) -> torch.Tensor:
     """sqrt(x) with autograd-safe handling at x = 0.
@@ -118,7 +116,6 @@ def _safe_arcsinhc(arg: torch.Tensor) -> torch.Tensor:
     )
 
 
-@register_provenance_class("LorentzManifold")
 class LorentzManifold:
     """Lorentz (hyperboloid) model of hyperbolic space H^n_k.
 
@@ -172,29 +169,6 @@ class LorentzManifold:
         """
         return self.n + 1
 
-    def _provenance_signature(self) -> dict:
-        """Deterministic canonical form used by `@with_provenance` to
-        hash the bound `self` of decorated methods. See SPDManifold for
-        the rationale (registered classes need this + `_from_signature`
-        so `ProvenanceRegistry.replay` can rebuild the manifold instance).
-        """
-        return {
-            "class": "LorentzManifold",
-            "n": self.n,
-            "k": self.k,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> LorentzManifold:
-        dtype_name = sig["dtype"].split(".")[-1]
-        return cls(
-            n=sig["n"],
-            k=sig["k"],
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-        )
 
     # ----------------------------------------------------------------
     # Minkowski form (helper)
@@ -295,9 +269,6 @@ class LorentzManifold:
     # Tangent operations
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.projection", op_version="0.1",
-    )
     def projection(
         self, x: torch.Tensor, w: torch.Tensor,
     ) -> torch.Tensor:
@@ -324,9 +295,6 @@ class LorentzManifold:
         coeff = self.k * self.minkowski_inner(x, w)  # (B,)
         return w - coeff.unsqueeze(-1) * x
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.inner", op_version="0.1",
-    )
     def inner(
         self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -350,9 +318,6 @@ class LorentzManifold:
         del x  # induced metric is point-independent in ambient form
         return self.minkowski_inner(u, v)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.norm", op_version="0.1",
-    )
     def norm(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -374,9 +339,6 @@ class LorentzManifold:
     # Exponential / logarithmic maps, geodesic distance
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.exp", op_version="0.1",
-    )
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -416,9 +378,6 @@ class LorentzManifold:
         out = cosh_alpha.unsqueeze(-1) * x + sinhc.unsqueeze(-1) * v
         return self._reproject_to_hyperboloid(out)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.log", op_version="0.1",
-    )
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -480,9 +439,6 @@ class LorentzManifold:
         scale = inv_sinhc * inv_cosh_factor
         return scale.unsqueeze(-1) * u
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.distance", op_version="0.1",
-    )
     def distance(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -526,10 +482,6 @@ class LorentzManifold:
         arg = self._sqrt_abs_k * _safe_sqrt(diff_sq) * 0.5
         return (2.0 * self._inv_sqrt_abs_k) * torch.asinh(arg)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.parallel_transport",
-        op_version="0.1",
-    )
     def parallel_transport(
         self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -575,9 +527,6 @@ class LorentzManifold:
     # Retraction (= exp for the hyperboloid; second-order)
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.retraction", op_version="0.1",
-    )
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -597,9 +546,6 @@ class LorentzManifold:
     # Convenience: exp / log at the origin
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.exp_0", op_version="0.1",
-    )
     def exp_0(self, v_spatial: torch.Tensor) -> torch.Tensor:
         """Exponential map at the origin from an (n,)-dimensional
         Euclidean coordinate.
@@ -644,9 +590,6 @@ class LorentzManifold:
         out = torch.cat([time, space], dim=-1)
         return self._reproject_to_hyperboloid(out)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.LorentzManifold.log_0", op_version="0.1",
-    )
     def log_0(self, y: torch.Tensor) -> torch.Tensor:
         """Logarithmic map at the origin to an (n,)-dimensional Euclidean
         coordinate.

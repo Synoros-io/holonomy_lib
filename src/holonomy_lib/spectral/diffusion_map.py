@@ -53,13 +53,9 @@ import warnings
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.spectral.embedding import laplacian_eigenmaps
 
 
-@with_provenance(
-    "holonomy_lib.spectral.diffusion_map", op_version="0.1",
-)
 def diffusion_map(
     A: torch.Tensor,
     k: int,

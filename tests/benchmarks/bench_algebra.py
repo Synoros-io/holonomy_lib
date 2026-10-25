@@ -10,7 +10,7 @@ Cases:
 
 Sizes span "small enough to be a hot inner-loop primitive" (50×50) to
 "big enough that fancy algorithms matter" (1024×1024). All on a single
-batch — see provenance benchmarks for batched-overhead cases.
+batch.
 """
 
 from __future__ import annotations

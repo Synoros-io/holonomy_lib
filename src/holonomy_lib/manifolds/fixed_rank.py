@@ -38,7 +38,6 @@ from typing import Literal
 import torch
 
 from holonomy_lib.algebra.linear import truncated_svd
-from holonomy_lib.provenance import register_provenance_class, with_provenance
 
 # A batched manifold point is the triple (U, S, Vt) of stacked tensors.
 # Shapes: U (B, m, r), S (B, r), Vt (B, r, n).
@@ -54,7 +53,6 @@ FixedRankPoint = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 RETRACTION_RANDOMIZED_THRESHOLD: float = 0.25
 
 
-@register_provenance_class("FixedRankManifold")
 class FixedRankManifold:
     """Fixed-rank (m, n) matrix manifold of rank r, GPU-native + batched-first.
 
@@ -120,38 +118,6 @@ class FixedRankManifold:
         """Manifold dimension, r·(m + n − r). Vandereycken (2013), §2.1."""
         return self.r * (self.m + self.n - self.r)
 
-    def _provenance_signature(self) -> dict:
-        """Deterministic canonical form used by `@with_provenance` to
-        hash the bound `self` of decorated methods. Without this, the
-        provenance hex would embed the manifold's Python `id()`, making
-        the same call across processes produce different hexes.
-        """
-        return {
-            "class": "FixedRankManifold",
-            "m": self.m,
-            "n": self.n,
-            "r": self.r,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-            "retraction_mode": self.retraction_mode,
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> FixedRankManifold:
-        """Inverse of `_provenance_signature` — reconstruct an instance
-        with the same parameters. Used by `ProvenanceRegistry.replay`
-        to rebuild the bound `self` of recorded class-method calls.
-        """
-        # dtype was stored as e.g. "torch.float64"; map back via attr lookup.
-        dtype_name = sig["dtype"].split(".")[-1]
-        return cls(
-            m=sig["m"],
-            n=sig["n"],
-            r=sig["r"],
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-            retraction_mode=sig["retraction_mode"],
-        )
 
     # ----------------------------------------------------------------
     # Construction
@@ -199,9 +165,6 @@ class FixedRankManifold:
     # Embedding
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.FixedRankManifold.dense", op_version="0.1",
-    )
     def dense(self, point: FixedRankPoint) -> torch.Tensor:
         """Reconstruct ambient dense matrices: M = U @ diag(S) @ Vt.
 
@@ -219,9 +182,6 @@ class FixedRankManifold:
     # Tangent operations
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.FixedRankManifold.projection", op_version="0.1",
-    )
     def projection(
         self, point: FixedRankPoint, Z: torch.Tensor
     ) -> torch.Tensor:
@@ -259,9 +219,6 @@ class FixedRankManifold:
         UUt_Z_VVt = torch.bmm(U, torch.bmm(Ut_Z_V, Vt))  # (B, m, n)
         return UUt_Z + Z_VVt - UUt_Z_VVt
 
-    @with_provenance(
-        "holonomy_lib.manifolds.FixedRankManifold.inner", op_version="0.1",
-    )
     def inner(
         self,
         point: FixedRankPoint,
@@ -288,9 +245,6 @@ class FixedRankManifold:
         del point  # induced ambient metric does not depend on the base point
         return (tangent_a * tangent_b).sum(dim=(-2, -1))
 
-    @with_provenance(
-        "holonomy_lib.manifolds.FixedRankManifold.norm", op_version="0.1",
-    )
     def norm(
         self, point: FixedRankPoint, tangent: torch.Tensor
     ) -> torch.Tensor:
@@ -301,9 +255,6 @@ class FixedRankManifold:
     # Retraction
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.FixedRankManifold.retraction", op_version="0.1",
-    )
     def retraction(
         self, point: FixedRankPoint, tangent: torch.Tensor
     ) -> FixedRankPoint:

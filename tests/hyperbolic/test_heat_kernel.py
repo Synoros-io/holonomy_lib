@@ -333,23 +333,6 @@ def test_n2_quadrature_node_count_convergence():
 
 
 # --------------------------------------------------------------------
-# Provenance
-# --------------------------------------------------------------------
-
-
-def test_provenance():
-    from holonomy_lib import provenance
-
-    mfd = LorentzManifold(n=3)
-    t = torch.tensor(1.0, dtype=torch.float64)
-    d = torch.tensor([0.5, 1.0], dtype=torch.float64)
-    with provenance.record() as reg:
-        _ = hyperbolic_heat_kernel(t, d, mfd)
-    ops = {n.op_id for n in reg}
-    assert "holonomy_lib.hyperbolic.hyperbolic_heat_kernel" in ops
-
-
-# --------------------------------------------------------------------
 # Autograd-finite — backward through the recursion at n ≥ 5
 # --------------------------------------------------------------------
 

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Tests for holonomy_lib.hyperbolic.hyperbolic_laplacian_eigenmaps."""
+"""Tests for holonomy_lib.experimental.hyperbolic_laplacian_eigenmaps."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from holonomy_lib.hyperbolic import hyperbolic_laplacian_eigenmaps
+from holonomy_lib.experimental import hyperbolic_laplacian_eigenmaps
 from holonomy_lib.manifolds import LorentzManifold
 
 

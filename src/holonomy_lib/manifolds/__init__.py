@@ -22,13 +22,6 @@ Currently implemented:
                                  with the Pythagorean direct-sum
                                  metric (Gu-Sala et al. 2019;
                                  Skopek et al. 2019)
-  heterogeneous_kappa.HeterogeneousKappaManifold — per-point κ
-                                 κ-stereographic geometry; user
-                                 owns the κ parameterization (smooth
-                                 field + per-point residual etc.).
-                                 Related: GraphMoRE (AAAI 2025);
-                                 Di Giovanni et al. (2022); kHGCN.
-
 Planned (port/wrap from geoopt, geomstats, pymanopt):
   sphere, stiefel, grassmann
 """
@@ -40,9 +33,6 @@ from holonomy_lib.manifolds.comparison import (
     sn_kappa,
 )
 from holonomy_lib.manifolds.fixed_rank import FixedRankManifold
-from holonomy_lib.manifolds.heterogeneous_kappa import (
-    HeterogeneousKappaManifold,
-)
 from holonomy_lib.manifolds.lorentz import LorentzManifold
 from holonomy_lib.manifolds.lorentzian import LorentzianManifold
 from holonomy_lib.manifolds.product import ProductManifold
@@ -51,7 +41,6 @@ from holonomy_lib.manifolds.stereographic import KappaStereographicManifold
 
 __all__ = [
     "FixedRankManifold",
-    "HeterogeneousKappaManifold",
     "KappaStereographicManifold",
     "LorentzManifold",
     "LorentzianManifold",

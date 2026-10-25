@@ -53,7 +53,6 @@ from typing import Literal
 import torch
 
 from holonomy_lib.algebra.solvers import cg, lsqr
-from holonomy_lib.provenance import with_provenance
 
 _SPARSE_LAYOUTS = (
     torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,
@@ -62,9 +61,6 @@ _SPARSE_LAYOUTS = (
 Method = Literal["auto", "cholesky", "cg", "lsqr"]
 
 
-@with_provenance(
-    "holonomy_lib.convex.regularized_lstsq", op_version="0.1",
-)
 def regularized_lstsq(
     A: torch.Tensor,
     b: torch.Tensor,

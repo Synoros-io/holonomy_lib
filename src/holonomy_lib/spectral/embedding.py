@@ -38,7 +38,6 @@ from typing import Literal
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.spectral import laplacian as _L
 
 LaplacianType = Literal[
@@ -46,7 +45,6 @@ LaplacianType = Literal[
 ]
 
 
-@with_provenance("holonomy_lib.spectral.embedding.laplacian_eigenmaps", op_version="0.1")
 def laplacian_eigenmaps(
     A: torch.Tensor,
     k: int,

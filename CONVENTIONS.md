@@ -254,41 +254,14 @@ original research (write it down first, then implement).
 
 ## 7. Provenance
 
-Public, top-level primitives are decorated with `@with_provenance`:
+Provenance was removed in 0.8.0.
+The removal rationale and requirements for any return are in `archive/README.md`.
 
-```python
-@with_provenance("holonomy_lib.module.op_name", op_version="0.1")
-def op_name(x: torch.Tensor, k: int = 3) -> torch.Tensor:
-    ...
-```
+### 7.1 Op IDs (removed in 0.8.0)
 
-### 7.1 Op IDs
+### 7.2 Op versions (removed in 0.8.0)
 
-Format: `holonomy_lib.module.submodule.op_name`. Match the import
-path. Don't change without bumping `op_version`.
-
-### 7.2 Op versions
-
-Start at `"0.1"`. Bump when the **semantics** of the function
-change in a way that would alter the output for the same inputs.
-Bump when:
-
-- Math changes (different algorithm, different formula).
-- Default parameter values change.
-- A new parameter is added (signature changes are output-changing
-  for callers who relied on the defaults).
-
-Don't bump for:
-
-- Documentation-only changes.
-- Performance-only changes that don't alter output.
-- Renaming an internal helper.
-
-### 7.3 No `*args` / `**kwargs`
-
-`@with_provenance` doesn't support variadic signatures (every input
-needs a stable name for the hex computation). The decorator raises
-at decoration time if you try.
+### 7.3 No `*args` / `**kwargs` (removed in 0.8.0)
 
 ---
 

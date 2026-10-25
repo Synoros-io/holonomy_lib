@@ -9,7 +9,6 @@ Five layers:
   3. Property tests — Minkowski-form algebra, causal classification
      (timelike / null / spacelike), proper time + distance.
   4. Autograd — linear ops in flat space are trivially smooth.
-  5. Provenance roundtrip.
 """
 
 from __future__ import annotations
@@ -321,37 +320,6 @@ class TestAutogradFinite:
         s = mfd.proper_distance(x, y)
         s.sum().backward()
         assert torch.isfinite(v.grad).all()
-
-
-# --------------------------------------------------------------------
-# Provenance
-# --------------------------------------------------------------------
-
-
-class TestProvenance:
-    def test_signature_roundtrip(self):
-        mfd = LorentzianManifold(n=4, dtype=torch.float32)
-        sig = mfd._provenance_signature()
-        mfd2 = LorentzianManifold._from_signature(sig)
-        assert mfd2.n == mfd.n
-        assert mfd2.dtype == mfd.dtype
-
-    def test_record_in_context(self):
-        from holonomy_lib import provenance
-
-        mfd = _make_manifold()
-        with provenance.record() as reg:
-            x = mfd.random_point(batch_size=2, generator=_seed(40))
-            y = mfd.random_point(batch_size=2, generator=_seed(41))
-            _ = mfd.proper_time(x, y)
-            _ = mfd.causal_type(x, y)
-        ops = {n.op_id for n in reg}
-        assert (
-            "holonomy_lib.manifolds.LorentzianManifold.proper_time" in ops
-        )
-        assert (
-            "holonomy_lib.manifolds.LorentzianManifold.causal_type" in ops
-        )
 
 
 # --------------------------------------------------------------------

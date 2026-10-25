@@ -44,7 +44,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from holonomy_lib.manifolds.heterogeneous_kappa import HeterogeneousKappaManifold
+from holonomy_lib.experimental.heterogeneous_kappa import HeterogeneousKappaManifold
 from holonomy_lib.manifolds.lorentz import _safe_sqrt
 from holonomy_lib.manifolds.stereographic import KappaStereographicManifold
 

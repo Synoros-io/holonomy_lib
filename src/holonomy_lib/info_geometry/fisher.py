@@ -54,13 +54,7 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 
-
-@with_provenance(
-    "holonomy_lib.info_geometry.fisher_information_categorical",
-    op_version="0.1",
-)
 def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
     """Fisher information metric on the simplex Δ^{k−1}.
 
@@ -99,10 +93,6 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
     return torch.diag_embed(inv_p)
 
 
-@with_provenance(
-    "holonomy_lib.info_geometry.fisher_information_gaussian_mean",
-    op_version="0.1",
-)
 def fisher_information_gaussian_mean(Sigma: torch.Tensor) -> torch.Tensor:
     """Fisher information for the mean μ of N(μ, Σ), at fixed Σ.
 
@@ -144,10 +134,6 @@ def fisher_information_gaussian_mean(Sigma: torch.Tensor) -> torch.Tensor:
     return L_inv.mT @ L_inv
 
 
-@with_provenance(
-    "holonomy_lib.info_geometry.natural_gradient",
-    op_version="0.1",
-)
 def natural_gradient(
     grad: torch.Tensor,
     fisher_matrix: torch.Tensor,

@@ -52,13 +52,9 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.spectral import laplacian as _L
 
 
-@with_provenance(
-    "holonomy_lib.spectral.effective_resistance", op_version="0.1",
-)
 def effective_resistance(A: torch.Tensor) -> torch.Tensor:
     """Pairwise effective resistance R(u, v) for a batched weighted graph.
 
@@ -95,9 +91,6 @@ def effective_resistance(A: torch.Tensor) -> torch.Tensor:
     return diag.unsqueeze(dim=-1) + diag.unsqueeze(dim=-2) - 2.0 * L_plus
 
 
-@with_provenance(
-    "holonomy_lib.spectral.commute_time", op_version="0.1",
-)
 def commute_time(A: torch.Tensor) -> torch.Tensor:
     """Pairwise commute time `C(u, v) = vol(A) · R(u, v)`.
 

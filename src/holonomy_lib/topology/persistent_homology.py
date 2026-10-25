@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial import (
     pairwise_distances,
     vietoris_rips_sparse,
@@ -59,9 +58,6 @@ from holonomy_lib.topology._filtration import build_filtration
 from holonomy_lib.topology._reduction import reduce_filtration
 
 
-@with_provenance(
-    "holonomy_lib.topology.persistence_diagrams", op_version="0.2",
-)
 def persistence_diagrams(
     points_or_distances: torch.Tensor,
     max_dim: int = 2,

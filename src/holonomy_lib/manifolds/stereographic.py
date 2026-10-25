@@ -63,7 +63,6 @@ from typing import Literal
 import torch
 
 from holonomy_lib.manifolds.lorentz import _safe_sqrt
-from holonomy_lib.provenance import register_provenance_class, with_provenance
 
 
 def _safe_tanhc(t: torch.Tensor) -> torch.Tensor:
@@ -149,7 +148,6 @@ def _safe_atanc(t: torch.Tensor) -> torch.Tensor:
 Branch = Literal["spherical", "euclidean", "hyperbolic"]
 
 
-@register_provenance_class("KappaStereographicManifold")
 class KappaStereographicManifold:
     """Constant-curvature κ-stereographic manifold.
 
@@ -256,34 +254,6 @@ class KappaStereographicManifold:
         """
         return self.n
 
-    def _provenance_signature(self) -> dict:
-        # κ may be a learnable Tensor; the provenance hex must be JSON-
-        # canonical, so we store the current scalar value. The hex
-        # therefore identifies the manifold AT this κ, which is the
-        # right semantics: a later call with a different κ value gets
-        # a different hex (cache key) because the operation's result
-        # differs.
-        kappa_serial = (
-            float(self.kappa.detach().item())
-            if self._kappa_is_tensor else float(self.kappa)
-        )
-        return {
-            "class": "KappaStereographicManifold",
-            "n": self.n,
-            "kappa": kappa_serial,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> KappaStereographicManifold:
-        dtype_name = sig["dtype"].split(".")[-1]
-        return cls(
-            n=sig["n"],
-            kappa=sig["kappa"],
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-        )
 
     # ----------------------------------------------------------------
     # Helpers — κ-trig functions, branch-dispatched
@@ -493,10 +463,6 @@ class KappaStereographicManifold:
     # Tangent operations
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.projection",
-        op_version="0.1",
-    )
     def projection(
         self, x: torch.Tensor, w: torch.Tensor,
     ) -> torch.Tensor:
@@ -517,10 +483,6 @@ class KappaStereographicManifold:
         del x
         return w
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.inner",
-        op_version="0.1",
-    )
     def inner(
         self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -535,10 +497,6 @@ class KappaStereographicManifold:
         lam = self._conformal_factor(x)
         return (lam * lam) * (u * v).sum(dim=-1)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.norm",
-        op_version="0.1",
-    )
     def norm(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -556,10 +514,6 @@ class KappaStereographicManifold:
     # Exponential / logarithmic maps, geodesic distance
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.exp_0",
-        op_version="0.1",
-    )
     def exp_0(self, v: torch.Tensor) -> torch.Tensor:
         """Exponential map at the origin: `exp_0(v) = tan_κ(√|κ|·‖v‖)
         · v / (√|κ|·‖v‖)`.
@@ -587,10 +541,6 @@ class KappaStereographicManifold:
         scaling = self._tan_kappa_c(v_norm)
         return scaling.unsqueeze(-1) * v
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.log_0",
-        op_version="0.1",
-    )
     def log_0(self, y: torch.Tensor) -> torch.Tensor:
         """Logarithmic map at the origin: `log_0(y) =
         (1/√|κ|) · tan_κ⁻¹(√|κ|·‖y‖) · y / ‖y‖`.
@@ -615,10 +565,6 @@ class KappaStereographicManifold:
         scaling = self._atan_kappa_c(y_norm)
         return scaling.unsqueeze(-1) * y
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.distance",
-        op_version="0.1",
-    )
     def distance(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -646,10 +592,6 @@ class KappaStereographicManifold:
         # signs during training without breakdown.
         return 2.0 * diff_norm * self._atan_kappa_c(diff_norm)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.exp",
-        op_version="0.1",
-    )
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -674,10 +616,6 @@ class KappaStereographicManifold:
         rhs = scaling.unsqueeze(-1) * v
         return self.mobius_add(x, rhs)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.log",
-        op_version="0.1",
-    )
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -701,10 +639,6 @@ class KappaStereographicManifold:
         scaling = (2.0 / lam) * self._atan_kappa_c(diff_norm)
         return scaling.unsqueeze(-1) * diff
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.retraction",
-        op_version="0.1",
-    )
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -714,10 +648,6 @@ class KappaStereographicManifold:
         """
         return self.exp(x, v)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.KappaStereographicManifold.parallel_transport",
-        op_version="0.1",
-    )
     def parallel_transport(
         self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:

@@ -34,8 +34,6 @@ import math
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 # Mathematical dimension of SO(3): the group lives in R^{3×3} and its
 # Lie algebra is R^3. **Scale of validity**: hard-coded by the
 # definition of "3D rotation"; not tunable. Cataloged as `SO3_DIM`.
@@ -83,9 +81,6 @@ SO3_LOG_NEAR_ZERO_RAD: float = 1e-6
 SO3_LOG_NEAR_PI_RAD: float = 1e-7
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.axis_angle_to_matrix", op_version="0.1",
-)
 def axis_angle_to_matrix(
     axis: torch.Tensor, angle: torch.Tensor,
 ) -> torch.Tensor:
@@ -127,9 +122,6 @@ def axis_angle_to_matrix(
     return eye + s * K + (1.0 - c) * (K @ K)
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.matrix_to_axis_angle", op_version="0.1",
-)
 def matrix_to_axis_angle(R: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Inverse Rodrigues: convert SO(3) matrix to (unit axis, angle).
 
@@ -213,9 +205,6 @@ def matrix_to_axis_angle(R: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return axis, angle
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.so3_exp", op_version="0.1",
-)
 def so3_exp(omega: torch.Tensor) -> torch.Tensor:
     """Matrix exponential on so(3): ω ∈ R³ ↦ R ∈ SO(3).
 
@@ -238,9 +227,6 @@ def so3_exp(omega: torch.Tensor) -> torch.Tensor:
     return axis_angle_to_matrix(omega, angle)
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.so3_log", op_version="0.1",
-)
 def so3_log(R: torch.Tensor) -> torch.Tensor:
     """Matrix logarithm on SO(3): R ∈ SO(3) ↦ ω ∈ R³.
 
@@ -252,9 +238,6 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
     return axis * angle.unsqueeze(dim=-1)
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.compose", op_version="0.1",
-)
 def compose(R1: torch.Tensor, R2: torch.Tensor) -> torch.Tensor:
     """SO(3) group product: `R1 · R2`. Just `matmul`, exposed for API
     consistency with the rest of the module."""
@@ -266,9 +249,6 @@ def compose(R1: torch.Tensor, R2: torch.Tensor) -> torch.Tensor:
     return R1 @ R2
 
 
-@with_provenance(
-    "holonomy_lib.lie.so3.random_so3", op_version="0.1",
-)
 def random_so3(
     batch_size: int,
     generator: torch.Generator | None = None,

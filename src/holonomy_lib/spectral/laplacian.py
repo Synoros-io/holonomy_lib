@@ -54,7 +54,6 @@ from __future__ import annotations
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.provenance import with_provenance
 
 _SPARSE_LAYOUTS = (
     torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,
@@ -91,7 +90,6 @@ def degree(A: torch.Tensor, signed: bool = False) -> torch.Tensor:
     return A.abs().sum(dim=-1) if signed else A.sum(dim=-1)
 
 
-@with_provenance("holonomy_lib.spectral.laplacian.combinatorial", op_version="0.3")
 def combinatorial(A: torch.Tensor) -> torch.Tensor:
     """Combinatorial Laplacian L = D − A.
 
@@ -116,7 +114,6 @@ def combinatorial(A: torch.Tensor) -> torch.Tensor:
     return torch.diag_embed(d) - A
 
 
-@with_provenance("holonomy_lib.spectral.laplacian.symmetric_normalized", op_version="0.3")
 def symmetric_normalized(A: torch.Tensor) -> torch.Tensor:
     """Symmetric normalized Laplacian L_sym = I − D^{−1/2} A D^{−1/2}.
 
@@ -147,7 +144,6 @@ def symmetric_normalized(A: torch.Tensor) -> torch.Tensor:
     return eye - A_norm
 
 
-@with_provenance("holonomy_lib.spectral.laplacian.random_walk", op_version="0.3")
 def random_walk(A: torch.Tensor) -> torch.Tensor:
     """Random-walk Laplacian L_rw = I − D^{−1} A.
 
@@ -177,7 +173,6 @@ def random_walk(A: torch.Tensor) -> torch.Tensor:
     return eye - A_rw
 
 
-@with_provenance("holonomy_lib.spectral.laplacian.signed", op_version="0.3")
 def signed(A: torch.Tensor) -> torch.Tensor:
     """Signed Laplacian L^σ = D^{|σ|} − A,  D^{|σ|}_{ii} = Σ_j |A_{ij}|.
 

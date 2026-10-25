@@ -3,6 +3,12 @@
 
 """Heterogeneous-curvature κ-stereographic manifold.
 
+Status: experimental, in progress. `distance` combines the two endpoints'
+curvatures and evaluates a constant-curvature distance at the combined value.
+That is a pair-conditioned dissimilarity, not a metric: it can violate the
+triangle inequality. A true variable-curvature distance needs a different
+construction.
+
 A κ-stereographic geometry where the curvature `κ` is **not a single
 global scalar but varies per point**. This is the natural ML
 primitive when concepts in an embedding space have different local
@@ -100,7 +106,6 @@ from holonomy_lib.manifolds.stereographic import (
     _safe_tanc,
     _safe_tanhc,
 )
-from holonomy_lib.provenance import register_provenance_class, with_provenance
 
 
 # Built-in combiners. Each takes two κ tensors of the same shape and
@@ -137,7 +142,6 @@ _BUILTIN_COMBINERS = {
 }
 
 
-@register_provenance_class("HeterogeneousKappaManifold")
 class HeterogeneousKappaManifold:
     """κ-stereographic geometry with per-point curvature.
 
@@ -183,10 +187,8 @@ class HeterogeneousKappaManifold:
                     f"built-ins: {sorted(_BUILTIN_COMBINERS)}"
                 )
             self.combiner = _BUILTIN_COMBINERS[combiner]
-            self._combiner_name = combiner
         elif callable(combiner):
             self.combiner = combiner
-            self._combiner_name = "custom"
         else:
             raise TypeError(
                 f"combiner must be str or callable, got {type(combiner).__name__}"
@@ -202,31 +204,6 @@ class HeterogeneousKappaManifold:
     def ambient_dim(self) -> int:
         return self.n
 
-    def _provenance_signature(self) -> dict:
-        return {
-            "class": "HeterogeneousKappaManifold",
-            "n": self.n,
-            "combiner": self._combiner_name,
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> HeterogeneousKappaManifold:
-        dtype_name = sig["dtype"].split(".")[-1]
-        # Only built-in combiners can be round-tripped; custom
-        # callables can't be serialized into a JSON-canonical hex.
-        # A re-loaded manifold with a previously-custom combiner
-        # falls back to the arithmetic_mean default.
-        combiner_name = sig.get("combiner", "arithmetic_mean")
-        if combiner_name not in _BUILTIN_COMBINERS:
-            combiner_name = "arithmetic_mean"
-        return cls(
-            n=sig["n"],
-            combiner=combiner_name,
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-        )
 
     # ----------------------------------------------------------------
     # κ-trig helpers — per-point κ, dynamic sign dispatch
@@ -325,10 +302,6 @@ class HeterogeneousKappaManifold:
     # Tangent-at-origin operations (most common substrate use case)
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.HeterogeneousKappaManifold.exp_0",
-        op_version="0.1",
-    )
     def exp_0(self, v: torch.Tensor, kappa: torch.Tensor) -> torch.Tensor:
         """Per-point exp at the origin: `exp_0(v_i; κ_i)`.
 
@@ -352,10 +325,6 @@ class HeterogeneousKappaManifold:
         scaling = self._tan_kappa_c(v_norm, kappa)
         return scaling.unsqueeze(-1) * v
 
-    @with_provenance(
-        "holonomy_lib.manifolds.HeterogeneousKappaManifold.log_0",
-        op_version="0.1",
-    )
     def log_0(self, y: torch.Tensor, kappa: torch.Tensor) -> torch.Tensor:
         """Per-point log at the origin: `log_0(y_i; κ_i)`. Inverse of
         `exp_0` at the same κ."""
@@ -376,10 +345,6 @@ class HeterogeneousKappaManifold:
     # Pair operations: combine two per-point κ's
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.HeterogeneousKappaManifold.distance",
-        op_version="0.1",
-    )
     def distance(
         self,
         x: torch.Tensor, kappa_x: torch.Tensor,

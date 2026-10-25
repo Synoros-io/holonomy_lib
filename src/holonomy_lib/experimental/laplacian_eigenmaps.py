@@ -3,6 +3,12 @@
 
 """Manifold-valued Laplacian eigenmaps via Riemannian SGD.
 
+Status: experimental, in progress. The objective is attraction-only:
+it pulls neighbours together and has no term that keeps the embedding from
+collapsing, so with enough steps every connected component contracts to a point.
+A correct version needs a non-collapse constraint (the Belkin-Niyogi
+normalization, or negative sampling as in Nickel-Kiela 2017).
+
 The Euclidean Laplacian-eigenmap embedding (Belkin–Niyogi 2003)
 positions graph nodes in `R^k` by solving
 
@@ -56,13 +62,8 @@ from __future__ import annotations
 import torch
 
 from holonomy_lib.optimization import RiemannianSGD
-from holonomy_lib.provenance import with_provenance
 
 
-@with_provenance(
-    "holonomy_lib.hyperbolic.hyperbolic_laplacian_eigenmaps",
-    op_version="0.1",
-)
 def hyperbolic_laplacian_eigenmaps(
     adjacency: torch.Tensor,
     manifold,

@@ -38,10 +38,8 @@ from collections.abc import Sequence
 import torch
 
 from holonomy_lib.manifolds.lorentz import _safe_sqrt
-from holonomy_lib.provenance import register_provenance_class, with_provenance
 
 
-@register_provenance_class("ProductManifold")
 class ProductManifold:
     """Riemannian product of one or more manifolds.
 
@@ -147,36 +145,6 @@ class ProductManifold:
         s, e = self._ambient_slices[index]
         return x[..., s:e]
 
-    # ----------------------------------------------------------------
-    # Provenance
-    # ----------------------------------------------------------------
-
-    def _provenance_signature(self) -> dict:
-        return {
-            "class": "ProductManifold",
-            "submanifolds": [m._provenance_signature() for m in self.manifolds],
-            "weights": list(self.weights),
-            "device": str(self.device),
-            "dtype": str(self.dtype),
-        }
-
-    @classmethod
-    def _from_signature(cls, sig: dict) -> ProductManifold:
-        # Reconstruct each submanifold via its own _from_signature. The
-        # registry stores the bound `_from_signature` callable, so we
-        # apply it directly (not on the class).
-        from holonomy_lib.provenance.protocol import _CLASS_REGISTRY
-        submanifolds = []
-        for sub_sig in sig["submanifolds"]:
-            from_sig = _CLASS_REGISTRY[sub_sig["class"]]
-            submanifolds.append(from_sig(sub_sig))
-        dtype_name = sig["dtype"].split(".")[-1]
-        return cls(
-            manifolds=submanifolds,
-            weights=sig["weights"],
-            device=sig["device"],
-            dtype=getattr(torch, dtype_name),
-        )
 
     # ----------------------------------------------------------------
     # Construction
@@ -221,10 +189,6 @@ class ProductManifold:
     # Tangent operations
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.projection",
-        op_version="0.1",
-    )
     def projection(
         self, x: torch.Tensor, w: torch.Tensor,
     ) -> torch.Tensor:
@@ -237,10 +201,6 @@ class ProductManifold:
             for m, x_i, w_i in zip(self.manifolds, x_parts, w_parts)
         ])
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.inner",
-        op_version="0.1",
-    )
     def inner(
         self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -258,10 +218,6 @@ class ProductManifold:
             total = term if total is None else total + term
         return total
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.norm",
-        op_version="0.1",
-    )
     def norm(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """`sqrt(⟨v, v⟩_x)`. Autograd-safe at v=0."""
         return _safe_sqrt(self.inner(x, v, v))
@@ -270,10 +226,6 @@ class ProductManifold:
     # Distance, exp, log
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.distance",
-        op_version="0.1",
-    )
     def distance(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -289,10 +241,6 @@ class ProductManifold:
             d_sq = term if d_sq is None else d_sq + term
         return _safe_sqrt(d_sq)
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.exp",
-        op_version="0.1",
-    )
     def exp(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -304,10 +252,6 @@ class ProductManifold:
             for m, x_i, v_i in zip(self.manifolds, x_parts, v_parts)
         ])
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.log",
-        op_version="0.1",
-    )
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
@@ -319,10 +263,6 @@ class ProductManifold:
             for m, x_i, y_i in zip(self.manifolds, x_parts, y_parts)
         ])
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.retraction",
-        op_version="0.1",
-    )
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
@@ -340,10 +280,6 @@ class ProductManifold:
     # Tangent-at-origin convenience (exp_0 / log_0)
     # ----------------------------------------------------------------
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.exp_0",
-        op_version="0.1",
-    )
     def exp_0(self, v: torch.Tensor) -> torch.Tensor:
         """Embed a flat Euclidean tangent `(B, Σ dim_i)` onto the
         product manifold via per-submanifold `exp_0`. Result is the
@@ -365,10 +301,6 @@ class ProductManifold:
             for m, v_i in zip(self.manifolds, v_parts)
         ])
 
-    @with_provenance(
-        "holonomy_lib.manifolds.ProductManifold.log_0",
-        op_version="0.1",
-    )
     def log_0(self, y: torch.Tensor) -> torch.Tensor:
         """Inverse of `exp_0`: flat-ambient point → flat-intrinsic
         tangent. Per-submanifold `log_0` concatenated."""

@@ -74,7 +74,6 @@ import math
 import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
-from holonomy_lib.provenance import with_provenance
 
 # Dimensions with dedicated closed-form / quadrature routines. Above
 # these we fall back to the Grigor'yan–Noguchi recursion. Documented
@@ -444,9 +443,6 @@ def _heat_kernel_unit(
     return current_fn(t, d)
 
 
-@with_provenance(
-    "holonomy_lib.hyperbolic.hyperbolic_heat_kernel", op_version="0.1",
-)
 def hyperbolic_heat_kernel(
     t: torch.Tensor,
     distances: torch.Tensor,

@@ -380,27 +380,3 @@ class TestNonTrivialSheafSeparatesFromGraphLaplacian:
             f"orientation-flip cycle should have NO global sections; "
             f"got kernel dim {kdim_flip}"
         )
-
-
-# --------------------------------------------------------------------
-# Provenance integration
-# --------------------------------------------------------------------
-
-
-class TestProvenanceIntegration:
-    def test_sheaf_laplacian_emits_node(self):
-        from holonomy_lib import provenance
-
-        sheaf = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        with provenance.record() as reg:
-            sheaf_laplacian(sheaf)
-        op_ids = sorted(n.op_id for n in reg)
-        assert "holonomy_lib.sheaf.sheaf_laplacian" in op_ids
-
-    def test_sheaf_provenance_signature_stable_across_instances(self):
-        """Two GraphSheaf instances with identical topology + stalk
-        dims must produce the same provenance signature — the dict
-        must NOT embed the Python `id()`."""
-        s1 = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        s2 = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        assert s1._provenance_signature() == s2._provenance_signature()

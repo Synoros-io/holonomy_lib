@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Tests for holonomy_lib.manifolds.heterogeneous_kappa.
+"""Tests for holonomy_lib.experimental.heterogeneous_kappa.
 HeterogeneousKappaManifold."""
 
 from __future__ import annotations
@@ -9,10 +9,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from holonomy_lib.manifolds import (
-    HeterogeneousKappaManifold,
-    KappaStereographicManifold,
-)
+from holonomy_lib.experimental import HeterogeneousKappaManifold
+from holonomy_lib.manifolds import KappaStereographicManifold
 
 
 def _seed(s: int) -> torch.Generator:
@@ -228,32 +226,6 @@ class TestCombiner:
         d_het = het.distance(x, kx, y, ky)
         d_homo = homo.distance(x, y)
         torch.testing.assert_close(d_het, d_homo, atol=1e-10, rtol=1e-10)
-
-
-# --------------------------------------------------------------------
-# Provenance roundtrip
-# --------------------------------------------------------------------
-
-
-class TestProvenance:
-    def test_signature_roundtrip(self):
-        het = HeterogeneousKappaManifold(
-            n=3, combiner="harmonic_mean", dtype=torch.float64,
-        )
-        sig = het._provenance_signature()
-        het2 = HeterogeneousKappaManifold._from_signature(sig)
-        assert het2.n == het.n
-        assert het2._combiner_name == het._combiner_name
-
-    def test_custom_combiner_falls_back_on_load(self):
-        """Custom callable combiners can't round-trip; loaded manifold
-        falls back to the arithmetic_mean default."""
-        het = HeterogeneousKappaManifold(
-            n=3, combiner=lambda a, b: a, dtype=torch.float64,
-        )
-        sig = het._provenance_signature()
-        het2 = HeterogeneousKappaManifold._from_signature(sig)
-        assert het2._combiner_name == "arithmetic_mean"
 
 
 # --------------------------------------------------------------------

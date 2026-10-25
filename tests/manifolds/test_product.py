@@ -238,23 +238,3 @@ class TestAutogradFinite:
         loss = (target_d + log_partition).sum()
         loss.backward()
         assert torch.isfinite(v.grad).all()
-
-
-# --------------------------------------------------------------------
-# Provenance roundtrip
-# --------------------------------------------------------------------
-
-
-class TestProvenance:
-    def test_signature_roundtrip(self):
-        mfd = _make_mfd()
-        sig = mfd._provenance_signature()
-        mfd2 = ProductManifold._from_signature(sig)
-        assert mfd2.dim == mfd.dim
-        assert mfd2.ambient_dim == mfd.ambient_dim
-        # Recomputed distance should match (within float roundoff)
-        x = mfd.random_point(batch_size=2, generator=_seed(40))
-        y = mfd.random_point(batch_size=2, generator=_seed(41))
-        d_a = mfd.distance(x, y)
-        d_b = mfd2.distance(x, y)
-        torch.testing.assert_close(d_a, d_b, atol=1e-12, rtol=0)

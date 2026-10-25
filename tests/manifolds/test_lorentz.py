@@ -11,7 +11,7 @@ Five layers:
   4. Numerical robustness — near-origin tangents, large tangents.
   5. Comparison tests — agreement with geoopt's Lorentz model
      (skipped if geoopt not installed).
-  6. Provenance signature roundtrip + RiemannianSGD integration.
+  6. RiemannianSGD integration.
 """
 
 from __future__ import annotations
@@ -493,35 +493,6 @@ class TestNumericalRobustness:
             v = v_raw / v_norm * 0.1
             x = mfd.exp(x, v)
         assert mfd.is_on_manifold(x).all()
-
-
-# --------------------------------------------------------------------
-# Provenance roundtrip
-# --------------------------------------------------------------------
-
-
-class TestProvenance:
-    def test_signature_roundtrip(self):
-        mfd = LorentzManifold(n=5, k=-0.7, dtype=torch.float32)
-        sig = mfd._provenance_signature()
-        mfd2 = LorentzManifold._from_signature(sig)
-        assert mfd2.n == mfd.n
-        assert mfd2.k == mfd.k
-        assert mfd2.dtype == mfd.dtype
-
-    def test_record_in_context(self):
-        """exp / log / distance emit provenance nodes when called inside
-        a `record()` context."""
-        from holonomy_lib import provenance
-
-        mfd = _make_manifold()
-        with provenance.record() as reg:
-            x = mfd.random_point(batch_size=2, generator=_seeded_generator(90))
-            y = mfd.random_point(batch_size=2, generator=_seeded_generator(91))
-            _ = mfd.distance(x, y)
-
-        ops = {n.op_id for n in reg}
-        assert "holonomy_lib.manifolds.LorentzManifold.distance" in ops
 
 
 # --------------------------------------------------------------------

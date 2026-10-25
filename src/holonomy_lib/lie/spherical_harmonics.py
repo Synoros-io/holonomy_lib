@@ -38,14 +38,9 @@ import math
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
 _SUPPORTED_L_MAX: int = 4
 
 
-@with_provenance(
-    "holonomy_lib.lie.real_spherical_harmonics", op_version="0.1",
-)
 def real_spherical_harmonics(
     directions: torch.Tensor, l_max: int = 2,
 ) -> torch.Tensor:

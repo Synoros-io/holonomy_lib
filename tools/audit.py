@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""holonomy_lib.audit — find undocumented numeric constants in source.
+"""Find undocumented numeric constants in source.
 
 Per the "no magic numbers" rule (CLAUDE.md constraint #8, direction.md 2026-05-23),
 every numerical constant in the architecture must be derived from substrate state,
@@ -11,8 +11,8 @@ literals that don't match a safe whitelist and cross-referencing them against th
 `notes/magic_numbers.md` catalog.
 
 Usage:
-    python -m holonomy_lib.audit <path>...      # scan files or directories
-    python -m holonomy_lib.audit --strict ...   # exit code 1 if any literal found
+    python tools/audit.py <path>...      # scan files or directories
+    python tools/audit.py --strict ...   # exit code 1 if any literal found
 
 Output flags:
     🟢 Allowed   — literal is in the safe set (0, 1, -1, 0.5, 2.0, math constants)
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -53,69 +54,17 @@ from pathlib import Path
 #      convention; documented in catalog as `numerical_floor_convention`.
 ALLOWED_LITERALS: set[float] = {
     # Mathematical identities
-    0, 1, -1, -1.0,
+    0, 1, -1,
     # Halving/doubling identities (symmetric part, midpoint, n(n+1)/2, 2π, etc.)
-    0.5, 2, -2, -2.0,
+    0.5, 2, -2,
     # Universal binary unit conversions (KB↔MB↔GB)
-    1024, 1024.0,
+    1024,
     # Universal SI time conversion (s↔ms) + RNG stream-offset multiplier
-    1000, 1000.0,
+    1000,
     # Conventional numerical floor (divide-by-zero protection)
     # Cataloged as `numerical_floor_convention` (posited convention)
     1e-9,
 }
-
-# Variable names whose literals are display/IO/formatting concerns, not architecture
-DISPLAY_VAR_NAMES: set[str] = {
-    "log_every", "print_every", "save_every", "checkpoint_every",
-    "report_every", "verbose", "context_expr",
-    "n_walks_per_epoch",  # epoch sizing — display-ish
-    "max_iter", "max_steps",  # standard bounds
-    # argparse defaults — experiment knobs, not architectural constants;
-    # the catalog covers them under their architectural name elsewhere
-    "default",
-    # Common script-scope experiment knobs
-    "n_runs", "n_warmup", "n_epochs_default",
-    # JSON / dump formatting (output-only, no architectural meaning)
-    "indent",
-    # Optimizer hyperparameters: per-call user choices, not architectural
-    # constants. `lr` is standard ML naming; `betas`, `eps` are standard
-    # Adam-family names. Default values match upstream torch.optim
-    # conventions and don't need cataloging.
-    "lr", "betas", "eps", "weight_decay", "momentum",
-}
-
-# Variable names that are universally safe (not architectural constants)
-SAFE_VAR_NAMES: set[str] = {
-    "i", "j", "k", "n", "m", "t", "x", "y", "z",
-    "idx", "index", "count", "total", "step",
-    "size", "shape", "dim", "axis",
-    "epoch", "iter", "iteration", "seed",  # tracked separately
-    "len", "length",
-    # PyTorch tensor index / shape constants
-    "min", "max",
-    # Common loop bounds
-    "start", "end", "stop",
-}
-
-# Universal-invariant patterns we recognize as derived.
-# Compiled once at import — the audit runs these against every line of
-# every source file, so a per-call `re.compile` is wasteful.
-DERIVED_PATTERNS: list[re.Pattern] = [
-    re.compile(p) for p in (
-        r"1\s*/\s*N",
-        r"1\s*/\s*\w*n_(nodes|ent|ents)",
-        r"1\s*/\s*sqrt",
-        r"math\.(log|sqrt|pi|e)",
-        r"torch\.(log|sqrt|pi)",
-        r"log\(\s*\w*N\w*\s*\)",
-        # Tensor-rank / shape assertions: `X.ndim [op] N` or `len(X.shape) [op] N`.
-        # Structural shape requirements, not numerical tuning — common in
-        # math-library input validation. Treated as derived (added 2026-05-26).
-        r"\.ndim\s*[!=<>]+",
-        r"len\(\s*\w+\.shape\s*\)\s*[!=<>]+",
-    )
-]
 
 # Files that are themselves the audit/catalog infrastructure and must not
 # be scanned — they contain literals BY DESIGN (the safe-list, the posited
@@ -123,7 +72,6 @@ DERIVED_PATTERNS: list[re.Pattern] = [
 # noise. Self-scanning was part of the drift mode that lit up bogus
 # undocumented-literal reports in 2026-05-24 cleanup.
 EXCLUDE_FILES: set[str] = {
-    "audit.py",       # this file — contains ALLOWED_LITERALS and exclude lists
     # `spherical_harmonics.py` is a transcription of the standard
     # closed-form `Y_lm` polynomials for l ≤ 4 (Wikipedia "Table of
     # spherical harmonics", Edmonds 1957 §2.5). Every numeric in it
@@ -216,7 +164,7 @@ class ConstantVisitor(ast.NodeVisitor):
         else:
             self.generic_visit(node)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef):
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """Track parameter defaults so `def f(lr=0.01)` carries `lr` as context."""
         args = node.args
         positional = list(getattr(args, "posonlyargs", [])) + list(args.args)
@@ -229,11 +177,11 @@ class ConstantVisitor(ast.NodeVisitor):
                 self._context_stack.append(arg_name)
                 self.visit(default)
                 self._context_stack.pop()
-        for arg, default in zip(args.kwonlyargs, args.kw_defaults):
-            if default is None:
+        for arg, kw_default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+            if kw_default is None:
                 continue
             self._context_stack.append(arg.arg)
-            self.visit(default)
+            self.visit(kw_default)
             self._context_stack.pop()
         # Walk decorators, return annotation, and body separately to avoid
         # re-visiting the defaults we already handled
@@ -246,6 +194,34 @@ class ConstantVisitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef  # same logic for async
 
+    def visit_Compare(self, node: ast.Compare):
+        # A literal rank next to .ndim or len(.shape) is a structural
+        # requirement. Only that operand is approved, never its whole line.
+        def is_rank(expr: ast.expr) -> bool:
+            return (
+                isinstance(expr, ast.Attribute) and expr.attr == "ndim"
+            ) or (
+                isinstance(expr, ast.Call)
+                and isinstance(expr.func, ast.Name) and expr.func.id == "len"
+                and len(expr.args) == 1 and not expr.keywords
+                and isinstance(expr.args[0], ast.Attribute)
+                and expr.args[0].attr == "shape"
+            )
+
+        operands = [node.left, *node.comparators]
+        ranks = set()
+        for left, right in zip(operands, operands[1:], strict=False):
+            for rank, literal in ((left, right), (right, left)):
+                if (is_rank(rank) and isinstance(literal, ast.Constant)
+                        and type(literal.value) is int and literal.value >= 0):
+                    ranks.add(id(literal))
+        for operand in operands:
+            start = len(self.literals)
+            self.visit(operand)
+            if id(operand) in ranks:
+                for found in self.literals[start:]:
+                    found.severity = "🟡"
+
     def visit_Constant(self, node: ast.Constant):
         if not isinstance(node.value, (int, float)) or isinstance(node.value, bool):
             return
@@ -257,19 +233,7 @@ class ConstantVisitor(ast.NodeVisitor):
             return
         # Outermost context (current assignment target / keyword arg name)
         context_var = self._context_stack[-1] if self._context_stack else None
-        # If the context variable looks safe (i, j, idx, ...), skip
-        if context_var and context_var.lower() in SAFE_VAR_NAMES:
-            return
-        # If the context variable is a display/IO/formatting concern, skip
-        if context_var and context_var in DISPLAY_VAR_NAMES:
-            return
         line_text = self._line_text(node.lineno)
-        # If the line contains a derived-pattern, mark as documented
-        severity = "🔴"
-        for pat in DERIVED_PATTERNS:
-            if pat.search(line_text):
-                severity = "🟡"
-                break
         self.literals.append(FoundLiteral(
             file_path=self.file_path,
             lineno=node.lineno,
@@ -277,7 +241,7 @@ class ConstantVisitor(ast.NodeVisitor):
             value=value,
             context_var=context_var,
             context_expr=line_text.strip()[:80],
-            severity=severity,
+            severity="🔴",
         ))
 
 
@@ -341,11 +305,11 @@ def extract_live_names(
     live: set[str] = set()
     for root in paths:
         if root.is_file() and root.suffix == ".py":
-            files = [root] if root.name not in EXCLUDE_FILES else []
+            files = [root] if not _is_excluded_file(root) else []
         elif root.is_dir():
             files = [p for p in root.rglob("*.py")
                        if not any(part in exclude_dirs for part in p.parts)
-                       and p.name not in EXCLUDE_FILES]
+                       and not _is_excluded_file(p)]
         else:
             files = []
         for path in files:
@@ -355,7 +319,8 @@ def extract_live_names(
             except (OSError, UnicodeDecodeError, SyntaxError):
                 continue
             for node in ast.walk(tree):
-                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if (isinstance(node, ast.AnnAssign)
+                        and isinstance(node.target, ast.Name)):
                     live.add(node.target.id)
                 elif isinstance(node, ast.Assign):
                     for tgt in node.targets:
@@ -363,30 +328,38 @@ def extract_live_names(
                             live.add(tgt.id)
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     args = node.args
-                    positional = list(getattr(args, "posonlyargs", [])) + list(args.args)
+                    positional = list(args.posonlyargs) + list(args.args)
                     n_defaults = len(args.defaults)
                     n_positional = len(positional)
                     for i in range(n_defaults):
                         arg_idx = n_positional - n_defaults + i
                         if 0 <= arg_idx < n_positional:
                             live.add(positional[arg_idx].arg)
-                    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+                    for arg, default in zip(
+                        args.kwonlyargs, args.kw_defaults, strict=True,
+                    ):
                         if default is not None:
                             live.add(arg.arg)
     return live
 
 
+class ScanError(Exception):
+    """A requested source path could not be read or parsed."""
+
+
+def _is_excluded_file(path: Path) -> bool:
+    # Only this tool is exempt, not unrelated files also called audit.py.
+    return path.resolve() == Path(__file__).resolve() or path.name in EXCLUDE_FILES
+
+
 def scan_file(path: Path, catalog_names: set[str]) -> list[FoundLiteral]:
-    """Scan one Python file for undocumented constants."""
-    if path.name in EXCLUDE_FILES:
-        return []
+    """Scan one Python file, raising ScanError if reading or parsing fails."""
     try:
         source = path.read_text()
-    except (OSError, UnicodeDecodeError):
-        return []
-    try:
         tree = ast.parse(source, filename=str(path))
-    except SyntaxError:
+    except (OSError, UnicodeDecodeError, SyntaxError) as error:
+        raise ScanError(f"{path}: {error}") from error
+    if _is_excluded_file(path):
         return []
     visitor = ConstantVisitor(path, source)
     visitor.visit(tree)
@@ -401,16 +374,44 @@ def scan_file(path: Path, catalog_names: set[str]) -> list[FoundLiteral]:
 def scan_path(
     root: Path, catalog_names: set[str],
     exclude_dirs: tuple[str, ...] = DEFAULT_EXCLUDE_DIRS,
+    *, errors: list[ScanError] | None = None,
 ) -> list[FoundLiteral]:
-    """Scan a path (file or directory) recursively."""
+    """Scan a path, collecting failures in errors or raising the first failure."""
     all_literals: list[FoundLiteral] = []
-    if root.is_file() and root.suffix == ".py":
-        return scan_file(root, catalog_names)
-    if root.is_dir():
-        for path in root.rglob("*.py"):
-            if any(part in exclude_dirs for part in path.parts):
-                continue
+
+    def report(error: ScanError) -> None:
+        if errors is None:
+            raise error
+        errors.append(error)
+
+    def scan(path: Path) -> None:
+        try:
             all_literals.extend(scan_file(path, catalog_names))
+        except ScanError as error:
+            report(error)
+
+    try:
+        root.stat()
+    except OSError as error:
+        report(ScanError(f"{root}: {error}"))
+        return all_literals
+    if root.is_file():
+        if root.suffix == ".py":
+            scan(root)
+        else:
+            report(ScanError(f"{root}: expected a Python source file"))
+    elif root.is_dir():
+        def walk_error(error: OSError) -> None:
+            report(ScanError(f"{root}: {error}"))
+
+        # os.walk reports unreadable directories; Path.rglob can omit them.
+        for directory, dirs, filenames in os.walk(root, onerror=walk_error):
+            dirs[:] = sorted(d for d in dirs if d not in exclude_dirs)
+            for filename in sorted(filenames):
+                if filename.endswith(".py"):
+                    scan(Path(directory) / filename)
+    else:
+        report(ScanError(f"{root}: expected a file or directory"))
     return all_literals
 
 
@@ -422,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
                     default=Path("notes/magic_numbers.md"),
                     help="Magic numbers catalog (default: notes/magic_numbers.md)")
     ap.add_argument("--strict", action="store_true",
-                    help="Exit code 1 if any 🔴 undocumented literal found")
+                    help="Exit code 1 on undocumented literals or scan failures")
     ap.add_argument("--strict-status", action="store_true",
                     help="Exit code 1 if any LIVE catalog entry is ⚠️ Unresolved")
     ap.add_argument("--show-allowed", action="store_true",
@@ -454,8 +455,11 @@ def main(argv: list[str] | None = None) -> int:
                       f"{', '.join(sorted(names_list))}")
 
     all_literals: list[FoundLiteral] = []
+    scan_errors: list[ScanError] = []
     for p in args.paths:
-        all_literals.extend(scan_path(p, catalog_names))
+        all_literals.extend(scan_path(p, catalog_names, errors=scan_errors))
+    for error in scan_errors:
+        print(f"Scan error: {error}", file=sys.stderr)
 
     # Group by severity
     by_sev: dict[str, list[FoundLiteral]] = {"🔴": [], "🟡": [], "🟢": []}
@@ -475,13 +479,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {lit}")
 
     print(f"\nSummary: {n_red} undocumented, {n_yellow} documented/derived, "
-          f"{len(by_sev['🟢'])} allowed.")
+          f"{len(by_sev['🟢'])} allowed, {len(scan_errors)} scan errors.")
 
     n_unresolved_live = len(by_status.get("unresolved", []))
     if n_unresolved_live > 0:
         print(f"  ⚠️ {n_unresolved_live} LIVE catalog entries still Unresolved")
 
-    if args.strict and n_red > 0:
+    if args.strict and (n_red > 0 or scan_errors):
         return 1
     if args.strict_status and n_unresolved_live > 0:
         return 1

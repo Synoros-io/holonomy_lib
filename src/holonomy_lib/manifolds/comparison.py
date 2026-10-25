@@ -49,7 +49,6 @@ import math
 import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
-from holonomy_lib.provenance import with_provenance
 
 # Default Gauss-Legendre node count for the model ball-volume integral
 # `∫_0^r sn_κ(t)^{N-1} dt`. The integrand is smooth/analytic on a finite
@@ -133,9 +132,6 @@ def _unit_sphere_surface_area(N: torch.Tensor) -> torch.Tensor:
     return 2.0 * torch.exp((N / 2.0) * math.log(math.pi) - torch.lgamma(N / 2.0))
 
 
-@with_provenance(
-    "holonomy_lib.manifolds.comparison.model_sphere_area", op_version="0.1",
-)
 def model_sphere_area(
     kappa: torch.Tensor, N: torch.Tensor, r: torch.Tensor,
 ) -> torch.Tensor:
@@ -157,9 +153,6 @@ def model_sphere_area(
     return _unit_sphere_surface_area(N) * _sn_kappa(kappa, r) ** (N - 1.0)
 
 
-@with_provenance(
-    "holonomy_lib.manifolds.comparison.model_ball_volume", op_version="0.1",
-)
 def model_ball_volume(
     kappa: torch.Tensor, N: torch.Tensor, r: torch.Tensor,
     n_quad: int = COMPARISON_BALL_VOLUME_QUADRATURE_NODES,
@@ -196,9 +189,6 @@ def model_ball_volume(
     return _unit_sphere_surface_area(N) * integral
 
 
-@with_provenance(
-    "holonomy_lib.manifolds.comparison.model_anisotropic_flux", op_version="0.1",
-)
 def model_anisotropic_flux(
     kappas: torch.Tensor, r: torch.Tensor,
 ) -> torch.Tensor:

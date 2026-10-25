@@ -67,7 +67,6 @@ import warnings
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.provenance import with_provenance
 
 # Default regularization for entropic Sinkhorn, per Cuturi (2013) §4.
 # A regularization of 0.01 is a common middle-ground: small enough that
@@ -134,7 +133,6 @@ RICCI_FLOW_SURGERY_PERIOD_DEFAULT: int = 10
 RICCI_FLOW_SURGERY_THRESHOLD_DEFAULT: float = 3.0
 
 
-@with_provenance("holonomy_lib.discrete_geometry.ollivier_ricci_curvature", op_version="0.4")
 def ollivier_ricci_curvature(
     A: torch.Tensor,
     alpha: float = 0.0,
@@ -269,9 +267,6 @@ def ollivier_ricci_curvature(
 # ============================================================
 
 
-@with_provenance(
-    "holonomy_lib.discrete_geometry.discrete_ricci_flow", op_version="0.4",
-)
 def discrete_ricci_flow(
     A: torch.Tensor,
     n_steps: int,
@@ -351,9 +346,6 @@ def discrete_ricci_flow(
     return W
 
 
-@with_provenance(
-    "holonomy_lib.discrete_geometry.ricci_flow_with_surgery", op_version="0.4",
-)
 def ricci_flow_with_surgery(
     A: torch.Tensor,
     n_steps: int,

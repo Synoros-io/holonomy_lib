@@ -33,12 +33,7 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 
-
-@with_provenance(
-    "holonomy_lib.spectral.spectral_dimension", op_version="0.1",
-)
 def spectral_dimension(
     eigenvalues: torch.Tensor, t: torch.Tensor,
 ) -> torch.Tensor:

@@ -32,10 +32,8 @@ from typing import Literal
 import torch
 
 from holonomy_lib.algebra.linear import truncated_svd
-from holonomy_lib.provenance import with_provenance
 
 
-@with_provenance("holonomy_lib.tensor_calculus.mode_product", op_version="0.1")
 def mode_product(
     T: torch.Tensor, A: torch.Tensor, axis: int
 ) -> torch.Tensor:
@@ -93,7 +91,6 @@ def mode_product(
     return out_perm.movedim(-1, axis)
 
 
-@with_provenance("holonomy_lib.tensor_calculus.mode_unfolding", op_version="0.1")
 def mode_unfolding(T: torch.Tensor, axis: int) -> torch.Tensor:
     """Matricize T along `axis`: move `axis` to position 1, flatten the rest.
 
@@ -117,7 +114,6 @@ def mode_unfolding(T: torch.Tensor, axis: int) -> torch.Tensor:
     return T_perm.reshape(B, n_axis, -1)
 
 
-@with_provenance("holonomy_lib.tensor_calculus.hosvd", op_version="0.1")
 def hosvd(
     T: torch.Tensor,
     ranks: Sequence[int],

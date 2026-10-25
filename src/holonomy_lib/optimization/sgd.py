@@ -57,13 +57,6 @@ def riemannian_sgd_step(
         §4.1 — retraction-based steepest descent.
       Bonnabel, S. (2013). Stochastic gradient descent on Riemannian
         manifolds. IEEE TAC 58(9):2217-2229, §III.
-
-    Note: this function is intentionally NOT `@with_provenance`-
-    decorated. Optimizer steps are inner-loop calls that fire
-    hundreds or thousands of times per training run, and the hex
-    computation would dominate the actual math. If you need to
-    audit an optimization trajectory, record the manifold primitives
-    (`projection`, `retraction`) it calls instead.
     """
     # Project the negative ambient gradient onto the tangent space at
     # `point`, then retract. The projection is linear, so scaling by

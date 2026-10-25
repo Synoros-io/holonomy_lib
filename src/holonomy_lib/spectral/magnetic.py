@@ -89,7 +89,6 @@ import math
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.provenance import with_provenance
 
 # Default magnetic charge q ∈ [0, 1) per Furutani et al. (2020), §5.
 # `q = 1/4` is the value that maximally separates the directed
@@ -99,9 +98,6 @@ from holonomy_lib.provenance import with_provenance
 MAGNETIC_CHARGE_DEFAULT: float = 0.25
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.combinatorial", op_version="0.2",
-)
 def combinatorial(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -134,9 +130,6 @@ def combinatorial(
     return D_diag - H_times_As
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.symmetric_normalized", op_version="0.2",
-)
 def symmetric_normalized(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -195,10 +188,6 @@ def symmetric_normalized(
 # ============================================================
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.sign_magnetic_combinatorial",
-    op_version="0.1",
-)
 def sign_magnetic_combinatorial(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -244,10 +233,6 @@ def sign_magnetic_combinatorial(
     return D_diag - H_times_As
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.sign_magnetic_symmetric_normalized",
-    op_version="0.1",
-)
 def sign_magnetic_symmetric_normalized(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
