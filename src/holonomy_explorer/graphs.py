@@ -20,9 +20,13 @@ from .common import (
     number,
 )
 
-# Claude's 2026-10-25 sweep on the corrected library: unweighted karate, CPU,
-# float64. This setting gives components 21/13 and four faction mismatches.
-# It is an example for this graph, not a community-detection guarantee.
+# Measured 2026-10-25 with the converged Ollivier curvature (CPU, float64, each
+# generator at its defaults): ring of cliques ends as [5, 5, 5, 5], barbell as
+# [4, 4, 1, 1], the geometric graph as [20, 4], while karate and the block model
+# stay in one piece. An earlier 21/13 karate split came from unconverged
+# curvature. A sweep over alpha, dt, steps and cut thresholds found no setting
+# that recovers Zachary's two factions; the best modularity cut gave four parts.
+# So these are a demonstration on clear community structure, not a detector.
 DEFAULT_FLOW_STEPS = 20
 DEFAULT_SURGERY_PERIOD = 10
 DEFAULT_SURGERY_THRESHOLD = 1.5
@@ -232,6 +236,14 @@ def compute(request: Request) -> Request:
             # them only in the terminal while the browser reports a partition.
             flow_notices.extend(str(notice.message) for notice in notices)
         final_labels, final_sizes = components(frames[-1])
+        # Say so plainly when nothing split, otherwise an unchanged graph reads
+        # like the animation failed.
+        if complete and len(final_sizes) == 1:
+            warnings.append(
+                "The flow did not split this graph at these settings. Ricci flow "
+                "separates clear community structure (try the ring of cliques); "
+                "on the karate club it does not recover the two factions."
+            )
         result.update(
             frames=torch.stack(frames),
             frame_steps=[0, *frame_steps],
