@@ -3,7 +3,7 @@
 
 """Find undocumented numeric constants in source.
 
-Per the "no magic numbers" rule (CLAUDE.md constraint #8, direction.md 2026-05-23),
+Per the "no magic numbers" rule (AGENTS.md invariant 2, CONVENTIONS §5),
 every numerical constant in the architecture must be derived from substrate state,
 corpus properties, universal invariants, or experimentally tuned with documented
 procedure. This module enforces that rule by scanning Python source for numeric

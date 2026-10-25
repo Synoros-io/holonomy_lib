@@ -7,7 +7,7 @@ The audit is the project's gate (`python tools/audit.py src/holonomy_lib --stric
 Without tests, a regression in the audit silently breaks enforcement —
 either letting magic numbers through (false negative) or blocking
 legitimate code (false positive). These tests pin down the behaviors
-the README/CLAUDE.md promise.
+the README/AGENTS.md promise.
 """
 
 from __future__ import annotations

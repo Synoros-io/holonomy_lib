@@ -375,12 +375,7 @@ Format: `module: short summary` (e.g. `spectral: drop self-loops at
 entry to graph primitives`). The body explains _what changed and
 why_, not _what the code does_; that's the docstring's job.
 
-End every commit with the `Co-Authored-By` trailer when the work
-was done in pair with the Claude Code agent:
-
-```
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
+Commits carry no co-author or tool-attribution trailers.
 
 ### 10.4 No internal-only files in the public tree
 
