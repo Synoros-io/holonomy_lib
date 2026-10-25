@@ -127,8 +127,7 @@ def test_weights_shift_the_mean():
     )
 
 def test_frechet_mean_backward_finite():
-    """frechet_mean of points parameterized by tangents at origin
-    must produce finite gradients on the tangent params."""
+    """Implicit derivatives match reference values and are batch independent."""
     from holonomy_lib.manifolds import LorentzManifold
 
     mfd = LorentzManifold(n=4, k=-1.0)
@@ -164,9 +163,84 @@ def test_frechet_mean_backward_finite():
     from holonomy_lib.manifolds import KappaStereographicManifold
 
     flat = KappaStereographicManifold(n=1, kappa=0.)
+    empty_points = torch.empty(0, 2, 1, dtype=torch.float64, requires_grad=True)
+    empty_weights = torch.empty(0, 2, dtype=torch.float64, requires_grad=True)
+    empty_mean = frechet_mean(empty_points, flat, empty_weights)
+    empty_grads = torch.autograd.grad(empty_mean.sum(), (empty_points, empty_weights))
+    assert empty_grads[0].shape == empty_points.shape
+    assert empty_grads[1].shape == empty_weights.shape
     coincident = torch.zeros(1, 2, 1, dtype=torch.float64, requires_grad=True)
     frechet_mean(coincident, flat).sum().backward()
     assert coincident.grad is not None
     torch.testing.assert_close(
         coincident.grad, torch.full_like(coincident, .5), atol=1e-12, rtol=0,
     )
+
+
+    curved = KappaStereographicManifold(n=2, kappa=-1.)
+    symmetric = torch.tensor(
+        [[[0., 0.], [2., 0.], [-2., 0.], [0., 2.], [0., -2.]]],
+        dtype=torch.float64, requires_grad=True,
+    )
+
+    def symmetric_mean(tangents):
+        return frechet_mean(curved.exp_0(tangents), curved, tol=1e-12)
+
+    mean = symmetric_mean(symmetric)
+    gradient = torch.autograd.grad(mean[0, 0], symmetric)[0]
+    # At the origin the radial/transverse Hessian eigenvalues of half
+    # squared hyperbolic distance are 1 and r*coth(r). Here r=4 and
+    # the five-point Hessian is (3 + 8*coth(4))/5 times the identity.
+    radius = symmetric.new_tensor(4.)
+    reference = 1 / (3 + 2 * radius / radius.tanh())
+    torch.testing.assert_close(gradient[0, 0, 0], reference, atol=1e-12, rtol=0)
+    perturbation = torch.zeros_like(symmetric)
+    perturbation[0, 0, 0] = 1e-6
+    finite_difference = (
+        symmetric_mean(symmetric.detach() + perturbation)
+        - symmetric_mean(symmetric.detach() - perturbation)
+    ) / 2e-6
+    torch.testing.assert_close(
+        gradient[0, 0, 0], finite_difference[0, 0], atol=1e-8, rtol=0,
+    )
+    combined = symmetric.detach().repeat(2, 1, 1)
+    combined[1, 0] = symmetric.new_tensor([.1, .05])
+    combined.requires_grad_()
+    combined_gradient = torch.autograd.grad(
+        symmetric_mean(combined)[0, 0], combined,
+    )[0]
+    torch.testing.assert_close(combined_gradient[:1], gradient, atol=1e-12, rtol=0)
+    torch.testing.assert_close(
+        combined_gradient[1], torch.zeros_like(combined_gradient[1]),
+        atol=0, rtol=0,
+    )
+
+    for model in (curved, LorentzManifold(n=2)):
+        tangents = torch.tensor(
+            [[[.1, .2], [-.2, .1], [.05, -.1]]],
+            dtype=torch.float64, requires_grad=True,
+        )
+        weights = torch.tensor([[1., 2., 3.]], dtype=torch.float64,
+                               requires_grad=True)
+
+        def weighted_mean(tangents, weights, model=model):
+            return frechet_mean(
+                model.exp_0(tangents), model, weights, max_iter=200, tol=1e-12,
+            )
+
+        assert torch.autograd.gradcheck(weighted_mean, (tangents, weights))
+
+    # Antipodal sphere points have a circle of means. A singular member
+    # must report NaNs without corrupting its nonsingular batch neighbor.
+    sphere = KappaStereographicManifold(n=2, kappa=1.)
+    points = torch.tensor(
+        [[[0., 0.], [1., 0.], [-1., 0.]],
+         [[0., 0.], [.1, 0.], [-.1, 0.]]],
+        dtype=torch.float64, requires_grad=True,
+    )
+    weights = torch.tensor([[0., .5, .5], [0., .5, .5]],
+                           dtype=torch.float64, requires_grad=True)
+    mean = frechet_mean(points, sphere, weights)
+    point_grad, weight_grad = torch.autograd.grad(mean.sum(), (points, weights))
+    assert torch.isnan(point_grad[0]).all() and torch.isnan(weight_grad[0]).all()
+    assert torch.isfinite(point_grad[1]).all() and torch.isfinite(weight_grad[1]).all()

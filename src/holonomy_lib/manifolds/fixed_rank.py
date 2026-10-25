@@ -92,13 +92,12 @@ class _TruncatedSVD(torch.autograd.Function):
         kept = torch.arange(singular.shape[-1], device=singular.device) < rank
         active = kept.unsqueeze(-1) | kept.unsqueeze(-2)
         both_kept = kept.unsqueeze(-1) & kept.unsqueeze(-2)
-        close = (left - right).abs() <= (
-            torch.finfo(singular.dtype).eps**0.5 * torch.maximum(left, right)
-        )
-        repeated = both_kept & close
+        gap = right.square() - left.square()
+        # Every nonzero gap has Townsend's reciprocal, however small it is.
+        # The reconstruction limit applies only to exact ties in this dtype.
+        repeated = both_kept & (gap == 0)
         # Only discarded/discarded and repeated-retained pairs are removable.
         # A boundary tie remains a zero gap and signals a nonunique projection.
-        gap = right.square() - left.square()
         safe_gap = torch.where(~active | repeated, torch.ones_like(gap), gap)
         core = ((a - a.mT) * right + left * (b - b.mT)) / safe_gap
         inverse = torch.where(kept, singular, torch.ones_like(singular)).reciprocal()

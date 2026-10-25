@@ -327,14 +327,19 @@ class KappaStereographicManifold:
           Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
           Convolutional Networks, §2, stereographic metric and maps.
         """
-        xy = (x * y).sum(dim=-1, keepdim=True)        # (..., 1)
         xx = (x * x).sum(dim=-1, keepdim=True)
         yy = (y * y).sum(dim=-1, keepdim=True)
         k = self._get_kappa()
-        num = (1.0 - 2.0 * k * xy - k * yy) * x + (1.0 + k * xx) * y
+        total = x + y
+        total_sq = total.square().sum(dim=-1, keepdim=True)
+        x_factor = 1.0 + k * xx
+        # Group by x+y so additive inverses cancel before multiplication.
+        # For hyperbolic inputs the denominator is a sum of nonnegative
+        # terms, even when both points lie close to the ball boundary.
+        num = x_factor * total - k * total_sq * x
         # Hyperbolic inputs have a positive denominator. In the spherical
         # chart the sum can be the omitted pole; that operation is undefined.
-        denom = 1.0 - 2.0 * k * xy + k * k * xx * yy
+        denom = x_factor * (1.0 + k * yy) - k * total_sq
         return num / denom
 
     # ----------------------------------------------------------------
@@ -510,9 +515,34 @@ class KappaStereographicManifold:
         # Rewrite as: (lam / 2) · (tan_κ(arg)/arg) · v   (factor √|κ|·‖v‖
         # cancels with the implicit factor inside arg).
         arg = 0.5 * lam * v_norm
-        scaling = 0.5 * lam * self._tan_kappa_c(arg)
-        rhs = scaling.unsqueeze(-1) * v
-        return _project_ball(self.mobius_add(x, rhs), self.kappa)
+        k = torch.as_tensor(self.kappa, dtype=x.dtype, device=x.device)
+        root = torch.sqrt(torch.where(k < 0, -k, torch.ones_like(k)))
+        angle = root * arg
+        scaled = (k < 0) & (angle.square() > torch.finfo(x.dtype).eps**0.5)
+        safe_arg = torch.where(scaled, torch.zeros_like(arg), arg)
+        scaling = 0.5 * lam * self._tan_kappa_c(safe_arg)
+        rhs = scaling.unsqueeze(-1) * torch.where(scaled.unsqueeze(-1), 0.0, v)
+        ordinary = self.mobius_add(x, rhs)
+
+        # tanh(angle) rounds to one long before a near-boundary geodesic
+        # loses its endpoint. Keep h=exp(-2*angle) explicitly in the same
+        # Mobius formula, resolving x into components along the tangent.
+        # The ordinary analytic branch above supplies the derivative at v=0.
+        safe_norm = torch.where(scaled, v_norm, torch.ones_like(v_norm))
+        unit = torch.where(scaled.unsqueeze(-1), v / safe_norm.unsqueeze(-1), 0.0)
+        base = torch.where(scaled.unsqueeze(-1), root * x, 0.0)
+        along = (base * unit).sum(dim=-1, keepdim=True)
+        perpendicular = base - along * unit
+        perpendicular_sq = perpendicular.square().sum(dim=-1, keepdim=True)
+        h = torch.exp(-2.0 * torch.where(scaled, angle, 0.0)).unsqueeze(-1)
+        plus = (1.0 + along) + (1.0 - along) * h
+        minus = (1.0 + along) - (1.0 - along) * h
+        denom = plus.square() + (1.0 - h).square() * perpendicular_sq
+        parallel_num = minus * plus - (1.0 - h.square()) * perpendicular_sq
+        perpendicular_scale = 2.0 * ((1.0 + along) + (1.0 - along) * h.square())
+        hyperbolic = (parallel_num * unit + perpendicular_scale * perpendicular) / denom
+        result = torch.where(scaled.unsqueeze(-1), hyperbolic / root, ordinary)
+        return _project_ball(result, self.kappa)
 
     def log(
         self, x: torch.Tensor, y: torch.Tensor,
@@ -522,15 +552,30 @@ class KappaStereographicManifold:
             log_x(y) = (2/(λ_κ(x)·√|κ|)) · tan_κ⁻¹(√|κ| · ‖(-x) ⊕_κ y‖)
                        · ((-x) ⊕_κ y) / ‖(-x) ⊕_κ y‖
 
+        Its magnitude comes from the stable geodesic distance, avoiding an
+        atanh argument that rounds to one near the hyperbolic boundary.
+        The coincident-point limit has derivative y-x. Spherical antipodes
+        have no unique logarithm.
+
         References:
           Bachmann et al. (2020), eq. 5.
         """
-        diff = self.mobius_add(-x, y)
-        diff_norm = torch.linalg.vector_norm(diff, dim=-1)
-        lam = self._conformal_factor(x)
-        # atan_κ(√|κ|·‖diff‖) / (√|κ|·‖diff‖) · diff factor:
-        scaling = (2.0 / lam) * self._atan_kappa_c(diff_norm)
-        return scaling.unsqueeze(-1) * diff
+        delta = y - x
+        delta_sq = delta.square().sum(dim=-1, keepdim=True)
+        k = self._get_kappa()
+        x_factor = 1.0 + k * x.square().sum(dim=-1, keepdim=True)
+        # The Mobius denominator is positive away from spherical antipodes,
+        # so its numerator alone determines the direction. This form avoids
+        # subtracting nearly equal quadratic expressions at coincident points.
+        direction = x_factor * delta + k * delta_sq * x
+        direction_norm = torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
+        coincident = delta_sq == 0
+        safe_norm = torch.where(
+            coincident, torch.ones_like(direction_norm), direction_norm,
+        )
+        magnitude = 0.5 * x_factor * self.distance(x, y).unsqueeze(-1)
+        scaling = torch.where(coincident, 1.0 / x_factor, magnitude / safe_norm)
+        return scaling * direction
 
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,

@@ -179,6 +179,20 @@ class TestRoundTrip:
             dtype=torch.float64,
         )
         torch.testing.assert_close(log_gradient, expected_gradient, atol=1e-12, rtol=0)
+        for values in ([[1e-7, 2e-7, -1e-7]], [[0.3, -0.2, 0.4]]):
+            tangent = torch.tensor(values, dtype=torch.float64, requires_grad=True)
+            assert torch.autograd.gradcheck(so3.so3_exp, (tangent,))
+
+        # Large float32 angles still describe rotations; scaling and squaring
+        # of a general matrix exponential accumulates error in this regime.
+        large = torch.tensor([[1000., 0., 0.], [1e6, 0., 0.]])
+        rotations = so3.so3_exp(large)
+        reference = so3.axis_angle_to_matrix(large, large.norm(dim=-1))
+        torch.testing.assert_close(rotations, reference)
+        torch.testing.assert_close(
+            rotations.mT @ rotations, torch.eye(3).expand(2, 3, 3),
+        )
+        torch.testing.assert_close(torch.linalg.det(rotations), torch.ones(2))
 
 
 # --------------------------------------------------------------------

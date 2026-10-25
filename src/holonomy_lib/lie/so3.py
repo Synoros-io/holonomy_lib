@@ -54,6 +54,13 @@ SO3_LOG_NEAR_PI_RAD: float = 1e-7
 # term stays below roundoff, rather than introducing an angular tolerance.
 SO3_LOG_SERIES_SECOND_ORDER: float = 1.0 / math.factorial(SO3_DIM)
 
+# Taylor coefficients of sin(theta)/theta and (1-cos(theta))/theta².
+# They are reciprocal factorials from Rodrigues' formula, not fitted values.
+SO3_EXP_SINC_LINEAR: float = 1.0 / 6.0
+SO3_EXP_SINC_QUADRATIC: float = 1.0 / 120.0
+SO3_EXP_COSC_LINEAR: float = 1.0 / 24.0
+SO3_EXP_COSC_QUADRATIC: float = 1.0 / 720.0
+
 
 def axis_angle_to_matrix(
     axis: torch.Tensor, angle: torch.Tensor,
@@ -133,8 +140,8 @@ def matrix_to_axis_angle(R: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def so3_exp(omega: torch.Tensor) -> torch.Tensor:
     """Matrix exponential on so(3): ω ∈ R³ ↦ R ∈ SO(3).
 
-    Evaluates the matrix exponential of the skew generator directly,
-    including the correct derivative at zero angular velocity.
+    Evaluates Rodrigues' formula with analytic Taylor coefficients near
+    zero, including the skew-generator derivative at zero angular velocity.
 
     Args:
       omega: `(..., 3)` Lie algebra elements.
@@ -144,12 +151,38 @@ def so3_exp(omega: torch.Tensor) -> torch.Tensor:
 
     References:
       Hall (2015). Lie Groups, Lie Algebras, and Representations, §3.1.
+      Murray, Li, Sastry (1994). A Mathematical Introduction to Robotic
+        Manipulation, equation 2.14.
     """
     if omega.ndim < 1 or omega.shape[-1] != SO3_DIM:
         raise ValueError(
             f"omega must end with dim {SO3_DIM}; got omega.shape={tuple(omega.shape)}"
         )
-    return torch.linalg.matrix_exp(_hat(omega))
+    theta_squared = omega.square().sum(dim=-1)
+    small = theta_squared <= math.sqrt(torch.finfo(omega.dtype).eps)
+    # Mask before sqrt and division so inactive branches have finite
+    # derivatives too. The polynomial uses theta² directly at the origin.
+    safe_squared = torch.where(small, torch.ones_like(theta_squared), theta_squared)
+    theta = torch.sqrt(safe_squared)
+    series_squared = torch.where(small, theta_squared, torch.zeros_like(theta_squared))
+    sinc = torch.where(
+        small,
+        1.0 - SO3_EXP_SINC_LINEAR * series_squared
+        + SO3_EXP_SINC_QUADRATIC * series_squared.square(),
+        torch.sin(theta) / theta,
+    )
+    cosc = torch.where(
+        small,
+        0.5 - SO3_EXP_COSC_LINEAR * series_squared
+        + SO3_EXP_COSC_QUADRATIC * series_squared.square(),
+        (1.0 - torch.cos(theta)) / safe_squared,
+    )
+    generator = _hat(omega)
+    eye = torch.eye(SO3_DIM, dtype=omega.dtype, device=omega.device)
+    return (
+        eye + sinc[..., None, None] * generator
+        + cosc[..., None, None] * (generator @ generator)
+    )
 
 
 def so3_log(R: torch.Tensor) -> torch.Tensor:

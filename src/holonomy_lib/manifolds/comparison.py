@@ -111,17 +111,51 @@ SN_QUADRATIC = 1.0 / 120.0
 
 def _sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """sn_κ(t)/t, with its analytic signed-κ expansion at zero."""
-    q = kappa * t.square()
-    small = q.abs() <= torch.finfo(t.dtype).eps**0.5
-    series_q = torch.where(small, q, torch.zeros_like(q))
-    positive = (q > 0) & ~small
-    negative = (q < 0) & ~small
-    spherical_arg = torch.sqrt(torch.where(positive, q, torch.ones_like(q)))
-    hyperbolic_arg = torch.sqrt(torch.where(negative, -q, torch.ones_like(q)))
+    # Scaling before the second multiplication preserves κ=0 at radii
+    # whose square overflows, and tiny curvatures with moderate κt².
+    q = (kappa * t) * t
+    small = torch.isfinite(q) & (q.abs() <= torch.finfo(t.dtype).eps**0.5)
+    # Mask before multiplying in the differentiable series path as well:
+    # a zero upstream gradient times an overflowing κt would otherwise be NaN.
+    series_q = (torch.where(small, kappa, torch.zeros_like(kappa)) * t) * t
+    # The curvature supplies the branch even if κt² overflows. Taking its
+    # square root first also lets the angle remain representable in that case.
+    positive = (kappa > 0) & ~small
+    negative = (kappa < 0) & ~small
+    spherical_arg = (
+        torch.sqrt(torch.where(positive, kappa, torch.ones_like(kappa)))
+        * torch.where(positive, t.abs(), torch.ones_like(t))
+    )
+    hyperbolic_arg = (
+        torch.sqrt(torch.where(negative, -kappa, torch.ones_like(kappa)))
+        * torch.where(negative, t.abs(), torch.ones_like(t))
+    )
     spherical = torch.sin(spherical_arg) / spherical_arg
     hyperbolic = torch.sinh(hyperbolic_arg) / hyperbolic_arg
     series = 1.0 - SN_LINEAR * series_q + SN_QUADRATIC * series_q.square()
     return torch.where(small, series, torch.where(positive, spherical, hyperbolic))
+
+
+def _log_sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """Log of the positive model sine ratio at interior quadrature nodes."""
+    q = (kappa * t) * t
+    small = torch.isfinite(q) & (q.abs() <= torch.finfo(t.dtype).eps**0.5)
+    hyperbolic = (kappa < 0) & ~small
+    # log(sinh(z)/z) = z + log(1-exp(-2z)) - log(2) - log(z).
+    # This avoids forming sinh(z), which can overflow before the volume's
+    # radius and sphere-area factors bring the answer back into range.
+    angle = (
+        torch.sqrt(torch.where(hyperbolic, -kappa, torch.ones_like(kappa)))
+        * torch.where(hyperbolic, t, torch.ones_like(t))
+    )
+    hyperbolic_log = (
+        angle + torch.log(-torch.expm1(-2.0 * angle))
+        - math.log(2.0) - torch.log(angle)
+    )
+    other_log = torch.log(_sn_ratio(
+        torch.where(hyperbolic, torch.zeros_like(kappa), kappa), t,
+    ))
+    return torch.where(hyperbolic, hyperbolic_log, other_log)
 
 
 def sn_kappa(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -186,7 +220,7 @@ def model_ball_volume(
     """Volume of the geodesic ball of radius `r` in the space form `M_κ^N`:
     `V = ω_{N-1} · ∫_0^r sn_κ(t)^{N-1} dt`.
 
-    The integral is evaluated by `n_quad`-point Gauss-Legendre quadrature
+    The integral is evaluated in log space by `n_quad`-point Gauss-Legendre quadrature
     (exact for flat integer dimensions with `N <= 2 * n_quad`).
     Noninteger dimensions can have endpoint singular derivatives, so their
     quadrature convergence is algebraic rather than geometric.
@@ -209,14 +243,22 @@ def model_ball_volume(
         n_quad, dtype=kappa.dtype, device=kappa.device,
     )
 
-    # Pull out r^N analytically before quadrature. The remaining integrand
-    # stays nonsingular as r -> 0, including for fractional dimensions.
+    # Keep every factor in log space: r^N and the curvature-dependent
+    # integrand can each overflow or underflow while their product is finite.
+    # The exact origin uses its analytic first derivative, including N=1.
+    nonzero = r > 0
+    safe_r = torch.where(nonzero, r, torch.ones_like(r))
+    safe_kappa = torch.where(nonzero, kappa, torch.zeros_like(kappa))
     unit_nodes = 0.5 * (nodes + 1.0)
-    t = r.unsqueeze(-1) * unit_nodes
-    ratio = unit_nodes * _sn_ratio(kappa.unsqueeze(-1), t)
-    integrand = ratio.clamp_min(0) ** (N.unsqueeze(-1) - 1.0)
-    integral = 0.5 * (weights * integrand).sum(dim=-1)
-    return _unit_sphere_surface_area(N) * r**N * integral
+    t = safe_r.unsqueeze(-1) * unit_nodes
+    log_ratio = torch.log(unit_nodes) + _log_sn_ratio(safe_kappa.unsqueeze(-1), t)
+    log_integral = torch.logsumexp(
+        torch.log(weights) + (N.unsqueeze(-1) - 1.0) * log_ratio, dim=-1,
+    ) - math.log(2.0)
+    log_area = math.log(2.0) + (N / 2.0) * math.log(math.pi) - torch.lgamma(N / 2.0)
+    volume = torch.exp(log_area + N * torch.log(safe_r) + log_integral)
+    origin = torch.where(N == 1.0, 2.0 * r, torch.zeros_like(r))
+    return torch.where(nonzero, volume, origin)
 
 
 def model_anisotropic_flux(

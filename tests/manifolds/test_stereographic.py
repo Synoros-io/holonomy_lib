@@ -128,6 +128,44 @@ class TestProperties:
         y = mfd.random_point(batch_size=3, generator=_seed(16))
         y_back = mfd.exp(x, mfd.log(x, y))
         torch.testing.assert_close(y_back, y, atol=1e-9, rtol=1e-9)
+        # Coincident logarithms have the derivative of y-x in every chart.
+        base = x[:1].detach().requires_grad_(True)
+        assert torch.autograd.gradcheck(mfd.log, (base, base))
+
+        if k == -1.0:
+            from holonomy_lib.hyperbolic import frechet_mean
+            from holonomy_lib.manifolds import ProductManifold
+
+            for dtype, radius in [(torch.float32, .9999), (torch.float64, 1 - 1e-8)]:
+                curved = KappaStereographicManifold(2, k, dtype=dtype)
+                x = torch.tensor([[radius, 0.]], dtype=dtype)
+                logarithm = curved.log(x, -x)
+                assert torch.isfinite(logarithm).all()
+                # The axial geodesic has exact length 4*atanh(radius).
+                reference = 4 * torch.atanh(x[:, 0])
+                # Squaring the rounded radius in the conformal factor loses
+                # one relative eps divided by its distance from the boundary.
+                tolerance = torch.finfo(dtype).eps / (1 - radius)
+                torch.testing.assert_close(curved.norm(x, logarithm), reference,
+                                           atol=0., rtol=tolerance)
+                torch.testing.assert_close(
+                    curved.norm(x, logarithm), curved.distance(x, -x),
+                    atol=0., rtol=torch.finfo(dtype).eps,
+                )
+                torch.testing.assert_close(curved.exp(x, logarithm), -x,
+                                           atol=torch.finfo(dtype).eps, rtol=0.)
+                mean = frechet_mean(torch.stack((x, -x), dim=1), curved)
+                torch.testing.assert_close(mean, torch.zeros_like(x),
+                                           atol=torch.finfo(dtype).eps, rtol=0.)
+                product = ProductManifold([curved, curved], dtype=dtype)
+                pair = torch.cat((x, x), dim=-1)
+                torch.testing.assert_close(product.log(pair, -pair),
+                                           torch.cat((logarithm, logarithm), dim=-1),
+                                           atol=0., rtol=0.)
+            x = torch.tensor([[.99999, 0.]], dtype=torch.float32)
+            curved = KappaStereographicManifold(2, k, dtype=x.dtype)
+            torch.testing.assert_close(curved.log(x, x), torch.zeros_like(x),
+                                       atol=0., rtol=0.)
 
     def test_exp_0_log_0_inverse(self, k):
         """log_0(exp_0(v)) = v."""

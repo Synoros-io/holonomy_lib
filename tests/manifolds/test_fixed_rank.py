@@ -241,6 +241,35 @@ class TestProperties:
                 grad, mfd.projection(point, torch.ones_like(zero)), atol=1e-12, rtol=0,
             )
 
+        # A close but distinct retained pair still has the squared-gap pole.
+        # This sign-invariant projector avoids testing SVD sign choices.
+        for dtype, gap, step in [(torch.float64, 1e-9, 1e-12),
+                                 (torch.float32, 1e-5, 1e-7)]:
+            mfd = FixedRankManifold(3, 3, 2, retraction_mode="exact")
+            columns = torch.eye(3, dtype=dtype)[None, :, :2]
+            singular = torch.tensor([[1.0 + gap, 1.0]], dtype=dtype)
+            point = (columns, singular, columns.mT)
+            zero = torch.zeros(1, 3, 3, dtype=dtype, requires_grad=True)
+
+            def leading_projector(tangent, mfd=mfd, point=point):
+                left, _, _ = mfd.retraction(point, tangent)
+                return (left[..., :1] @ left[..., :1].mT)[0, 0, 1]
+
+            derivative = torch.autograd.grad(leading_projector(zero), zero)[0][0, 0, 1]
+            expected = singular[0, 1] / (singular[0, 0]**2 - singular[0, 1]**2)
+            torch.testing.assert_close(derivative, expected)
+            delta = torch.zeros_like(zero)
+            delta[0, 0, 1] = step
+            difference = (
+                leading_projector(zero.detach() + delta)
+                - leading_projector(zero.detach() - delta)
+            ) / (2.0 * step)
+            torch.testing.assert_close(derivative, difference, atol=0, rtol=1e-4)
+            if dtype == torch.float64:
+                assert torch.autograd.gradcheck(
+                    leading_projector, (zero,), eps=step, atol=1e-3, rtol=1e-4,
+                )
+
 
 # --------------------------------------------------------------------
 # Comparison against pymanopt's FixedRankEmbedded

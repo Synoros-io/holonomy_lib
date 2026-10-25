@@ -129,6 +129,21 @@ class TestHyperbolic:
             )
             assert out.shape == (batch,)
 
+        # 80-digit mpmath radial integrals, using the actual rounded inputs.
+        # The final volume is representable although r^N or sn^(N-1) alone
+        # is not. The N=100 boundary layer leaves a 64-node error below 1e-6.
+        for dtype, curvature, dimension, radius, reference, tolerance in [
+            (torch.float32, -1e6, 16.0, 0.01, 1.0676479258129327e12, 1e-5),
+            (torch.float32, -1e6, 32.0, 0.01, 8.8495897749474505e23, 1e-5),
+            (torch.float64, -1e12, 100.0, 1e-5, 3.375600096867369e-240, 1e-6),
+        ]:
+            k, n, r = (torch.tensor([x], dtype=dtype)
+                       for x in (curvature, dimension, radius))
+            torch.testing.assert_close(
+                model_ball_volume(k, n, r), torch.tensor([reference], dtype=dtype),
+                atol=0, rtol=tolerance,
+            )
+
 
 # --------------------------------------------------------------------
 # Property tests
@@ -151,6 +166,24 @@ class TestProperties:
         grad = torch.autograd.grad(sn_kappa(k, t).sum(), k)[0]
         torch.testing.assert_close(grad, torch.full_like(k, -1 / 6), atol=1e-12, rtol=0)
 
+        for dtype, radius in [(torch.float32, 1e20), (torch.float64, 1e160)]:
+            t = torch.tensor([radius], dtype=dtype)
+            torch.testing.assert_close(
+                sn_kappa(torch.zeros_like(t), t) / t, torch.ones_like(t),
+                atol=0, rtol=0,
+            )
+            # κt² overflows, but sqrt(κ)t and the spherical sine stay finite.
+            torch.testing.assert_close(
+                sn_kappa(torch.ones_like(t), t), torch.sin(t),
+                atol=0, rtol=torch.finfo(dtype).eps,
+            )
+        k = torch.tensor([1e-40], dtype=torch.float32)
+        t = torch.tensor([1e20], dtype=torch.float32)
+        # Float64 evaluates the closed form for these rounded float32 inputs.
+        root = k.to(DT).sqrt()
+        reference = (torch.sin(root * t.to(DT)) / root).to(k.dtype)
+        torch.testing.assert_close(sn_kappa(k, t), reference, atol=0, rtol=1e-6)
+
     def test_area_is_derivative_of_volume(self):
         # dV/dr = S(r); central difference, non-integer N, hyperbolic.
         kappa, N, r, h = _t([-1.0]), _t([2.5]), _t([0.7]), _t([1e-5])
@@ -163,10 +196,11 @@ class TestProperties:
         v = model_ball_volume(_t([0.3]), _t([2.5]), _t([0.9]))
         assert (v > 0).all()
 
-        r = torch.zeros(1, dtype=DT, requires_grad=True)
-        volume = model_ball_volume(torch.zeros_like(r), torch.full_like(r, 1.5), r)
+        r = torch.zeros(4, dtype=DT, requires_grad=True)
+        volume = model_ball_volume(torch.zeros_like(r), _t([1.0, 1.5, 2.0, 3.0]), r)
         grad = torch.autograd.grad(volume.sum(), r)[0]
-        torch.testing.assert_close(grad, torch.zeros_like(grad), atol=0, rtol=0)
+        torch.testing.assert_close(volume, torch.zeros_like(volume), atol=0, rtol=0)
+        torch.testing.assert_close(grad, _t([2.0, 0.0, 0.0, 0.0]), atol=0, rtol=0)
 
     def test_volume_monotone_in_radius(self):
         kappa, N = _t([-1.0]), _t([3.0])
