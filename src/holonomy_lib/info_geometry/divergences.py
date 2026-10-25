@@ -16,7 +16,7 @@ divergences:
   F(x) = Σ x_i log x_i − x_i             → generalized KL (Csiszár 1991)
                                             (= KL on the simplex)
   F(x) = − Σ log x_i                     → Itakura-Saito
-  F(x) = ½ log det X (for SPD matrices)  → LogDet / Burg matrix divergence
+  F(X) = −log det X (for SPD matrices)  → LogDet / Burg matrix divergence
 
 This module provides:
 
@@ -31,9 +31,8 @@ This module provides:
       0·log 0 = 0 convention. Equivalent to `bregman_divergence` with
       `potential = (x · log x − x).sum()`, but cheaper.
 
-      Autograd note: the `log(.)` is guarded by `torch.where` rather
-      than a symmetric clamp on `q`, so the function correctly returns
-      `+inf` when `p_i > 0` and `q_i = 0` (Gibbs's inequality bound).
+      Autograd note: `xlogy` preserves zero-mass terms and returns
+      `+inf` when `p_i > 0` and `q_i = 0` (support mismatch).
       Gradients through near-zero bins are not numerically reliable;
       use only for inference unless you're sure about the support.
 
@@ -116,7 +115,9 @@ def kl_divergence_categorical(
 
     Uses the convention 0 · log(0/x) = 0 (continuous limit). Both `p`
     and `q` must be on the simplex (non-negative, sum to 1 along the
-    last dim); we do not enforce this — it's a precondition.
+    last dim); we do not enforce this, so it is a precondition.
+    Gradients at zero probabilities need not be finite; differentiate
+    only where both distributions have strictly positive entries.
 
     Args:
       p, q: (B, k) probability tensors. Last dim is the support size.
@@ -134,25 +135,9 @@ def kl_divergence_categorical(
             f"p and q must have matching last dim; got {p.shape[-1]} vs "
             f"{q.shape[-1]}"
         )
-    # Conventions:
-    #   (a) `0 · log(0/q) = 0` for p_i = 0 (continuous limit).
-    #   (b) `p · log(p/0) = +∞` for p_i > 0, q_i = 0 (Gibbs;
-    #       supp(p) ⊄ supp(q) makes KL undefined / infinite).
-    # We use `torch.xlogy(p, p/q)` style with explicit guards so both
-    # conventions hold without silent finite garbage from a symmetric
-    # clamp on `q`.
-    log_p = torch.log(p.clamp(min=1e-9))
-    inf = torch.tensor(float("inf"), dtype=q.dtype, device=q.device)
-    # log_q: -inf where q_i = 0 (so `p_i · log(0)` = -inf, and the
-    # full term `p_i · (log_p - log_q)` = +inf when p_i > 0).
-    log_q = torch.where(q > 0, torch.log(q.clamp(min=1e-9)), -inf)
-    # Per-bin contribution. When p_i = 0, the multiplication zeros
-    # whatever (possibly inf) sits in (log_p - log_q), preserving the
-    # 0·log convention.
-    contributions = torch.where(
-        p > 0, p * (log_p - log_q), torch.zeros_like(p),
-    )
-    return contributions.sum(dim=-1)
+    # Separate xlogy terms keep positive probabilities intact, even
+    # below the numerical floor, and give zero when p_i is zero.
+    return (torch.special.xlogy(p, p) - torch.special.xlogy(p, q)).sum(dim=-1)
 
 
 def kl_divergence_gaussian(
@@ -183,9 +168,9 @@ def kl_divergence_gaussian(
       KL: (...,) divergence values, non-negative.
 
     References:
-      Amari (2016), §2.4 — exponential families.
+      Amari (2016), §2.4; exponential families.
       Petersen, K. B., Pedersen, M. S. (2012). The Matrix Cookbook,
-        eq. 380 — Gaussian-Gaussian KL.
+        eq. 380; Gaussian-Gaussian KL.
     """
     d = mu_p.shape[-1]
     if mu_q.shape[-1] != d:

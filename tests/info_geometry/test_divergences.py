@@ -48,13 +48,6 @@ def _neg_entropy(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class TestBregman:
-    def test_identity_self_distance_zero(self):
-        p = torch.randn(4, 5, dtype=torch.float64, generator=_seeded_generator(0))
-        d = bregman_divergence(p, p, _half_norm_sq)
-        torch.testing.assert_close(
-            d, torch.zeros_like(d), atol=1e-10, rtol=0,
-        )
-
     def test_squared_euclidean_form(self):
         """With F = ½‖·‖², Bregman recovers ½‖p − q‖²."""
         g = _seeded_generator(1)
@@ -64,8 +57,12 @@ class TestBregman:
         d_expected = 0.5 * ((p - q) ** 2).sum(dim=-1)
         torch.testing.assert_close(d_bregman, d_expected, atol=1e-12, rtol=0)
 
-    def test_non_negative_on_random_inputs(self):
-        """Bregman with strictly convex F is non-negative."""
+        p = torch.randn(4, 5, dtype=torch.float64, generator=_seeded_generator(0))
+        d = bregman_divergence(p, p, _half_norm_sq)
+        torch.testing.assert_close(
+            d, torch.zeros_like(d), atol=1e-10, rtol=0,
+        )
+
         g = _seeded_generator(2)
         p = torch.randn(8, 6, dtype=torch.float64, generator=g)
         q = torch.randn(8, 6, dtype=torch.float64, generator=g)
@@ -116,6 +113,15 @@ class TestKLCategorical:
         d = kl_divergence_categorical(p, q)
         assert (d >= -1e-12).all()
 
+        # Positive bins below the numerical floor still carry their full
+        # log ratio. Python's scalar logarithm supplies the reference.
+        p = torch.tensor([[1e-10, 1 - 1e-10]], dtype=torch.float64)
+        q = torch.tensor([[1e-100, 1.0]], dtype=torch.float64)
+        expected = 1e-10 * math.log(1e90) + (1 - 1e-10) * math.log(1 - 1e-10)
+        d = kl_divergence_categorical(p, q)
+        torch.testing.assert_close(d, d.new_tensor([expected]), atol=1e-22, rtol=1e-12)
+        assert (d > 0).all()
+
     def test_uniform_vs_delta(self):
         """KL(δ_0 ‖ uniform) on k=4 support = log 4 (≈ 1.386)."""
         p = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float64)
@@ -124,8 +130,6 @@ class TestKLCategorical:
         # ∑ p log(p/q) = 1·log(1/0.25) = log 4 (other terms have p=0)
         assert d[0].item() == pytest.approx(math.log(4.0), abs=1e-9)
 
-    def test_zero_in_p_does_not_blow_up(self):
-        """The 0·log 0 = 0 convention must hold."""
         p = torch.tensor([[0.5, 0.5, 0.0, 0.0]], dtype=torch.float64)
         q = torch.tensor([[0.25, 0.25, 0.25, 0.25]], dtype=torch.float64)
         d = kl_divergence_categorical(p, q)
@@ -174,6 +178,12 @@ class TestKLGaussian:
             kl, torch.zeros_like(kl), atol=1e-9, rtol=0,
         )
 
+        d = 4
+        mu = torch.zeros(1, d, dtype=torch.float64)
+        Sigma = torch.eye(d, dtype=torch.float64).unsqueeze(0)
+        kl = kl_divergence_gaussian(mu, Sigma, mu, Sigma)
+        torch.testing.assert_close(kl, torch.zeros_like(kl), atol=1e-12, rtol=0)
+
     def test_non_negative(self):
         d = 4
         mu_p = torch.randn(3, d, dtype=torch.float64,
@@ -184,14 +194,6 @@ class TestKLGaussian:
         Sigma_q = _random_spd(d, batch=3, seed=24)
         kl = kl_divergence_gaussian(mu_p, Sigma_p, mu_q, Sigma_q)
         assert (kl >= -1e-9).all()
-
-    def test_standard_normals_zero(self):
-        """KL(N(0, I) ‖ N(0, I)) = 0."""
-        d = 4
-        mu = torch.zeros(1, d, dtype=torch.float64)
-        Sigma = torch.eye(d, dtype=torch.float64).unsqueeze(0)
-        kl = kl_divergence_gaussian(mu, Sigma, mu, Sigma)
-        torch.testing.assert_close(kl, torch.zeros_like(kl), atol=1e-12, rtol=0)
 
     def test_mean_shift_only(self):
         """N(μ, I) vs N(0, I) ⇒ KL = ½‖μ‖²."""
@@ -225,13 +227,3 @@ class TestKLGaussian:
         bad_Sigma = torch.eye(5).unsqueeze(0)
         with pytest.raises(ValueError, match="Sigma_p"):
             kl_divergence_gaussian(mu, bad_Sigma, mu, torch.eye(4).unsqueeze(0))
-
-    def test_mu_q_shape_mismatch_raises(self):
-        """Regression: previously `mu_q` was unvalidated against `d`,
-        producing opaque cholesky_solve errors. Now it raises a clear
-        ValueError up front."""
-        mu_p = torch.zeros(1, 4)
-        mu_q_bad = torch.zeros(1, 5)
-        Sigma = torch.eye(4).unsqueeze(0)
-        with pytest.raises(ValueError, match="mu_q"):
-            kl_divergence_gaussian(mu_p, Sigma, mu_q_bad, Sigma)

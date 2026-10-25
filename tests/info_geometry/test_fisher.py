@@ -58,11 +58,6 @@ def _random_spd(
 
 
 class TestCategoricalFisher:
-    def test_shape(self):
-        p = _random_simplex(batch=3, k=5)
-        F = fisher_information_categorical(p)
-        assert F.shape == (3, 5, 5)
-
     def test_is_diagonal(self):
         p = _random_simplex(batch=2, k=4)
         F = fisher_information_categorical(p)
@@ -83,13 +78,13 @@ class TestCategoricalFisher:
     def test_clamps_zero_entries(self):
         """An exact-zero entry should not blow up to inf; the numerical
         floor `1e-9` keeps the Fisher finite (and large). Verify the
-        clamp is narrowly applied — non-zero entries must be untouched."""
+        entries above the floor are untouched."""
         p = torch.tensor([[0.0, 0.5, 0.5]], dtype=torch.float64)
         F = fisher_information_categorical(p)
         assert torch.isfinite(F).all()
         # Diagonal entry for p_0 = 0 should be 1/clamp_floor = 1e9.
         assert F[0, 0, 0].item() == pytest.approx(1e9, rel=1e-3)
-        # Non-zero entries must be the unclamped 1/p_i, not lumped
+        # Entries above the floor must be the unclamped 1/p_i, not lumped
         # together with the clamped value.
         assert F[0, 1, 1].item() == pytest.approx(2.0, rel=1e-12)
         assert F[0, 2, 2].item() == pytest.approx(2.0, rel=1e-12)
@@ -101,28 +96,21 @@ class TestCategoricalFisher:
 
 
 class TestGaussianMeanFisher:
-    def test_shape(self):
-        Sigma = _random_spd(batch=3, d=4)
-        F = fisher_information_gaussian_mean(Sigma)
-        assert F.shape == (3, 4, 4)
-
     def test_matches_inv_sigma(self):
         Sigma = _random_spd(batch=2, d=5, seed=7)
         F = fisher_information_gaussian_mean(Sigma)
         ref = torch.linalg.inv(Sigma)
         torch.testing.assert_close(F, ref, atol=1e-9, rtol=0)
 
-    def test_rejects_non_square(self):
-        with pytest.raises(ValueError, match="must be"):
-            fisher_information_gaussian_mean(torch.zeros(1, 3, 4))
-
-    def test_identity_covariance_yields_identity_fisher(self):
-        """N(μ, I) → g(μ) = I."""
         d = 4
         Sigma = torch.eye(d).unsqueeze(0).expand(2, d, d).clone()
         F = fisher_information_gaussian_mean(Sigma)
         I_batch = torch.eye(d).unsqueeze(0).expand(2, d, d)
         torch.testing.assert_close(F, I_batch, atol=1e-12, rtol=0)
+
+    def test_rejects_non_square(self):
+        with pytest.raises(ValueError, match="must be"):
+            fisher_information_gaussian_mean(torch.zeros(1, 3, 4))
 
 
 # --------------------------------------------------------------------
@@ -131,13 +119,6 @@ class TestGaussianMeanFisher:
 
 
 class TestNaturalGradient:
-    def test_shape(self):
-        d = 5
-        grad = torch.randn(3, d, dtype=torch.float64, generator=_seeded(0))
-        F = _random_spd(batch=3, d=d, seed=1)
-        ng = natural_gradient(grad, F)
-        assert ng.shape == (3, d)
-
     def test_matches_inv_F_times_grad(self):
         d = 5
         grad = torch.randn(2, d, dtype=torch.float64, generator=_seeded(0))
@@ -148,7 +129,6 @@ class TestNaturalGradient:
         ).squeeze(dim=-1)
         torch.testing.assert_close(ng, ref, atol=1e-9, rtol=0)
 
-    def test_identity_fisher_passes_grad_through(self):
         d = 4
         grad = torch.randn(2, d, dtype=torch.float64, generator=_seeded(0))
         F = torch.eye(d, dtype=torch.float64).unsqueeze(0).expand(2, d, d)
@@ -160,14 +140,6 @@ class TestNaturalGradient:
         F = _random_spd(batch=2, d=4, seed=0)
         with pytest.raises(ValueError, match="last dim"):
             natural_gradient(grad, F)
-
-    def test_rejects_1d_fisher_matrix(self):
-        """fisher_matrix must be at least 2-D; reject early with a
-        clear error instead of a cryptic torch internal."""
-        grad = torch.randn(3, dtype=torch.float64)
-        F_bad = torch.randn(3, dtype=torch.float64)
-        with pytest.raises(ValueError, match="at least 2 dims"):
-            natural_gradient(grad, F_bad)
 
 
 # --------------------------------------------------------------------

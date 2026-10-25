@@ -24,12 +24,15 @@ vectors `(..., 3)`; the function normalizes to unit norm internally
 so callers can pass unnormalized vectors.
 
 References:
-  Wikipedia, "Real spherical harmonics" — the explicit formulas
+  Wikipedia, "Real spherical harmonics": the explicit formulas
     transcribed here are the standard tesseral/sectoral basis.
   Edmonds (1957), §2.5.
   Geiger, M., Smidt, T. (2022). e3nn: Euclidean neural networks.
     arXiv:2207.09453. The modern implementation in geometric
-    deep learning; conventions match.
+    deep learning. To compare with e3nn.o3.spherical_harmonics, pass
+    directions[..., [1, 2, 0]], normalize=True, normalization="integral".
+    e3nn uses Cartesian order (x, y, z) at degree one; this basis uses
+    (y, z, x). See https://docs.e3nn.org/en/stable/api/o3/o3_sh.html.
 """
 
 from __future__ import annotations
@@ -67,10 +70,10 @@ def real_spherical_harmonics(
       `(..., (l_max + 1)²)` real spherical harmonic values.
 
     References:
-      Wikipedia, "Table of spherical harmonics" — real form.
+      Wikipedia, "Table of spherical harmonics": real form.
       Edmonds (1957), §2.5.
     """
-    if directions.shape[-1] != 3:
+    if directions.ndim < 1 or directions.shape[-1] != 3:
         raise ValueError(
             f"directions must end with dim 3; got shape="
             f"{tuple(directions.shape)}"
@@ -79,7 +82,7 @@ def real_spherical_harmonics(
         raise ValueError(
             f"l_max must be in [0, {_SUPPORTED_L_MAX}]; got l_max={l_max}. "
             f"Higher degrees need the associated-Legendre recurrence "
-            f"(planned for v0.2)."
+            f"(not implemented)."
         )
 
     floor = torch.finfo(directions.dtype).tiny

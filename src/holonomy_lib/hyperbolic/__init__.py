@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""holonomy_lib.hyperbolic — manifold-aware graph operations.
+"""holonomy_lib.hyperbolic : manifold-aware graph operations.
 
 The primitives in this module take a manifold (e.g.
 `LorentzManifold`) as an explicit dependency and operate on points

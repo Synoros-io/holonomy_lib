@@ -4,46 +4,19 @@
 """Manifold-valued Laplacian eigenmaps via Riemannian SGD.
 
 Status: experimental, in progress. The objective is attraction-only:
-it pulls neighbours together and has no term that keeps the embedding from
-collapsing, so with enough steps every connected component contracts to a point.
+it pulls neighbours together and admits collapsed connected components as
+minimizers. No constraint keeps nodes apart, and the iteration can diverge.
 A correct version needs a non-collapse constraint (the Belkin-Niyogi
 normalization, or negative sampling as in Nickel-Kiela 2017).
 
-The Euclidean Laplacian-eigenmap embedding (Belkin–Niyogi 2003)
-positions graph nodes in `R^k` by solving
+The implemented energy is Σ_ij A_ij d(Y_i, Y_j)². Updates use the
+per-node average logarithm to neighbors, followed by projection and
+retraction. Degree normalization rescales the update direction, so its
+scale does not grow directly with a node's degree. There is no guarantee
+that a single learning rate is suitable for all input geometries.
 
-    min_{Y ∈ R^{N×k}}  Σ_{i,j} A_{ij} · ‖Y_i − Y_j‖²,
-
-a quadratic objective whose minimizer is the bottom-k eigenvectors of
-the graph Laplacian (modulo a constant constraint). The natural
-generalization to a Riemannian manifold replaces the Euclidean
-squared distance with the manifold geodesic distance squared:
-
-    min_{Y ∈ M^N}  Σ_{i,j} A_{ij} · d_M(Y_i, Y_j)²,
-
-which no longer has a closed-form spectral solution but admits
-Riemannian gradient descent: the Riemannian gradient of the
-per-edge term `d_M(Y_i, Y_j)²` with respect to `Y_i` is
-`−2 · log_{Y_i}(Y_j)` (the steepest direction to move `Y_i` toward
-`Y_j`). For symmetric adjacency `A`, the total gradient on `Y_i` is
-
-    grad_{Y_i}  =  −2 · (1 / deg(i)) · Σ_j A_{ij} · log_{Y_i}(Y_j).
-
-The `1/deg(i)` factor is the random-walk normalization (the
-gradient of the *normalized* Laplacian energy, equivalent to using
-`L_rw = I − D⁻¹A`). Without it, hub nodes receive steps ~ deg(i)
-times larger than leaf nodes, and dense graphs (n_edges ≳ 500)
-overflow the manifold's `cosh`/`tan` factors well before
-convergence. The normalized form is degree-invariant, so the same
-`lr` works for graphs of any size and density.
-
-We push this through `RiemannianSGD`, which handles the
-`projection → retraction` cycle.
-
-When `M = LorentzManifold`, the output embedding inherits hyperbolic
-geometry's exponential capacity — the standard cure for high-tree-
-distortion graphs that Euclidean embeddings saturate on (Sarkar
-2011 distortion bound; Nickel–Kiela 2017 *Poincaré Embeddings*).
+Belkin and Niyogi's spectral method additionally constrains the embedding
+to exclude constant solutions. That constraint is absent here.
 
 References:
   Belkin, M., Niyogi, P. (2003). Laplacian eigenmaps for
@@ -59,16 +32,25 @@ References:
 
 from __future__ import annotations
 
+import warnings
+from typing import Any
+
 import torch
 
+from holonomy_lib._graph_utils import drop_self_loops
 from holonomy_lib.optimization import RiemannianSGD
+
+# Preserve the existing finite work budget for this experimental optimizer.
+EIGENMAPS_MAX_STEPS_DEFAULT = 200
+# Existing exploratory step size, with no claim of universal convergence.
+EIGENMAPS_LR_DEFAULT = 0.05
 
 
 def hyperbolic_laplacian_eigenmaps(
     adjacency: torch.Tensor,
-    manifold,
-    max_steps: int = 200,
-    lr: float = 0.05,
+    manifold: Any,
+    max_steps: int = EIGENMAPS_MAX_STEPS_DEFAULT,
+    lr: float = EIGENMAPS_LR_DEFAULT,
     generator: torch.Generator | None = None,
     init: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -78,25 +60,24 @@ def hyperbolic_laplacian_eigenmaps(
 
     via Riemannian SGD.
 
+    Status: experimental. This attraction-only objective collapses each
+    connected component; it does not compute constrained spectral eigenmaps.
+
     Args:
       adjacency: `(B, N, N)` symmetric non-negative graph adjacency
-        per batch. Self-loops `A_{ii}` are tolerated (their gradient
-        contribution is zero by `log_{Y_i}(Y_i) = 0`) but discouraged
-        for numerical hygiene; pre-zero the diagonal if you want.
+        per batch. Self-loops are dropped before computing degrees
+        or updates. Asymmetric inputs produce a warning.
       manifold: a manifold object exposing `random_point`, `log`,
         `projection`, `retraction`, `norm` (see e.g.
         `LorentzManifold`). The embedding dimension is taken from
-        `manifold.n`; output has shape `(B, N, manifold.n + 1)` for
-        the Lorentz case (ambient form).
-      max_steps: number of RSGD steps. Default 200 — enough for
-        moderate-size graphs (N ≤ a few hundred) to reach a stable
-        configuration on a Hadamard manifold; raise for harder
-        objectives.
-      lr: Riemannian SGD step size. Default 0.05 follows
-        `torch.optim.SGD`-style empirical defaults for embedding
-        problems; tune if the loss diverges (smaller) or stalls
-        (larger).
-      generator: optional `torch.Generator` for reproducible init.
+        `manifold.ambient_dim`, falling back to `manifold.n + 1`
+        for manifolds without that property.
+      max_steps: number of sequential RSGD steps. Default 200 is a
+        work budget, not a convergence guarantee.
+      lr: Riemannian SGD step size. Default 0.05 is an exploratory
+        setting; tune for the input geometry.
+      generator: optional `torch.Generator` for reproducible init, compatible
+        with the manifold's configured sampling device.
       init: optional `(B, N, ambient_dim)` initial embedding. If
         provided, must lie on the manifold. Default: random points
         via `manifold.random_point`.
@@ -117,7 +98,7 @@ def hyperbolic_laplacian_eigenmaps(
       Per-step cost is `O(B · N² · D)` from the pairwise `log` call
       (`D = ambient_dim`). Acceptable for `N ≤ a few hundred`; larger
       graphs should chunk along the `N²` dimension or use a sparse
-      adjacency-based loss (not implemented here — Stage 2 scope is
+      adjacency-based loss (not implemented here, Stage 2 scope is
       the dense case).
 
       The result is **not** rotation-canonicalized (the optimal
@@ -136,11 +117,16 @@ def hyperbolic_laplacian_eigenmaps(
     if lr <= 0:
         raise ValueError(f"lr must be > 0, got {lr}")
 
+    adjacency = drop_self_loops(adjacency)
+    if not torch.allclose(adjacency, adjacency.mT):
+        warnings.warn("adjacency is not symmetric", UserWarning, stacklevel=2)
     B, N, _ = adjacency.shape
     # Ambient dim is manifold-specific (n+1 for Lorentz, n for
     # κ-stereographic). Use the `ambient_dim` property when available
     # so the primitive is model-agnostic.
-    D = getattr(manifold, "ambient_dim", manifold.n + 1)
+    D = getattr(manifold, "ambient_dim", None)
+    if D is None:
+        D = manifold.n + 1
 
     if init is None:
         # `random_point` returns (BN, D); reshape into (B, N, D).
@@ -155,24 +141,17 @@ def hyperbolic_laplacian_eigenmaps(
             )
         embedding = init.clone()
 
+    embedding = embedding.to(device=adjacency.device, dtype=adjacency.dtype)
     opt = RiemannianSGD(manifold, lr=lr)
 
-    # Per-node degree, used to make the gradient scale-invariant w.r.t.
-    # graph size. Without this, a node of degree 100 receives a step
-    # ~50× larger than a node of degree 2 at the same lr, and dense
-    # graphs (n_edges ≳ 500) blow up the manifold operations
-    # (cosh(α) overflows at α ≈ 700 on float64). Equivalent to using
-    # the random-walk normalized Laplacian L_rw = I − D⁻¹A — the
-    # canonical normalization for spectral embedding (von Luxburg 2007).
-    #
-    # For isolated nodes (deg = 0), the gradient is zero anyway (no
-    # edges contribute), so the clamp's exact floor doesn't affect
-    # correctness — only prevents a divide-by-zero on the kept-zero row.
+    # Average each node's logarithms over its neighbors. Dropping loops
+    # first keeps them from diluting the update through the degree.
+    # Isolated rows have a zero numerator; the floor only makes 0/0 safe.
     degree = adjacency.sum(dim=-1, keepdim=True)              # (B, N, 1)
     degree_safe = degree.clamp(min=torch.finfo(adjacency.dtype).tiny)
 
-    for step in range(max_steps):
-        # Pairwise log_Y_i(Y_j) — broadcast `embedding` along the i and
+    for _ in range(max_steps):
+        # Pairwise log_Y_i(Y_j), broadcast `embedding` along the i and
         # j axes. Shapes:
         #   emb_i (B, N, 1, D) → expand → (B, N, N, D)
         #   emb_j (B, 1, N, D) → expand → (B, N, N, D)
@@ -200,9 +179,8 @@ def hyperbolic_laplacian_eigenmaps(
             ambient_grad.reshape(B * N, D),
         ).reshape(B, N, D)
 
-    # Fail-loud: silent NaN is the failure mode we just fixed; refuse
-    # to return a degenerate result. Diagnostic includes the hyper-
-    # parameters and graph stats so the caller can adjust.
+    # Non-finite iterates are unusable. Include the work budget and
+    # graph size so the caller can identify the divergent call.
     if not torch.isfinite(embedding).all():
         max_deg = adjacency.sum(dim=-1).max().item()
         n_nan = torch.isnan(embedding).sum().item()
@@ -212,7 +190,7 @@ def hyperbolic_laplacian_eigenmaps(
             f"steps: {n_nan} NaN, {n_inf} inf out of {embedding.numel()} "
             f"output elements. Graph stats: N={N}, max degree={max_deg:.0f}. "
             f"This usually means `lr={lr}` is too large for the graph "
-            f"structure — retry with a smaller `lr` (an order of magnitude "
+            f"structure, retry with a smaller `lr` (an order of magnitude "
             f"smaller is usually enough). Inputs are normalized by "
             f"per-node degree already, but extreme degree variance or "
             f"heavy adjacency weights can still trigger overflow."

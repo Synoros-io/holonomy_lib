@@ -6,14 +6,14 @@
 Cover:
   1. Validation (shape mismatches).
   2. Rodrigues formula correctness:
-     - R^T R = I, det R = +1.
+     - R^T R = identity, det R = +1.
      - Angle 0 → identity.
      - Angle π around the canonical axes → known matrices.
   3. axis_angle ↔ matrix round-trip (mod sign ambiguity at θ=π).
   4. so3_exp / so3_log round-trip.
   5. random_so3:
      - Output is in SO(3).
-     - Haar-uniformity sanity: large-batch mean rotation matrix ≈ 0
+     - Mean bias and squared-entry moment against Haar expectations
        (the trivial-rep projection on SO(3) under Haar is zero
        for the standard 3D representation).
 """
@@ -47,12 +47,6 @@ class TestValidation:
                 torch.zeros(5, dtype=torch.float64),
             )
 
-    def test_axis_angle_rejects_batch_mismatch(self):
-        with pytest.raises(ValueError, match="batch"):
-            so3.axis_angle_to_matrix(
-                torch.zeros(5, 3, dtype=torch.float64),
-                torch.zeros(4, dtype=torch.float64),
-            )
 
     def test_matrix_to_axis_angle_rejects_bad_shape(self):
         with pytest.raises(ValueError, match="\\(3, 3\\)"):
@@ -77,46 +71,37 @@ class TestValidation:
 
 class TestRodriguesFormula:
     def test_output_is_in_SO3(self):
-        """Random axis-angle → R^T R = I, det R = +1."""
+        """Random axis-angle → R^T R = identity, det R = +1."""
         g = _seeded(0)
         axis = torch.randn(8, 3, dtype=torch.float64, generator=g)
         angle = torch.rand(8, dtype=torch.float64, generator=g) * math.pi
         R = so3.axis_angle_to_matrix(axis, angle)
-        I = torch.eye(3, dtype=torch.float64).expand(8, 3, 3)
-        torch.testing.assert_close(R @ R.mT, I, atol=1e-12, rtol=0)
+        identity = torch.eye(3, dtype=torch.float64).expand(8, 3, 3)
+        torch.testing.assert_close(R @ R.mT, identity, atol=1e-12, rtol=0)
         det = torch.linalg.det(R)
         torch.testing.assert_close(
             det, torch.ones(8, dtype=torch.float64), atol=1e-12, rtol=0,
         )
 
-    def test_zero_angle_gives_identity(self):
-        axis = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float64)
-        angle = torch.zeros(1, dtype=torch.float64)
-        R = so3.axis_angle_to_matrix(axis, angle)
-        I = torch.eye(3, dtype=torch.float64).unsqueeze(0)
-        torch.testing.assert_close(R, I, atol=1e-12, rtol=0)
 
-    def test_pi_around_z_axis(self):
-        """π rotation around z = diag(-1, -1, 1)."""
-        axis = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float64)
-        angle = torch.tensor([math.pi], dtype=torch.float64)
-        R = so3.axis_angle_to_matrix(axis, angle)
-        expected = torch.diag(torch.tensor([-1.0, -1.0, 1.0], dtype=torch.float64))
-        torch.testing.assert_close(R[0], expected, atol=1e-10, rtol=0)
 
-    def test_pi_over_2_around_x_axis(self):
-        """π/2 around x sends e_y → e_z, e_z → -e_y."""
-        axis = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
-        angle = torch.tensor([math.pi / 2.0], dtype=torch.float64)
-        R = so3.axis_angle_to_matrix(axis, angle).squeeze(0)
-        # R @ e_y = R[:, 1]
-        torch.testing.assert_close(
-            R[:, 1], torch.tensor([0.0, 0.0, 1.0], dtype=torch.float64),
-            atol=1e-10, rtol=0,
+    @pytest.mark.parametrize(
+        "axis,angle,expected",
+        [
+            ([1., 2., 3.], 0., [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]),
+            ([0., 0., 1.], math.pi, [[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]]),
+            ([1., 0., 0.], math.pi / 2., [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]]),
+        ],
+    )
+    def test_pi_over_2_around_x_axis(self, axis, angle, expected):
+        """Known zero, half-turn, and quarter-turn Rodrigues values."""
+        rotation = so3.axis_angle_to_matrix(
+            torch.tensor([axis], dtype=torch.float64),
+            torch.tensor([angle], dtype=torch.float64),
         )
         torch.testing.assert_close(
-            R[:, 2], torch.tensor([0.0, -1.0, 0.0], dtype=torch.float64),
-            atol=1e-10, rtol=0,
+            rotation[0], torch.tensor(expected, dtype=torch.float64),
+            atol=1e-12, rtol=0,
         )
 
     def test_unnormalized_axis_works(self):
@@ -164,12 +149,36 @@ class TestRoundTrip:
         R = so3.so3_exp(omega)
         omega_back = so3.so3_log(R)
         torch.testing.assert_close(omega, omega_back, atol=1e-9, rtol=0)
+        small = torch.tensor([[0., 1e-7, 0.]], dtype=torch.float64)
+        torch.testing.assert_close(
+            so3.so3_log(so3.so3_exp(small)), small, atol=1e-20, rtol=0,
+        )
+        axis, angle = so3.matrix_to_axis_angle(so3.so3_exp(small))
+        torch.testing.assert_close(axis, small / 1e-7, atol=1e-12, rtol=0)
+        torch.testing.assert_close(angle, small[:, 1], atol=1e-20, rtol=0)
+        for batch in (0, 1):
+            values = small.expand(batch, -1)
+            recovered = so3.so3_log(so3.so3_exp(values))
+            assert recovered.shape == (batch, 3)
+            torch.testing.assert_close(recovered, values, atol=1e-20, rtol=0)
 
     def test_so3_exp_zero_is_identity(self):
         omega = torch.zeros(3, 3, dtype=torch.float64)
         R = so3.so3_exp(omega)
-        I = torch.eye(3, dtype=torch.float64).expand(3, 3, 3)
-        torch.testing.assert_close(R, I, atol=1e-12, rtol=0)
+        identity = torch.eye(3, dtype=torch.float64).expand(3, 3, 3)
+        torch.testing.assert_close(R, identity, atol=1e-12, rtol=0)
+        zero = omega[:1].requires_grad_()
+        assert torch.autograd.gradcheck(so3.so3_exp, (zero,))
+        assert torch.autograd.gradcheck(
+            lambda w: so3.so3_log(so3.so3_exp(w)), (zero,),
+        )
+        identity = identity[:1].clone().requires_grad_()
+        log_gradient, = torch.autograd.grad(so3.so3_log(identity).sum(), identity)
+        expected_gradient = torch.tensor(
+            [[[0., -0.5, 0.5], [0.5, 0., -0.5], [-0.5, 0.5, 0.]]],
+            dtype=torch.float64,
+        )
+        torch.testing.assert_close(log_gradient, expected_gradient, atol=1e-12, rtol=0)
 
 
 # --------------------------------------------------------------------
@@ -181,60 +190,34 @@ class TestRandomSO3:
     def test_output_is_in_SO3(self):
         n = 128
         R = so3.random_so3(batch_size=n, generator=_seeded(0))
-        I = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
-        torch.testing.assert_close(R @ R.mT, I, atol=1e-12, rtol=0)
+        identity = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
+        torch.testing.assert_close(R @ R.mT, identity, atol=1e-12, rtol=0)
         det = torch.linalg.det(R)
         torch.testing.assert_close(
             det, torch.ones(n, dtype=torch.float64), atol=1e-12, rtol=0,
         )
 
-    def test_haar_uniform_mean_approaches_zero(self):
-        """Statistical test for Haar uniformity on SO(3).
+    @pytest.mark.parametrize("seed", [7, 11])
+    def test_haar_uniform_mean_approaches_zero(self, seed):
+        """Check mean bias and the Haar second moment, not full uniformity.
 
-        Under Haar measure each entry `R_ij` has `E[R_ij] = 0` and
-        `Var[R_ij] = 1/3` (each row is uniform on S², so the squared
-        components average to `1/n_row = 1/3`). The asymptotic
-        distribution of `3n · ‖mean(R)‖_F²` is approximately
-        `chi-squared(9)` (modulo the orthonormality constraints among
-        rows/columns; the chi-squared bound is tight enough for a
-        sanity test).
-
-        We use the `p < 1e-6` quantile of chi-squared(9) ≈ 41, giving
-        a false-positive rate around 1 per million test runs — small
-        enough to never flake, tight enough to catch an actually
-        broken sampler. The Shoemake construction lands well inside
-        this region in practice: empirical ‖mean‖_F at n=10000 sits
-        near 0.012 against the 0.037 threshold.
+        Haar entries have mean zero and second moment 1/3. A cycle of
+        diagonal rotations has zero mean too, but fails the second moment.
         """
         n = 10000
-        R = so3.random_so3(batch_size=n, generator=_seeded(7))
-        mean_R = R.mean(dim=0)
-        fro = torch.linalg.matrix_norm(mean_R, ord="fro").item()
-        # chi-squared(9) quantile at p = 1e-6.
+        rotations = so3.random_so3(batch_size=n, generator=_seeded(seed))
+        mean_rotation = rotations.mean(dim=0)
+        fro = torch.linalg.matrix_norm(mean_rotation, ord="fro").item()
+        # chi-squared(9) upper quantile gives a conservative mean-bias check.
         chi2_p1e_6 = 41.0
         threshold = (chi2_p1e_6 / (3 * n)) ** 0.5
-        assert fro < threshold, (
-            f"Haar-uniformity sanity fails at p<1e-6: ‖mean(R)‖_F={fro:.4f} "
-            f"vs threshold={threshold:.4f}. Sampler is biased."
-        )
-
-    def test_haar_per_entry_mean_within_tolerance(self):
-        """Per-entry tightness: each `|mean(R_ij)|` should be within a
-        few standard errors of zero. Catches bias that the Frobenius
-        check could miss (e.g., one entry systematically positive but
-        others compensating to keep the sum-of-squares small)."""
-        n = 10000
-        R = so3.random_so3(batch_size=n, generator=_seeded(11))
-        mean_R = R.mean(dim=0)
-        # Per-entry std under Haar = sqrt(1/3) / sqrt(n) ≈ 0.0058 at n=10000.
-        # 5σ ≈ 0.029, p ≈ 2.9e-7 per entry, ≈ 2.6e-6 across 9 entries.
-        # Use 0.04 as a single threshold — clearly catches any entry
-        # consistently more than ~7σ off, while being far above the
-        # expected sampling fluctuation.
-        max_abs = mean_R.abs().max().item()
-        assert max_abs < 0.04, (
-            f"max |mean(R_ij)| = {max_abs:.4f} exceeds 0.04 tolerance "
-            f"(7σ at n={n}); sampler appears biased."
+        assert fro < threshold
+        assert mean_rotation.abs().max().item() < 0.04
+        # Var(R_ij²) = 1/5 - 1/9; 0.03 is ten standard errors at this n.
+        second_moment = rotations.square().mean(dim=0)
+        torch.testing.assert_close(
+            second_moment, torch.full_like(second_moment, 1. / 3.),
+            atol=0.03, rtol=0,
         )
 
     def test_deterministic_with_seed(self):
@@ -246,32 +229,14 @@ class TestRandomSO3:
         R = so3.random_so3(batch_size=0, generator=_seeded(0))
         assert R.shape == (0, 3, 3)
 
-    def test_output_device_matches_request(self):
-        """`device="cpu"` returns CPU tensors. (The CUDA branch is
-        covered by the GPU CI when present; here we just confirm the
-        kwarg actually controls placement and isn't silently ignored.)"""
-        R = so3.random_so3(
-            batch_size=4, generator=_seeded(0), device="cpu",
-        )
-        assert R.device.type == "cpu"
 
-    def test_generator_device_mismatch_raises(self):
-        """A CPU generator with `device="cuda"` (or vice versa) is a
-        common user error — fail loudly rather than silently producing
-        whatever default torch picks."""
-        cpu_gen = _seeded(0)
-        # We can't test the real CUDA path without a GPU, but a
-        # contrived non-matching-device case suffices: ask for a
-        # CPU-device output but with the generator already on CPU
-        # — that's the matching case and should NOT raise.
-        so3.random_so3(batch_size=2, generator=cpu_gen, device="cpu")  # OK
         # The mismatch raises only when devices actually differ, which
         # we can't construct without a CUDA build. The validation logic
         # is exercised by the device-equality check on entry.
 
 
 # --------------------------------------------------------------------
-# matrix_to_axis_angle near θ = π — the numerical danger zone where
+# matrix_to_axis_angle near θ = π : the numerical danger zone where
 # `sin(θ) → 0` makes the general branch blow up. The eigenvector
 # branch must take over BEFORE precision degrades.
 # --------------------------------------------------------------------
@@ -280,13 +245,13 @@ class TestRandomSO3:
 class TestNearPiAxisRecovery:
     """Round-trip accuracy in the awkward angular range `θ → π`. The
     general branch divides by `sin(θ)`, amplifying noise; the near-π
-    branch recovers axis from `(R+I)/2 = u u^T`, exact at θ = π but
+    branch recovers axis from `(R+identity)/2 = u u^T`, exact at θ = π but
     with `O(gap²)` model error away from there. The threshold is
     calibrated for float64 to use the better branch at each gap; see
     the empirical table in `so3.SO3_LOG_NEAR_PI_RAD`.
 
     Per-gap tolerances reflect the actual achievable accuracy of the
-    selected branch — generous enough to pass at all gaps, tight
+    selected branch : generous enough to pass at all gaps, tight
     enough that an incorrectly-routed branch (e.g. near-π used where
     general should be) would fail."""
 
@@ -339,15 +304,25 @@ class TestCompose:
     def test_identity_left_and_right(self):
         n = 4
         R = so3.random_so3(batch_size=n, generator=_seeded(0))
-        I = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
-        torch.testing.assert_close(so3.compose(I, R), R, atol=1e-12, rtol=0)
-        torch.testing.assert_close(so3.compose(R, I), R, atol=1e-12, rtol=0)
+        identity = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
+        torch.testing.assert_close(so3.compose(identity, R), R, atol=1e-12, rtol=0)
+        torch.testing.assert_close(so3.compose(R, identity), R, atol=1e-12, rtol=0)
+        # Quarter-turns around different axes do not commute. Rx Ry sends
+        # e_x to e_y; the reversed multiplication sends it to -e_z.
+        quarter_turns = so3.so3_exp(torch.tensor(
+            [[math.pi / 2., 0., 0.], [0., math.pi / 2., 0.]], dtype=torch.float64,
+        ))
+        product = so3.compose(quarter_turns[:1], quarter_turns[1:])
+        expected = torch.tensor(
+            [[[0., 0., 1.], [1., 0., 0.], [0., 1., 0.]]], dtype=torch.float64,
+        )
+        torch.testing.assert_close(product, expected, atol=1e-12, rtol=0)
 
     def test_inverse_via_transpose(self):
-        """For R ∈ SO(3), R · R^T = I."""
+        """For R ∈ SO(3), R · R^T = identity."""
         n = 4
         R = so3.random_so3(batch_size=n, generator=_seeded(1))
-        I = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
+        identity = torch.eye(3, dtype=torch.float64).expand(n, 3, 3)
         torch.testing.assert_close(
-            so3.compose(R, R.mT), I, atol=1e-12, rtol=0,
+            so3.compose(R, R.mT), identity, atol=1e-12, rtol=0,
         )

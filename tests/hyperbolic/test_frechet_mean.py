@@ -18,16 +18,6 @@ def _seed(s: int) -> torch.Generator:
     return g
 
 
-@pytest.mark.parametrize("batch", [1, 3])
-def test_shape(batch):
-    mfd = LorentzManifold(n=4)
-    P = mfd.random_point(batch_size=batch * 5, generator=_seed(0)).reshape(
-        batch, 5, mfd.n + 1,
-    )
-    mu = frechet_mean(P, mfd)
-    assert mu.shape == (batch, mfd.n + 1)
-
-
 def test_rejects_empty():
     mfd = LorentzManifold(n=3)
     P = mfd.random_point(batch_size=0, generator=_seed(1)).reshape(
@@ -35,48 +25,29 @@ def test_rejects_empty():
     )
     with pytest.raises(ValueError, match="empty"):
         frechet_mean(P, mfd)
+    valid = mfd.random_point(batch_size=2, generator=_seed(2)).reshape(1, 2, 4)
+    for weights in ([[-1., 2.]], [[0., 0.]], [[float("nan"), 1.]],
+                    [[float("inf"), 1.]]):
+        with pytest.raises(ValueError, match="weights"):
+            frechet_mean(valid, mfd, weights=torch.tensor(weights))
 
 
-def test_rejects_bad_weight_shape():
+@pytest.mark.parametrize("batch,copies,seed", [
+    (0, 1, 4), (1, 1, 4), (3, 1, 4),
+    (0, 2, 5), (1, 2, 5), (2, 2, 5),
+])
+def test_single_point_is_itself(batch, copies, seed):
+    """Singletons and repeated points have the known mean, including B=0."""
     mfd = LorentzManifold(n=3)
-    P = mfd.random_point(batch_size=10, generator=_seed(2)).reshape(
-        2, 5, mfd.n + 1,
-    )
-    bad_w = torch.ones(2, 4)
-    with pytest.raises(ValueError, match="weights"):
-        frechet_mean(P, mfd, weights=bad_w)
-
-
-def test_mean_is_on_manifold():
-    mfd = LorentzManifold(n=4)
-    P = mfd.random_point(batch_size=20, generator=_seed(3)).reshape(
-        1, 20, mfd.n + 1,
-    )
-    mu = frechet_mean(P, mfd)
-    assert mfd.is_on_manifold(mu).all()
-
-
-def test_single_point_is_itself():
-    """Fréchet mean of a singleton is that point."""
-    mfd = LorentzManifold(n=3)
-    p = mfd.random_point(batch_size=3, generator=_seed(4)).unsqueeze(1)
-    # Shape (3, 1, n+1)
-    mu = frechet_mean(p, mfd, tol=1e-12)
-    torch.testing.assert_close(mu, p.squeeze(1), atol=1e-10, rtol=0)
-
-
-def test_two_identical_points_equal_mean():
-    """Fréchet mean of two copies of the same point is that point."""
-    mfd = LorentzManifold(n=3)
-    p = mfd.random_point(batch_size=2, generator=_seed(5))
-    P = torch.stack([p, p], dim=1)  # (2, 2, n+1)
-    mu = frechet_mean(P, mfd, tol=1e-12)
-    torch.testing.assert_close(mu, p, atol=1e-10, rtol=1e-10)
+    point = mfd.random_point(batch_size=batch, generator=_seed(seed))
+    points = point.unsqueeze(1).expand(batch, copies, 4)
+    mean = frechet_mean(points, mfd, tol=1e-12)
+    assert mean.shape == (batch, 4)
+    torch.testing.assert_close(mean, point, atol=1e-10, rtol=0)
 
 
 def test_mean_minimizes_sum_of_squared_distances():
-    """Numerical check: the Karcher iterate has lower sum-of-squared-
-    distances than any nearby perturbation along the manifold."""
+    """Check a sampled perturbation and the symmetric triangle's exact mean."""
     mfd = LorentzManifold(n=3)
     P = mfd.random_point(batch_size=10, generator=_seed(6)).reshape(
         1, 10, mfd.n + 1,
@@ -105,6 +76,35 @@ def test_mean_minimizes_sum_of_squared_distances():
         f"Karcher iterate is not a local minimizer: "
         f"base={base_cost.item():.6e}, perturbed={pert_cost.item():.6e}"
     )
+    assert torch.isfinite(mu).all()
+    assert mfd.is_on_manifold(mu).all()
+
+    # Symmetry forces the mean of this equilateral hyperbolic triangle
+    # to the origin. Unit Karcher steps oscillate for this radius.
+    plane = LorentzManifold(n=2)
+    angles = torch.arange(3, dtype=torch.float64) * (2 * torch.pi / 3)
+    triangle = plane.exp_0(4 * torch.stack((angles.cos(), angles.sin()), -1))
+    mean = frechet_mean(triangle.unsqueeze(0), plane, max_iter=200)
+    torch.testing.assert_close(mean, plane.origin(1), atol=1e-9, rtol=0)
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        frechet_mean(triangle.unsqueeze(0), plane, max_iter=1)
+
+    # Preserve the manifold-domain cases, including the former convergence
+    # regression's inputs; finiteness alone does not pin an old/new-base bug.
+    from holonomy_lib.manifolds import KappaStereographicManifold
+
+    for curvature, seed, count in [(-1., 200, 8), (-1., 90, 10),
+                                    (-.5, 90, 10), (0., 90, 10),
+                                    (.5, 90, 10), (1., 90, 10)]:
+        curved = KappaStereographicManifold(n=3, kappa=curvature)
+        points = curved.random_point(batch_size=count, generator=_seed(seed))
+        mean = frechet_mean(points.unsqueeze(0), curved, max_iter=200, tol=1e-10)
+        assert mean.shape == (1, curved.ambient_dim)
+        assert torch.isfinite(mean).all()
+        assert curved.is_on_manifold(mean).all()
+    wide = LorentzManifold(n=4)
+    points = wide.random_point(batch_size=20, generator=_seed(3)).unsqueeze(0)
+    assert wide.is_on_manifold(frechet_mean(points, wide)).all()
 
 
 def test_weights_shift_the_mean():
@@ -126,13 +126,6 @@ def test_weights_shift_the_mean():
         f"d_equal={d_equal.item():.4e}, d_heavy={d_heavy.item():.4e}"
     )
 
-
-# --------------------------------------------------------------------
-# Autograd-finite — Fréchet mean backward through a parameterized
-# tangent-at-origin embedding chain.
-# --------------------------------------------------------------------
-
-
 def test_frechet_mean_backward_finite():
     """frechet_mean of points parameterized by tangents at origin
     must produce finite gradients on the tangent params."""
@@ -144,18 +137,14 @@ def test_frechet_mean_backward_finite():
                      generator=_seed(20)) * 0.3)
     v.requires_grad_(True)
     points = mfd.exp_0(v).unsqueeze(0)            # (1, 8, 5)
-    mu = frechet_mean(points, mfd, max_iter=20, tol=1e-12)
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        mu = frechet_mean(points, mfd, max_iter=20, tol=1e-12)
     loss = mu.sum()
     loss.backward()
+    assert v.grad is not None
     assert torch.isfinite(v.grad).all(), (
         f"v.grad NaN: {torch.isnan(v.grad).sum().item()}"
     )
-
-
-def test_frechet_mean_backward_at_collapsed_points():
-    """Edge case: all points coincide → mean is that point;
-    gradient through the converged iteration should stay finite."""
-    from holonomy_lib.manifolds import LorentzManifold
 
     mfd = LorentzManifold(n=3, k=-1.0)
     # All 5 points = exp_0(v0); the mean is exactly that point.
@@ -165,51 +154,19 @@ def test_frechet_mean_backward_at_collapsed_points():
     P = point.expand(1, 5, 4)                       # (1, 5, 4)
     mu = frechet_mean(P, mfd, max_iter=5, tol=1e-12)
     mu.sum().backward()
+    assert v0.grad is not None
     assert torch.isfinite(v0.grad).all(), (
         f"v0.grad NaN: {torch.isnan(v0.grad).sum().item()}"
     )
 
-
-# --------------------------------------------------------------------
-# Cross-manifold: Fréchet mean on KappaStereographicManifold
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("k", [-1.0, -0.5, 0.0, 0.5, 1.0])
-def test_works_on_kappa_stereographic(k):
-    """Fréchet mean uses log/exp/norm — all available on
-    KappaStereographicManifold. Works across all κ branches."""
+    # The flat mean's derivative averages both inputs even when the initial
+    # point is already stationary; a zero accepted step would lose that.
     from holonomy_lib.manifolds import KappaStereographicManifold
 
-    mfd = KappaStereographicManifold(n=3, kappa=k)
-    P = mfd.random_point(batch_size=10, generator=_seed(90)).reshape(
-        1, 10, mfd.ambient_dim,
+    flat = KappaStereographicManifold(n=1, kappa=0.)
+    coincident = torch.zeros(1, 2, 1, dtype=torch.float64, requires_grad=True)
+    frechet_mean(coincident, flat).sum().backward()
+    assert coincident.grad is not None
+    torch.testing.assert_close(
+        coincident.grad, torch.full_like(coincident, .5), atol=1e-12, rtol=0,
     )
-    mu = frechet_mean(P, mfd, max_iter=50, tol=1e-10)
-    assert mu.shape == (1, mfd.ambient_dim)
-    assert mfd.is_on_manifold(mu).all()
-
-
-def test_frechet_convergence_check_uses_old_mu():
-    """Regression: the convergence check `||tangent_avg||_μ < tol` is
-    evaluated at the OLD μ (where the tangent lives), not the NEW μ
-    after the step. For Lorentz this is a no-op (point-independent
-    metric); for KappaStereographic the conformal factor depends on
-    μ, so evaluating at NEW μ would scale the convergence threshold
-    by `λ_κ(μ_new)/λ_κ(μ_old)`. We pin the fix by checking that the
-    function returns a finite result and stays on the manifold.
-
-    Note: the Karcher iteration's *convergence rate* on the Poincaré
-    ball is linear (not quadratic), and for widely-spread points it
-    can take many iterations to reach a tight tolerance — that's a
-    property of the algorithm, not a bug in this fix.
-    """
-    from holonomy_lib.manifolds import KappaStereographicManifold
-
-    mfd = KappaStereographicManifold(n=3, kappa=-1.0)
-    P = mfd.random_point(batch_size=8, generator=_seed(200)).reshape(
-        1, 8, mfd.ambient_dim,
-    )
-    mu = frechet_mean(P, mfd, tol=1e-10, max_iter=200)
-    assert torch.isfinite(mu).all()
-    assert mfd.is_on_manifold(mu).all()

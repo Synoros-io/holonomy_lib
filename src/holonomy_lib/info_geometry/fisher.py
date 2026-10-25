@@ -47,7 +47,7 @@ References:
   Martens, J. (2020). New insights and perspectives on the natural
     gradient method. JMLR 21(146):1–76. Modern revisit.
   Petersen, K. B., Pedersen, M. S. (2012). The Matrix Cookbook,
-    §6 (Statistics) — Fisher information for the Gaussian family.
+    §6 (Statistics); Fisher information for the Gaussian family.
 """
 
 from __future__ import annotations
@@ -68,8 +68,9 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
 
     Args:
       p: (B, k) probability vectors on the open simplex. Entries must
-        be positive — boundary cases (p_i = 0) make the Fisher
-        information singular (geodesics blow up to infinite length).
+        be positive. Metric coefficients diverge as p_i approaches zero,
+        but the boundary is at finite Fisher distance. For example, the
+        Bernoulli distance from p=1/2 to p=0 is pi/2.
         We clamp entries from below by the numerical-floor convention
         `1e-9` to keep the computation finite; pass cleaner inputs if
         you need bit-stable results.
@@ -86,7 +87,7 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"p must have at least 1 dim; got p.shape={tuple(p.shape)}")
     # Library-wide numerical floor (`1e-9`) lives in the audit catalog
     # as `numerical_floor_convention`. We never let 1/p go to infinity
-    # silently — caller's job to either keep p in the interior, or to
+    # silently; caller's job to either keep p in the interior, or to
     # interpret the clamped output (a large but finite Fisher).
     p_safe = p.clamp(min=1e-9)
     inv_p = torch.reciprocal(p_safe)
@@ -126,12 +127,7 @@ def fisher_information_gaussian_mean(Sigma: torch.Tensor) -> torch.Tensor:
     # general LU inverse, and matches the convention used in
     # `kl_divergence_gaussian` for consistency.
     L = torch.linalg.cholesky(Sigma)
-    eye = torch.eye(
-        Sigma.shape[-1], dtype=Sigma.dtype, device=Sigma.device,
-    ).expand_as(Sigma)
-    L_inv = torch.linalg.solve_triangular(L, eye, upper=False)
-    # Σ^{−1} = L^{−T} L^{−1}.
-    return L_inv.mT @ L_inv
+    return torch.cholesky_inverse(L)
 
 
 def natural_gradient(
@@ -159,7 +155,7 @@ def natural_gradient(
 
     References:
       Amari (1998).
-      Martens (2020), §2 — modern derivation.
+      Martens (2020), §2; modern derivation.
     """
     if fisher_matrix.ndim < 2:
         raise ValueError(
@@ -176,6 +172,5 @@ def natural_gradient(
             f"fisher_matrix must be (..., d, d); got "
             f"fisher_matrix.shape={tuple(fisher_matrix.shape)}"
         )
-    return torch.linalg.solve(
-        fisher_matrix, grad.unsqueeze(dim=-1),
-    ).squeeze(dim=-1)
+    L = torch.linalg.cholesky(fisher_matrix)
+    return torch.cholesky_solve(grad.unsqueeze(dim=-1), L).squeeze(dim=-1)

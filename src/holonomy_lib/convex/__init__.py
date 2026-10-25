@@ -14,7 +14,7 @@ Currently implemented:
     `min ‖Ax − b‖² + λ‖x‖²` with solver dispatch (Cholesky normal
     equations / CG on the normal operator / LSQR with damping).
     Consumers: synoros-substrate's ridge sites (expectation_unit,
-    shape_prediction, arbitrary_pairs, hierarchy_potential — all
+    shape_prediction, arbitrary_pairs, hierarchy_potential; all
     hand-rolled variants of this one problem as of 2026-07).
 
 Planned (each gated on a consumer materializing):

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Manifold-aware inner product — cosine-analog on a Riemannian manifold.
+"""Manifold-aware inner product, cosine-analog on a Riemannian manifold.
 
 For points x, y on a Riemannian manifold M, the natural "inner
 product" is not the ambient dot product (which ignores the geometry)
@@ -23,7 +23,7 @@ agrees with the Euclidean inner of the spatial coordinates (the time
 coordinate of the tangent is 0 at the origin). For
 `KappaStereographicManifold` it carries the conformal factor
 `λ_κ(o)² = 4`, so `manifold_aware_inner(x, x) = d(o, x)²` on both
-manifolds — a model-invariant similarity.
+manifolds, a model-invariant similarity.
 
 References:
   Pennec, X. (2006). Intrinsic statistics on Riemannian manifolds.
@@ -34,18 +34,20 @@ References:
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 
 def manifold_aware_inner(
     x: torch.Tensor,
     y: torch.Tensor,
-    manifold,
+    manifold: Any,
 ) -> torch.Tensor:
     """Riemannian inner product `⟨log_o(x), log_o(y)⟩_o` at the
     manifold origin.
 
-    Manifold-agnostic — works on any manifold exposing `log(x, y)`,
+    Manifold-agnostic, works on any manifold exposing `log(x, y)`,
     `inner(x, u, v)`, and `origin(batch_size)`. The result is the
     metric-consistent "similarity at origin" and satisfies
     `manifold_aware_inner(x, x) = d_M(o, x)²` on all manifolds.
@@ -66,10 +68,10 @@ def manifold_aware_inner(
       torch.Size([4])
 
     References:
-      Pennec (2006), §3 — tangent-space statistics on Riemannian manifolds.
+      Pennec (2006), §3, tangent-space statistics on Riemannian manifolds.
     """
     B = x.shape[0]
-    origin = manifold.origin(batch_size=B)
+    origin = manifold.origin(batch_size=B).to(device=x.device, dtype=x.dtype)
     log_x = manifold.log(origin, x)       # ambient tangent at o
     log_y = manifold.log(origin, y)
     return manifold.inner(origin, log_x, log_y)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""holonomy_lib.lie — Lie group primitives for SO(3) and the 2-sphere.
+"""holonomy_lib.lie : Lie group primitives for SO(3) and the 2-sphere.
 
 The Lie group `SO(3)` is the group of orientation-preserving
 rotations of R³; its Lie algebra `so(3)` is the 3-dim space of
@@ -11,15 +11,15 @@ plus real spherical harmonics, which are the natural basis for any
 SO(3)-equivariant function on the unit sphere.
 
 Currently exposed:
-  so3.axis_angle_to_matrix(axis, angle)  — Rodrigues formula.
-  so3.matrix_to_axis_angle(R)            — inverse log map.
-  so3.so3_exp(omega)                     — matrix exp on so(3).
-  so3.so3_log(R)                         — matrix log on SO(3).
-  so3.random_so3(batch_size, generator)  — Haar-uniform via
+  so3.axis_angle_to_matrix(axis, angle)  : Rodrigues formula.
+  so3.matrix_to_axis_angle(R)            : inverse log map.
+  so3.so3_exp(omega)                     : matrix exp on so(3).
+  so3.so3_log(R)                         : matrix log on SO(3).
+  so3.random_so3(batch_size, generator)  : Haar-uniform via
                                             quaternion sampling.
-  so3.compose(R1, R2)                    — group product (matmul).
+  so3.compose(R1, R2)                    : group product (matmul).
   real_spherical_harmonics(directions, l_max)
-                                          — closed-form Y_lm for
+                                          : closed-form Y_lm for
                                             l ≤ 4 evaluated at
                                             (B, 3) unit direction
                                             vectors.

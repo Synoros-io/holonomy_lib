@@ -1,182 +1,191 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Fréchet (Karcher) mean on a Riemannian manifold.
+"""Fréchet means of vector-coordinate points on Riemannian manifolds.
 
-The Fréchet mean of a finite set of points `{p_1, …, p_N}` on a
-manifold `M` with weights `w_i ≥ 0` is the point that minimizes the
-weighted sum of squared geodesic distances:
-
-    μ*  =  argmin_{μ ∈ M}  Σ_i w_i · d_M(μ, p_i)².
-
-On a Hadamard manifold (simply connected, non-positive sectional
-curvature — includes hyperbolic spaces of any negative curvature),
-the objective is geodesically convex and the minimizer is unique.
-Karcher (1977) showed that the gradient descent
-
-    μ_{t+1}  =  exp_{μ_t}( Σ_i w_i · log_{μ_t}(p_i) / Σ_i w_i )
-
-converges to `μ*` at a linear rate. The Riemannian gradient of
-`d_M(μ, p)²` w.r.t. `μ` is `−2 · log_μ(p)`, so the inner sum is
-exactly the gradient step direction (up to a factor of `2/Σ w_i`,
-absorbed in the implicit step size `1`).
+The objective is the weighted sum of squared geodesic distances. On a
+Hadamard manifold it has a unique minimizer, but that fact alone does not
+make unit Karcher steps converge. This implementation controls each batch's
+step with backtracking on the objective.
 
 References:
-  Karcher, H. (1977). Riemannian center of mass and mollifier
-    smoothing. Comm. Pure Appl. Math. 30(5):509–541.
-  Afsari, B. (2011). Riemannian Lᵖ center of mass: existence,
-    uniqueness, and convexity. Proc. AMS 139(2):655–673.
-  Pennec, X. (2006). Intrinsic statistics on Riemannian manifolds.
-    J. Math. Imaging Vision 25(1):127–154, §4 (intrinsic mean).
+  Karcher, H. (1977). Riemannian center of mass and mollifier smoothing.
+    Comm. Pure Appl. Math. 30(5):509–541.
+  Afsari, B., Tron, R., Vidal, R. (2013). On the convergence of gradient
+    descent for finding the Riemannian center of mass. SIAM J. Control
+    Optim. 51(3):2230–2260.
 """
 
 from __future__ import annotations
 
+import math
+import warnings
+from typing import Any
+
 import torch
+
+# Retain the existing work budget; convergence is checked rather than assumed.
+FRECHET_MAX_ITER_DEFAULT = 100
+# Match the host-check cadence in CONVENTIONS §4.1.
+FRECHET_SYNC_EVERY_DEFAULT = 8
+# A bounded line search tries unit steps through 2**-15. If these fail,
+# the batch stays put and the final residual warning reports the failure.
+FRECHET_MAX_BACKTRACKS_DEFAULT = 16
 
 
 def frechet_mean(
     points: torch.Tensor,
-    manifold,
+    manifold: Any,
     weights: torch.Tensor | None = None,
-    max_iter: int = 100,
+    max_iter: int = FRECHET_MAX_ITER_DEFAULT,
     tol: float = 1e-9,
+    *,
+    sync_every: int = FRECHET_SYNC_EVERY_DEFAULT,
+    max_backtracks: int = FRECHET_MAX_BACKTRACKS_DEFAULT,
 ) -> torch.Tensor:
-    """Karcher-iteration Fréchet mean of `points` on `manifold`.
+    """Compute a Fréchet mean with backtracking Karcher descent.
 
     Args:
-      points: `(B, N, ambient_dim)` — `N` points per batch on the
-        manifold. For `LorentzManifold(n)`, `ambient_dim = n + 1`.
-      manifold: object exposing `.log(x, y)`, `.exp(x, v)`,
-        `.norm(x, v)` (e.g. `LorentzManifold`, `SPDManifold`).
-      weights: optional `(B, N)` non-negative weights. If `None`,
-        uniform weights `1/N` are used. Weights are normalized to sum
-        to 1 along the `N` axis before use.
-      max_iter: hard cap on Karcher iterations. Default 100 — a
-        comfortable upper bound for the linear convergence rate on
-        Hadamard manifolds; typical inputs reach `tol` in 5–30 steps.
-      tol: stop when the Riemannian norm of the update tangent is
-        below this floor across all batches. Default 1e-9 (the
-        library's `numerical_floor_convention`).
+      points: `(B, N, ambient_dim)` vector-coordinate points. Matrix-valued
+        manifolds such as SPD are not supported by this shape contract.
+      manifold: object exposing `log`, `exp`, `norm`, and `distance` on
+        vector-coordinate batches, for example `LorentzManifold`.
+      weights: optional `(B, N)` finite non-negative weights, with positive
+        total in every batch. Normalized internally; omitted means uniform.
+      max_iter: maximum number of descent steps, default 100.
+      tol: requested residual norm of the weighted average logarithm.
+      sync_every: check all-batch convergence on the host every this many
+        iterations. At most `sync_every - 1` extra small updates occur
+        after all residuals first meet the tolerance.
+      max_backtracks: number of trial step sizes, starting at the last
+        accepted step and halving (initially one). A batch with no
+        acceptable trial stays at its current point.
 
     Returns:
-      `(B, ambient_dim)` Fréchet mean per batch.
-
-    Example:
-      >>> from holonomy_lib.manifolds import LorentzManifold
-      >>> mfd = LorentzManifold(n=3)
-      >>> P = mfd.random_point(batch_size=10).unsqueeze(0)  # (1, 10, 4)
-      >>> mu = frechet_mean(P, mfd)
-      >>> mu.shape
-      torch.Size([1, 4])
+      `(B, ambient_dim)` mean estimate. `B=0` returns an empty tensor.
+      Warns if its residual exceeds `tol` after the iteration budget.
 
     Notes:
-      Existence and uniqueness of the minimizer hold on Hadamard
-      manifolds (Karcher 1977; Afsari 2011); hyperbolic spaces of any
-      negative curvature are Hadamard, so this primitive is well-
-      defined on `LorentzManifold` for all `k < 0` and on
-      `KappaStereographicManifold(κ < 0)`.
+      Iterations and backtracking trials are sequential because each step
+      depends on the preceding objective value. Points and batch elements
+      are processed together by tensor operations. The line search is
+      evaluated without autograd; gradients follow the accepted updates
+      with the chosen discrete step sizes held fixed.
 
-      **Limitation on positive curvature.** For
-      `KappaStereographicManifold(κ > 0)` (spherical) the manifold is
-      NOT Hadamard — Karcher's convergence guarantee requires inputs
-      lie within the injectivity radius `π/√κ` from each other. For
-      well-spread spherical inputs the iteration may converge to a
-      local optimum or fail to converge. The implementation runs
-      unconditionally; the caller is responsible for checking the
-      input spread.
-
-      Per-batch convergence is checked against the **max** update norm
-      across the batch, not each batch element separately — so a slow-
-      converging element delays the loop for the whole batch. This is
-      the standard cost of vectorized iterative algorithms.
+      On positive-curvature manifolds, spread-out inputs may have several
+      local minima or cross a logarithm's cut locus. Backtracking does not
+      establish global optimality there. The caller must choose inputs in
+      a convex normal neighborhood to use local convergence guarantees.
 
     References:
-      Karcher (1977); Pennec (2006), §4.
+      Karcher (1977), Riemannian center of mass and mollifier smoothing.
+      Afsari, Tron, Vidal (2013), On the convergence of gradient descent
+        for finding the Riemannian center of mass, §§2–3.
+      Absil, Mahony, Sepulchre (2008), Optimization Algorithms on Matrix
+        Manifolds, §4.2, line-search methods.
     """
     if points.ndim != 3:
         raise ValueError(
             f"points must have shape (B, N, ambient_dim), got {tuple(points.shape)}"
         )
-    B, N, D = points.shape
-    if N == 0:
+    batch, count, dimension = points.shape
+    if count == 0:
         raise ValueError("Fréchet mean of an empty set is undefined")
-
-    # Resolve / normalize weights to sum to 1 along the N axis.
-    if weights is None:
-        w = torch.full((B, N), 1.0 / N,
-                       device=points.device, dtype=points.dtype)
-    else:
-        if weights.shape != (B, N):
-            raise ValueError(
-                f"weights must have shape (B={B}, N={N}), "
-                f"got {tuple(weights.shape)}"
-            )
-        # Normalize. The clamp guards a degenerate all-zero-weights row.
-        w_sum = weights.sum(dim=-1, keepdim=True).clamp(
-            min=torch.finfo(weights.dtype).tiny,
+    if weights is not None and weights.shape != (batch, count):
+        raise ValueError(
+            f"weights must have shape ({batch}, {count}), got {tuple(weights.shape)}"
         )
-        w = weights / w_sum
+    if max_iter < 0 or sync_every < 1 or max_backtracks < 1:
+        raise ValueError("max_iter must be >= 0; sync_every and max_backtracks >= 1")
+    if not torch.is_floating_point(points):
+        raise ValueError("points must have floating dtype")
+    if not math.isfinite(tol) or tol < 0:
+        raise ValueError("tol must be finite and non-negative")
+    if weights is None:
+        normalized_weights = points.new_full((batch, count), 1.0 / count)
+    else:
+        if not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("weights must be finite and non-negative")
+        weights = weights.to(device=points.device, dtype=points.dtype)
+        total = weights.sum(dim=-1, keepdim=True)
+        if not torch.isfinite(total).all() or (total <= 0).any():
+            raise ValueError(
+                "weights must be finite, non-negative, and have positive total"
+            )
+        normalized_weights = weights / total
 
-    # Initialize the mean as the weighted-first point — a generic
-    # heuristic that always lies on the manifold (it IS one of the
-    # input points). The Karcher iteration is locally-monotone on
-    # Hadamard manifolds, so the starting point only affects the
-    # iteration count, not the limit.
-    mu = points[:, 0].clone()  # (B, D)
+    mean = points[:, 0].clone()
+    if batch == 0:
+        return mean
+    flat_points = points.reshape(batch * count, dimension)
 
-    for _ in range(max_iter):
-        # Broadcast μ across the N points so we can call log batched.
-        mu_expanded = mu.unsqueeze(1).expand(B, N, D)
-        # Manifold.log expects (·, ambient_dim) leading-batch form; we
-        # flatten the (B, N) pair to a single batch axis, call, reshape.
-        log_p = manifold.log(
-            mu_expanded.reshape(B * N, D),
-            points.reshape(B * N, D),
-        ).reshape(B, N, D)
-        # Weighted tangent average — the Riemannian gradient step.
-        tangent_avg = (w.unsqueeze(-1) * log_p).sum(dim=1)  # (B, D)
-        # Convergence: Riemannian norm of the update tangent at the
-        # CURRENT base point. Must be computed BEFORE the `exp` step:
-        # `tangent_avg ∈ T_{μ_t}` is a tangent at the OLD μ, and for
-        # point-dependent metrics (e.g. KappaStereographicManifold's
-        # conformal factor) `‖tangent_avg‖_{μ_new}` differs from
-        # `‖tangent_avg‖_{μ_old}` by the metric ratio. Use the OLD μ.
-        update_norm = manifold.norm(mu, tangent_avg)         # (B,)
-        # Step.
-        mu = manifold.exp(mu, tangent_avg)
-        if update_norm.max().item() < tol:
+    def average_log(base: torch.Tensor) -> torch.Tensor:
+        expanded = base.unsqueeze(1).expand(batch, count, dimension)
+        logarithms = manifold.log(
+            expanded.reshape(batch * count, dimension), flat_points,
+        ).reshape(batch, count, dimension)
+        return (normalized_weights.unsqueeze(-1) * logarithms).sum(dim=1)
+
+    def objective(base: torch.Tensor) -> torch.Tensor:
+        expanded = base.unsqueeze(1).expand(batch, count, dimension)
+        distances = manifold.distance(
+            expanded.reshape(batch * count, dimension), flat_points,
+        ).reshape(batch, count)
+        return (normalized_weights * distances.square()).sum(dim=-1)
+
+    previous_step = points.new_ones(batch)
+    for iteration in range(max_iter):
+        tangent = average_log(mean)
+        # The tangent belongs to the old mean; its norm must use that base.
+        residual = manifold.norm(mean, tangent)
+        active = residual > tol
+        with torch.no_grad():
+            cost = objective(mean)
+            # Keeping the accepted step avoids restarting at a large step
+            # when objective differences are below floating-point resolution.
+            step = previous_step
+            # Keep the zero update's derivative at an exact stationary
+            # point: replacing its step by zero would route all gradients
+            # to the initial point when identical inputs already coincide.
+            accepted_step = torch.where(active, torch.zeros_like(step), step)
+            accepted = ~active
+            # The derivative of the normalized squared-distance objective
+            # along average_log is -2*residual**2. Armijo with coefficient
+            # one half therefore asks for a decrease of step*residual**2.
+            # Allow one relative eps of objective rounding near a minimum.
+            rounding = torch.finfo(points.dtype).eps * cost.abs()
+            for _ in range(max_backtracks):
+                trial = manifold.exp(mean, step.unsqueeze(-1) * tangent)
+                trial_cost = objective(trial)
+                decrease = step * residual.square()
+                # Near the minimizer, subtraction of two squared-distance
+                # objectives loses the decrease. The gradient residual still
+                # resolves it, so demand residual reduction in that regime.
+                trial_residual = manifold.norm(trial, average_log(trial))
+                improved = torch.where(
+                    decrease <= rounding,
+                    trial_residual < residual,
+                    trial_cost <= cost - decrease + rounding,
+                )
+                take = ~accepted & torch.isfinite(trial_cost) & improved
+                accepted_step = torch.where(take, step, accepted_step)
+                accepted = accepted | take
+                step = step * 0.5
+        previous_step = torch.where(active, accepted_step, previous_step)
+        mean = manifold.exp(mean, accepted_step.unsqueeze(-1) * tangent)
+        if (iteration + 1) % sync_every == 0 and not active.any().item():
             break
 
-    # Fail-loud: detect convergence to a point outside the manifold.
-    # On positively-curved branches (spherical κ > 0) the Karcher
-    # iteration can escape the domain mid-iteration and converge to a
-    # stationary point of the *ambient* objective rather than the
-    # intrinsic Fréchet mean — caught by
-    # `notes/validation/frechet_spherical_results.md`. Without this
-    # check, the function silently returns a point with kappa‖μ‖² ≥ 1.
-    # Manifolds that always pass `is_on_manifold` (Lorentz, Euclidean)
-    # are unaffected.
-    if hasattr(manifold, "is_on_manifold") and not torch.isfinite(mu).all():
-        raise RuntimeError(
-            "frechet_mean produced non-finite output. Likely cause: "
-            "the Karcher iteration overshot the domain (common on "
-            "positively-curved manifolds with input spread approaching "
-            "the injectivity radius). Try reducing the input spread or "
-            "warm-starting from a closer initial point."
+    if not torch.isfinite(mean).all():
+        raise RuntimeError("frechet_mean produced non-finite output")
+    if hasattr(manifold, "is_on_manifold") and not manifold.is_on_manifold(mean).all():
+        raise RuntimeError("frechet_mean produced a point outside the manifold")
+    with torch.no_grad():
+        final_residual = manifold.norm(mean, average_log(mean)).max().item()
+    if not math.isfinite(final_residual) or final_residual > tol:
+        warnings.warn(
+            f"frechet_mean did not converge: residual {final_residual:.6g} "
+            f"exceeds tol={tol:.6g} after at most {max_iter} iterations",
+            RuntimeWarning, stacklevel=2,
         )
-    if hasattr(manifold, "is_on_manifold"):
-        on_mfd = manifold.is_on_manifold(mu)
-        if not on_mfd.all():
-            raise RuntimeError(
-                f"frechet_mean converged to a point outside the manifold "
-                f"({(~on_mfd).sum().item()} of {on_mfd.numel()} batch "
-                f"elements). This happens on positively-curved branches "
-                f"(`KappaStereographicManifold(kappa > 0)`) when the "
-                f"input spread approaches the injectivity radius "
-                f"`pi/sqrt(kappa)`. Caller is responsible for keeping "
-                f"inputs well within the injectivity radius — see "
-                f"`notes/validation/frechet_spherical_results.md`."
-            )
-
-    return mu
+    return mean

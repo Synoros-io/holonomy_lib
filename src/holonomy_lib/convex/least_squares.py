@@ -13,11 +13,11 @@ Three solution paths, one interface:
 
   - `"cholesky"`: normal equations `(AᵀA + λI) x = Aᵀb` via Cholesky
     factorization + triangular solve (CONVENTIONS §3.3). Exact, one
-    factorization, the right default for dense problems — but it squares
+    factorization, the default for dense problems. It squares
     the condition number, so for ill-conditioned `A` with tiny `λ`
     prefer `"lsqr"`.
-  - `"cg"`: conjugate gradient on the normal OPERATOR `v ↦ Aᵀ(Av) + λv`
-    — `AᵀA` is never materialized. For very large dense problems where
+  - `"cg"`: conjugate gradient on the normal operator `v ↦ Aᵀ(Av) + λv`.
+    `AᵀA` is never materialized. For very large dense problems where
     the `(n, n)` Gram matrix itself is the memory bottleneck.
   - `"lsqr"`: `algebra.solvers.lsqr` with `damp = √λ` (the damped
     least-squares equivalence, Paige-Saunders 1982 §1). Works directly
@@ -78,7 +78,7 @@ def regularized_lstsq(
 
     Args:
       A: dense `(m, n)` / `(B, m, n)`, or sparse 2-D `(m, n)`
-        (COO/CSR/CSC — dispatched to `"lsqr"`/`"cg"`; `"cholesky"`
+        (COO/CSR/CSC; dispatched to `"lsqr"`/`"cg"`; `"cholesky"`
         rejects sparse input).
       b: `(B, m)` or `(m,)` observations.
       lam: ridge weight `λ ≥ 0`.
