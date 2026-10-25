@@ -35,6 +35,7 @@ Two forms are exposed:
       weights = 1 this collapses to `4 - deg(u) - deg(v)`.
 
   forman_ricci_augmented(A)
+      For binary adjacency only:
       κ_F^aug(u, v) = κ_F_simple(u, v) + 3 · #triangles_through(u, v)
       Adds the contribution from 2-faces (triangles incident to the
       edge), restoring the "augmented" form that more closely tracks
@@ -52,7 +53,7 @@ References:
   Samal, A., Sreejith, R. P., Gu, J., Liu, S., Saucan, E., Jost, J.
     (2018). Comparative analysis of two discretizations of Ricci
     curvature for complex networks. Scientific Reports 8:8650.
-    §"Augmented Forman curvature" gives the +3·#triangles term.
+    Equations 9–10 give the weighted and unit-weight specializations.
   Sandhu, R., Georgiou, T., Tannenbaum, A. (2015). Ricci curvature: An
     economic indicator for market fragility and systemic risk.
     Science Advances 2(5):e1501495. Application demonstrating Forman's
@@ -67,21 +68,14 @@ import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 
-# Forman's "node weights" — Samal et al. (2018), §2.1: the standard
-# choice for unweighted simple graphs is w_u = 1 for every node, so the
-# curvature reduces to a pure function of degrees. Weighted-node Forman
-# is an extension we don't expose here (caller can pre-scale the
-# adjacency to fold node weights into the edge weights if needed).
-# Cataloged as `forman_node_weight_default` (universal-1 identity, no
-# tuning needed).
+# Unit vertex weights in the graph specialization of Sreejith et al.
+# (2016), equation 1. Edge weights alone do not encode general vertex
+# weights, so the public functions fix every vertex weight to one.
 FORMAN_NODE_WEIGHT_DEFAULT: float = 1.0
 
-# Augmented-Forman contribution per incident 2-face (triangle).
-# Samal et al. (2018), §"Augmented Forman curvature" — each triangle
-# contributes `+1` per face times the standard cell-complex Forman
-# formula's prefactor. For graphs the constant works out to 3 because a
-# triangle's three edges each see one triangular 2-face. This is a
-# DERIVED structural identity, not a tuned constant.
+# Samal et al. (2018), equations 9–10: with unit vertex, edge, and face
+# weights, an incident triangular face contributes one face term and
+# removes two negative parallel-edge contributions, giving 1 + 2 = 3.
 FORMAN_TRIANGLE_CONTRIBUTION: float = 3.0
 
 
@@ -176,62 +170,44 @@ def forman_ricci_simple(A: torch.Tensor) -> torch.Tensor:
 
 
 def forman_ricci_augmented(A: torch.Tensor) -> torch.Tensor:
-    """Augmented Forman-Ricci curvature: simple Forman + 2-face term.
+    """Augmented Forman-Ricci curvature on an unweighted graph.
 
-    Adds the triangle (2-face) contribution from Samal et al. (2018):
+    With unit vertex, edge, and triangular-face weights, Samal et al.
+    (2018), equations 9–10, give
 
-      κ_F^aug(u, v) = κ_F_simple(u, v) + 3 · #triangles(u, v)
+      kappa_aug(u, v) = kappa_simple(u, v) + 3 * #triangles(u, v).
 
-    where #triangles(u, v) counts the common neighbors of u and v
-    (each common neighbor w forms a triangle u-v-w). The "+3" factor
-    arises because each triangular 2-face contributes one unit of
-    curvature to each of its three edges, and Forman's prefactor in
-    the cell-complex formula carries through as 1 here.
-
-    Augmented Forman tracks Ollivier-Ricci more closely than simple
-    Forman in graphs with dense substructures (Samal et al. 2018,
-    Fig. 3).
+    Each face contributes one positive term and removes two negative
+    parallel-edge terms. Weighted edges require a face-weight convention
+    and the full weighted expression, which this function does not expose.
 
     Args:
-      A: (B, n, n) symmetric weighted adjacency. Non-negative weights;
-        zero off-diagonal means no edge.
+      A: (B, n, n) symmetric real floating binary adjacency. Zero means
+        no edge and one means an edge. The diagonal is ignored.
 
     Returns:
-      κ_F^aug: (B, n, n) curvature tensor.
+      (B, n, n) curvature, zero on the diagonal and nonedges.
+
+    Raises:
+      ValueError: if any off-diagonal weight is neither zero nor one.
 
     References:
-      Samal et al. (2018), §"Augmented Forman curvature".
+      Samal, A., et al. (2018). Comparative analysis of two discretizations
+        of Ricci curvature for complex networks. Scientific Reports
+        8:8650, equations 9–10.
     """
     _validate_adjacency(A)
     A = drop_self_loops(A)
-
-    # Common-neighbor count, masked to actual edges.
-    # For unweighted graphs (A binary), (A @ A)[u, v] counts the number
-    # of length-2 paths u → w → v, which equals the number of common
-    # neighbors. For weighted graphs we follow the standard convention
-    # of using the edge presence (A > 0), not the weights themselves —
-    # the augmented form's 2-face contribution is combinatorial in
-    # nature. (A weighted 2-face theory exists but is not implemented.)
-    edge_mask = (A != 0).to(A.dtype)
-    # IMPORTANT: zero the diagonal of edge_mask BEFORE the matmul.
-    # Otherwise a self-loop at node i contributes spurious length-2
-    # walks `j → i → i → k` to the triangle count for every edge
-    # incident to i, double-counting the augmented term.
-    *batch, n, _ = A.shape
-    eye = torch.eye(n, device=A.device, dtype=A.dtype).expand_as(A)
-    edge_mask_no_diag = torch.where(
-        eye > 0, torch.zeros_like(edge_mask), edge_mask,
-    )
-    triangle_count = torch.matmul(edge_mask_no_diag, edge_mask_no_diag)
-    # Only count triangles on actual edges; mask out non-edges. We use
-    # `edge_mask_no_diag` here too — a self-loop "edge" shouldn't get
-    # an augmented Forman contribution.
-    triangle_count = triangle_count * edge_mask_no_diag
-
-    return (
-        forman_ricci_simple(A)
-        + FORMAN_TRIANGLE_CONTRIBUTION * triangle_count
-    )
+    if ((A != 0) & (A != 1)).any():
+        raise ValueError(
+            "forman_ricci_augmented requires binary (unweighted) adjacency; "
+            "weighted curvature needs an explicit face-weight convention "
+            "(Samal et al. 2018, equations 9–10)."
+        )
+    # With sorted-out self-loops, A @ A counts common neighbors. Mask
+    # nonedges because an unfilled pair has no edge curvature.
+    triangle_count = (A @ A) * A
+    return forman_ricci_simple(A) + FORMAN_TRIANGLE_CONTRIBUTION * triangle_count
 
 
 # ============================================================
@@ -244,10 +220,13 @@ def _validate_adjacency(A: torch.Tensor) -> None:
         raise ValueError(
             f"A must be (..., n, n); got A.shape={tuple(A.shape)}"
         )
-    if (A < 0).any():
+    if not A.is_floating_point():
+        raise ValueError("A must have a real floating dtype")
+    A = drop_self_loops(A)
+    if not torch.isfinite(A).all() or (A < 0).any():
         raise ValueError(
             "Forman-Ricci is defined for non-negative edge weights; "
-            "negative entries detected."
+            "nonfinite or negative entries detected."
         )
     # Symmetry check matches the convention in `ollivier_ricci_curvature`.
     if not torch.allclose(A, A.mT, atol=1e-9, rtol=0):

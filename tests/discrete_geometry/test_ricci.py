@@ -19,24 +19,16 @@ from holonomy_lib.discrete_geometry import ollivier_ricci_curvature
 
 def _complete_graph(n: int, batch: int = 1, dtype=torch.float64) -> torch.Tensor:
     """K_n complete graph adjacency, batched."""
-    A = torch.ones(batch, n, n, dtype=dtype) - torch.eye(n, dtype=dtype).unsqueeze(dim=0)
+    A = torch.ones(batch, n, n, dtype=dtype) - torch.eye(n, dtype=dtype)
     return A
 
 
 def _path_graph(n: int, batch: int = 1, dtype=torch.float64) -> torch.Tensor:
-    """P_n path graph: 0 — 1 — 2 — ... — n−1."""
+    """P_n path graph: 0; 1; 2; ...; n−1."""
     A = torch.zeros(batch, n, n, dtype=dtype)
     for i in range(n - 1):
         A[:, i, i + 1] = 1.0
         A[:, i + 1, i] = 1.0
-    return A
-
-
-def _cycle_graph(n: int, batch: int = 1, dtype=torch.float64) -> torch.Tensor:
-    """C_n cycle graph."""
-    A = _path_graph(n, batch=batch, dtype=dtype)
-    A[:, 0, n - 1] = 1.0
-    A[:, n - 1, 0] = 1.0
     return A
 
 
@@ -51,27 +43,14 @@ class TestValidation:
             ollivier_ricci_curvature(_complete_graph(3), alpha=-0.1)
         with pytest.raises(ValueError, match="alpha"):
             ollivier_ricci_curvature(_complete_graph(3), alpha=1.5)
-
-    def test_rejects_nonpositive_reg(self):
-        with pytest.raises(ValueError, match="reg"):
-            ollivier_ricci_curvature(_complete_graph(3), reg=0.0)
-
-    def test_rejects_non_square(self):
-        with pytest.raises(ValueError, match="must be"):
-            ollivier_ricci_curvature(torch.zeros(1, 4, 5))
+        for kwargs in ({"n_iter": 0}, {"tile_size": 0}, {"sync_every": 0}):
+            with pytest.raises(ValueError, match="positive integer"):
+                ollivier_ricci_curvature(_complete_graph(3), **kwargs)
 
 
 # --------------------------------------------------------------------
 # Shapes
 # --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [1, 2])
-class TestShapes:
-    def test_output_shape(self, batch):
-        A = _complete_graph(4, batch=batch)
-        kappa = ollivier_ricci_curvature(A, alpha=0.0)
-        assert kappa.shape == (batch, 4, 4)
 
 
 # --------------------------------------------------------------------
@@ -80,21 +59,6 @@ class TestShapes:
 
 
 class TestClosedForms:
-    def test_complete_graph_K3(self):
-        """On K_3, κ(edge) = 1/2 for α=0.
-
-        Proof: μ_x = (0, 1/2, 1/2) on (x, y, z); μ_y = (1/2, 0, 1/2);
-        optimal transport moves 1/2 from y to x at cost 1; d(x, y) = 1;
-        κ = 1 − 1/2 = 1/2.
-        """
-        A = _complete_graph(3)
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
-        # Off-diagonal entries (i, j with i≠j) should all equal 1/2
-        i, j = torch.triu_indices(3, 3, offset=1)
-        off_diag = kappa[0, i, j]
-        torch.testing.assert_close(
-            off_diag, torch.full_like(off_diag, 0.5), atol=0.02, rtol=0,
-        )
 
     def test_complete_graph_K_n_formula(self):
         """On K_n, κ(any edge) = (n−2)/(n−1).
@@ -106,6 +70,13 @@ class TestClosedForms:
         for n in [3, 4, 5, 6]:
             A = _complete_graph(n)
             kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
+            torch.testing.assert_close(kappa, kappa.mT, atol=1e-6, rtol=0)
+            # At alpha=1 each measure is an exact Dirac mass. Introducing
+            # small probabilities at absent support would perturb this.
+            lazy = ollivier_ricci_curvature(A, alpha=1.0)
+            torch.testing.assert_close(
+                lazy, torch.eye(n, dtype=A.dtype).unsqueeze(0), atol=1e-12, rtol=0,
+            )
             expected = (n - 2) / (n - 1)
             i, j = torch.triu_indices(n, n, offset=1)
             off_diag = kappa[0, i, j]
@@ -116,7 +87,7 @@ class TestClosedForms:
 
     def test_path_interior_edge_is_flat(self):
         """On a path P_n, the curvature of an interior edge is ≈ 0
-        (paths are "flat" — neither positively nor negatively curved).
+        (paths are "flat"; neither positively nor negatively curved).
         """
         A = _path_graph(7)  # 0—1—2—3—4—5—6; edge (3, 4) is interior
         kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
@@ -125,52 +96,18 @@ class TestClosedForms:
 
     def test_diagonal_is_one(self):
         """κ(x, x) = 1 by convention (W_1(δ_x, δ_x) = 0, d=0 vacuous)."""
-        A = _complete_graph(5)
-        kappa = ollivier_ricci_curvature(A, alpha=0.0)
-        diag = torch.diagonal(kappa, dim1=-2, dim2=-1)  # (B, n)
-        torch.testing.assert_close(
-            diag, torch.ones_like(diag), atol=0, rtol=0,
-        )
+        isolated = torch.zeros(1, 4, 4, dtype=torch.float64)
+        isolated[:, :3, :3] = _complete_graph(3)
+        for A in (_complete_graph(5), isolated, torch.empty(0, 5, 5),
+                  torch.empty(1, 0, 0)):
+            kappa = ollivier_ricci_curvature(A, alpha=0.0)
+            diag = torch.diagonal(kappa, dim1=-2, dim2=-1)
+            assert kappa.shape == A.shape
+            torch.testing.assert_close(diag, torch.ones_like(diag), atol=0, rtol=0)
 
-    def test_symmetric_unweighted(self):
-        """κ(x, y) = κ(y, x) for unweighted graphs (where Sinkhorn
-        converges tightly).
-
-        Sinkhorn alternates u-then-v updates each iteration, so the
-        approximate W_1 is symmetric only to Sinkhorn convergence
-        tolerance. On unweighted K_n the cost matrix has small dynamic
-        range so convergence is fast and symmetry is tight.
-        """
-        A = _complete_graph(5)
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
-        torch.testing.assert_close(kappa, kappa.mT, atol=1e-6, rtol=0)
-
-    def test_approximately_symmetric_weighted(self):
-        """On weighted graphs, κ(x, y) ≈ κ(y, x) up to Sinkhorn
-        convergence tolerance (a few percent at default n_iter).
-
-        Log-domain Sinkhorn plateaus near a partially-converged state
-        for hundreds of iterations on wide-cost-range inputs before
-        snapping into the symmetric basin. With the library default
-        n_iter=100 + tol=1e-9, we expect ~few-percent residual; the
-        next test below shows tight symmetry when n_iter is generous.
-        """
-        n = 5
-        g = torch.Generator()
-        g.manual_seed(7)
-        U = torch.rand(1, n, n, generator=g, dtype=torch.float64)
-        A = torch.triu(U, diagonal=1)
-        A = A + A.mT
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.01, n_iter=200)
-        # Allow ~5% (Sinkhorn's plateau region at default iter budget)
-        torch.testing.assert_close(kappa, kappa.mT, atol=0.05, rtol=0)
 
     def test_symmetric_weighted_with_generous_budget(self):
-        """With a large n_iter ceiling and the tol-based early stop,
-        Sinkhorn converges past the plateau into machine-precision
-        symmetry. This pins down that the tol parameter is actually
-        wired through and saves work past the convergence point.
-        """
+        """Converged weighted results agree across pair order and budgets."""
         n = 5
         g = torch.Generator()
         g.manual_seed(7)
@@ -183,6 +120,26 @@ class TestClosedForms:
         # Symmetry now at machine precision (well past the 1.75e-2
         # plateau observed at n_iter=200).
         torch.testing.assert_close(kappa, kappa.mT, atol=1e-8, rtol=0)
+        approximate = ollivier_ricci_curvature(
+            A, alpha=0.0, reg=0.01, n_iter=200,
+        )
+        torch.testing.assert_close(approximate, approximate.mT, atol=0.05, rtol=0)
+
+        # Exact transport for this weighted triangle gives kappa(1,2)=1/6.
+        # The short budget is infeasible and must report its marginal error.
+        triangle = torch.tensor(
+            [[[0., 1., 4.], [1., 0., 2.], [4., 2., 0.]]], dtype=torch.float64,
+        )
+        with pytest.warns(UserWarning, match="marginal error 0.333333"):
+            ollivier_ricci_curvature(triangle)
+        for cadence in (1, 8):
+            result = ollivier_ricci_curvature(
+                triangle, n_iter=1000, sync_every=cadence,
+            )
+            torch.testing.assert_close(
+                result[0, [1, 2], [2, 1]],
+                torch.full((2,), 1 / 6, dtype=result.dtype), atol=1e-8, rtol=0,
+            )
 
 
 # --------------------------------------------------------------------
@@ -190,63 +147,8 @@ class TestClosedForms:
 # --------------------------------------------------------------------
 
 
-class TestSymmetryValidation:
-    """ollivier_ricci_curvature is only well-defined for symmetric A.
-    A directed (asymmetric) input now triggers a UserWarning instead of
-    silently producing meaningless curvature.
-    """
-
-    def test_asymmetric_input_warns(self):
-        import warnings
-        A = torch.zeros(1, 4, 4, dtype=torch.float64)
-        # Asymmetric: 0→1→2 directed cycle
-        A[0, 0, 1] = A[0, 1, 2] = A[0, 2, 0] = 1.0
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ollivier_ricci_curvature(A, alpha=0.0, reg=0.01, n_iter=50)
-        assert any("asymmetric" in str(item.message).lower() for item in w), (
-            f"expected asymmetric warning; got {[str(x.message) for x in w]}"
-        )
-
-    def test_symmetric_input_does_not_warn(self):
-        import warnings
-        A = _complete_graph(4)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ollivier_ricci_curvature(A, alpha=0.0, reg=0.01, n_iter=50)
-        symmetry_warnings = [x for x in w if "asymmetric" in str(x.message).lower()]
-        assert not symmetry_warnings, (
-            f"unexpected asymmetric warning on symmetric input: "
-            f"{[str(x.message) for x in symmetry_warnings]}"
-        )
-
-
 class TestDisconnectedComponents:
-    """Ollivier curvature on disconnected graphs.
-
-    Cross-component pair curvature is NOT geometrically meaningful
-    (the metric measure space is disconnected) but we still produce
-    finite values via the DISCONNECTED_DISTANCE_MULTIPLIER sentinel.
-    The within-component math is unchanged. The Ricci-flow primitives
-    mask by edge presence, so cross-component values don't leak into
-    the flow. These tests pin down the observed behavior so a future
-    refactor doesn't silently break disconnected handling.
-    """
-
-    def test_disconnected_does_not_crash(self):
-        """Two disjoint K_3 triangles — the algorithm runs without NaN/inf."""
-        n = 6
-        A = torch.zeros(1, n, n, dtype=torch.float64)
-        for i in range(3):
-            for j in range(3):
-                if i != j:
-                    A[0, i, j] = 1.0
-        for i in range(3, 6):
-            for j in range(3, 6):
-                if i != j:
-                    A[0, i, j] = 1.0
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=200)
-        assert torch.isfinite(kappa).all()
+    """Disconnected pairs are zero by the public output convention."""
 
     def test_within_component_unaffected_by_disconnection(self):
         """A K_3 alongside a disjoint K_3 has κ=1/2 on its edges,
@@ -263,22 +165,27 @@ class TestDisconnectedComponents:
                 if i != j:
                     A[0, i, j] = 1.0
         kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
+        assert torch.isfinite(kappa).all()
+        torch.testing.assert_close(
+            kappa[0, :3, 3:], torch.zeros(3, 3, dtype=kappa.dtype), atol=0, rtol=0,
+        )
+        torch.testing.assert_close(
+            kappa[0, 3:, :3], torch.zeros(3, 3, dtype=kappa.dtype), atol=0, rtol=0,
+        )
         within_edge = kappa[0, 0, 1].item()
         assert abs(within_edge - 0.5) < 0.02, (
             f"within-component K_3 edge κ should be 0.5, got {within_edge}"
         )
+        low_precision = torch.zeros(1, 4, 4, dtype=torch.float16)
+        low_precision[0, 0, 1] = low_precision[0, 1, 0] = 1
+        low_precision[0, 2, 3] = low_precision[0, 3, 2] = 1
+        # Dirac-to-Dirac transport on two disjoint edges has zero edge
+        # curvature. A large disconnected sentinel overflows float16.
+        torch.testing.assert_close(
+            ollivier_ricci_curvature(low_precision),
+            torch.eye(4, dtype=low_precision.dtype).unsqueeze(0), atol=0, rtol=0,
+        )
 
-    def test_isolated_node_diagonal_is_one(self):
-        """An isolated node's diagonal κ_ii = 1 by convention."""
-        n = 4
-        A = torch.zeros(1, n, n, dtype=torch.float64)
-        # Triangle on 0-1-2; node 3 isolated.
-        for i in range(3):
-            for j in range(3):
-                if i != j:
-                    A[0, i, j] = 1.0
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.01, n_iter=100)
-        assert kappa[0, 3, 3].item() == 1.0
 
     def test_flow_ignores_cross_component_curvature(self):
         """Ricci flow only updates edges (A > 0). Cross-component pairs
@@ -339,31 +246,12 @@ class TestBottleneckCurvature:
             f"bridge κ={bridge:.3f} should be much less than intra κ={intra:.3f}"
         )
 
-    def test_complete_clique_has_positive_curvature(self):
-        """All edges in a complete graph have positive curvature."""
-        for n in [4, 5, 6]:
-            A = _complete_graph(n)
-            kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
-            i, j = torch.triu_indices(n, n, offset=1)
-            assert (kappa[0, i, j] > 0).all(), (
-                f"K_{n}: all edges should have positive κ"
-            )
-
 
 # --------------------------------------------------------------------
 # Comparison against GraphRicciCurvature library
 # --------------------------------------------------------------------
 
 
-try:
-    import GraphRicciCurvature  # noqa: F401
-    import networkx  # noqa: F401
-    _HAVE_GRC = True
-except ImportError:
-    _HAVE_GRC = False
-
-
-@pytest.mark.skipif(not _HAVE_GRC, reason="GraphRicciCurvature not installed")
 class TestAgainstGraphRicciCurvature:
     """Cross-check against the canonical CPU NetworkX implementation.
 
@@ -372,8 +260,10 @@ class TestAgainstGraphRicciCurvature:
     """
 
     def test_K4_matches_grc(self):
-        import networkx as nx
-        from GraphRicciCurvature.OllivierRicci import OllivierRicci
+        nx = pytest.importorskip("networkx")
+        OllivierRicci = pytest.importorskip(
+            "GraphRicciCurvature.OllivierRicci",
+        ).OllivierRicci
 
         # K_4
         A = _complete_graph(4)

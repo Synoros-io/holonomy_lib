@@ -9,7 +9,7 @@ learned gating per node" pattern, used as the comparison baseline for
 strengthening study.
 
 This is **NOT a faithful reimplementation of GraphMoRE** (Guo et al.,
-AAAI 2025, arXiv:2412.11085) — that paper has architectural choices
+AAAI 2025, arXiv:2412.11085); that paper has architectural choices
 around mixture-of-experts attention, Riemannian routing, etc., that
 are out of scope here. What we extract is the **interpretable
 mechanism** we want to compare against: a discrete bank of K
@@ -31,7 +31,7 @@ Why this mechanism is the right comparison:
 
   - **Mass per κ is a probability**: a node "is in expert k" with
     weight `w_i[k]`. Compared to our continuous κ, this is a
-    coarse-grained representation — the model can only assign a
+    coarse-grained representation; the model can only assign a
     probability over K fixed κ's, not a real number.
   - **Hard gating** (`argmax` instead of softmax) makes the
     assignment fully discrete; the K-many expert distance is just
@@ -146,7 +146,7 @@ class DiscreteGatingKappa(nn.Module):
         return (w_pair * d_expert).sum(dim=-1)
 
     def recovered_kappa(self) -> torch.Tensor:
-        """Per-node expectation `E_k[κ_k] = Σ_k w_i[k] · κ_k` — the
+        """Per-node expectation `E_k[κ_k] = Σ_k w_i[k] · κ_k`; the
         "soft" recovered curvature for each node. Used to compare
         recovery against the true per-node κ in the ablation."""
         soft = torch.softmax(self.gates, dim=-1)             # (N, K)
@@ -156,6 +156,6 @@ class DiscreteGatingKappa(nn.Module):
         return (soft * bank).sum(dim=-1)                     # (N,)
 
     def hard_assignment(self) -> torch.Tensor:
-        """Per-node argmax expert index — the "this node lives in
+        """Per-node argmax expert index; the "this node lives in
         expert k" interpretation. Shape `(N,)`."""
         return self.gates.argmax(dim=-1)

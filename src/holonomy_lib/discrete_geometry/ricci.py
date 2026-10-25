@@ -1,58 +1,32 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Ollivier-Ricci curvature on graphs, GPU-batched, Sinkhorn-based.
+"""Batched Ollivier-Ricci curvature and discrete Ricci flow on graphs.
 
-The Ollivier (2009) discrete Ricci curvature on a metric measure space
-is defined for any two points x, y as
+The metric is shortest-path distance with adjacency weights interpreted as
+edge lengths. Those same weights determine the neighbor probabilities of
+mu_x = (1-alpha) A[x, :] / sum(A[x, :]) + alpha delta_x. Curvature is
+kappa(x, y) = 1 - W_1(mu_x, mu_y) / d(x, y).
 
-    κ(x, y)  =  1  −  W_1( μ_x , μ_y ) / d(x, y)
+Log-domain Sinkhorn approximates the transport problem with entropic
+regularization. A small regularization does not guarantee convergence:
+callers control the iteration budget and marginal tolerance, and receive
+a warning when the returned transport plan fails that tolerance.
 
-where d is the metric, μ_x and μ_y are probability measures attached
-to x and y (typically lazy-random-walk distributions), and W_1 is the
-Wasserstein-1 distance between them. For graphs we follow the standard
-choices:
-
-    d   = shortest-path distance (hop count for unweighted graphs;
-          weight-respecting for weighted graphs assuming edge weights
-          are interpreted as lengths)
-    μ_x = (1−α) · u_x  +  α · δ_x
-          where u_x is the (weight-normalized) distribution over x's
-          neighbors and δ_x is the unit mass at x.
-
-The parameter α ∈ [0, 1] is the "laziness" parameter. α = 0 gives the
-original Ollivier (2009) curvature; α = 1 makes the walk completely
-lazy (returns trivial 0 curvature); the limit α → 1 with appropriate
-rescaling gives the Liu-Lin-Yau (2011) curvature, which is the most
-common convention in network analysis.
-
-The W_1 computation uses entropic Sinkhorn (Cuturi 2013) with cost
-matrix equal to the shortest-path distance, which is well-suited for
-GPU batching since each iteration is a pair of matrix-vector products.
-Entropic regularization introduces a small bias; we expose `reg` so
-callers can trade accuracy for stability.
-
-Why this approximates Perelman's Ricci flow on networks:
-
-  Perelman (2003) studied ∂g/∂t = −2 Ric(g) on Riemannian 3-manifolds.
-  In the discrete setting, Sia-Jonckheere-Bogdan (2019) and Ni et al.
-  (2019) show that iterating w_ij(t+1) = (1 − δt · κ_ij(t)) · w_ij(t)
-  on edge weights with κ = Ollivier-Ricci leads to a network analog of
-  Ricci flow, with negatively-curved edges getting elongated (analog
-  of forming neckpinches) until "surgery" — edge removal — separates
-  the graph into geometric pieces (the network analog of Thurston's
-  geometric decomposition). This module provides the κ primitive; the
-  flow and surgery operations are planned follow-ons.
+Flow updates edge lengths by w <- (1 - dt*kappa) w. The surgery variant
+removes edges above a fixed multiple of their initial mean weight.
+Floyd-Warshall, Sinkhorn, and flow steps are sequential recurrences;
+the arithmetic within each step is batched on PyTorch.
 
 References:
   Ollivier, Y. (2009). Ricci curvature of Markov chains on metric
     spaces. Journal of Functional Analysis 256(3):810–864.
-  Liu, F., Lin, Y., Yau, S.-T. (2011). Ricci curvature of graphs.
-    Tohoku Math. Journal 63(4):605–627.  [Often cited as "Lin-Lu-Yau"
-    after the related Lu coauthor on the broader programme.]
+  Lin, Y., Lu, L., Yau, S.-T. (2011). Ricci curvature of graphs.
+    Tohoku Mathematical Journal 63(4):605–627. The rescaled alpha -> 1
+    limit is the Lin-Lu-Yau curvature, not computed by this module.
   Cuturi, M. (2013). Sinkhorn distances: lightspeed computation of
     optimal transport. Advances in Neural Information Processing
-    Systems 26 (NIPS 2013):2292–2300.
+    Systems 26:2292–2300.
   Sia, J., Jonckheere, E., Bogdan, P. (2019). Ollivier-Ricci
     curvature-based method to community detection in complex networks.
     Scientific Reports 9:9800.
@@ -62,38 +36,29 @@ References:
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 
-# Default regularization for entropic Sinkhorn, per Cuturi (2013) §4.
-# A regularization of 0.01 is a common middle-ground: small enough that
-# the entropic bias on W_1 is < 1% for typical edge-distance scales,
-# large enough that the Sinkhorn iteration converges in O(100) steps
-# without numerical underflow. Catalog name: `sinkhorn_reg_default`.
-# Scale-of-validity: shortest-path costs in [1, ~diameter]; if the
-# graph has a much wider distance scale, scale `reg` proportionally.
+# Existing regularization default in edge-length units. Its accuracy depends on
+# the graph's length scale; Cuturi (2013) defines the regularized problem,
+# not a universal error bound or an iteration guarantee for this value.
 SINKHORN_REG_DEFAULT: float = 0.01
 
-# Default Sinkhorn iteration count, per Cuturi (2013) §4 — 100 iterations
-# achieves convergence (relative change < 1e-4) for graph-metric costs
-# at the default regularization. Catalog: `sinkhorn_n_iter_default`.
+# Existing runtime budget, not a convergence guarantee. Hard transport
+# problems may need a larger value or a larger regularization.
 SINKHORN_N_ITER_DEFAULT: int = 100
 
-# Default convergence tolerance for Sinkhorn early stopping: stop when
-# the max-abs change of the dual variable log_u between successive
-# iterations falls below this value. Reuses the library's
-# `numerical_floor_convention` (1e-9) — small enough that the
-# transport plan is symmetric to well below typical use cases' noise
-# floor, large enough that we don't chase machine-precision residuals.
-# When `tol` is not exceeded after `n_iter` iterations, iteration
-# stops at `n_iter`; we do not warn (caller chose n_iter).
+# Absolute probability error for both transport marginals. This retains
+# the library's numerical-floor default, but float32 roundoff may exceed
+# it; callers can choose a tolerance appropriate to their input dtype.
 SINKHORN_TOL_DEFAULT: float = 1e-9
 
 # Sync cadence for Sinkhorn convergence checks. The `.item()` call
-# on the delta tensor forces a host sync on GPU; doing it every iter
+# on the marginal-error tensor forces a host sync on GPU; doing it every iter
 # adds tens of µs per iter to wait for the kernel queue. Checking
 # every 8 iters keeps the asymptotic work the same (within 8 iters
 # of true convergence) while cutting host sync count by 8×.
@@ -108,16 +73,10 @@ SINKHORN_SYNC_EVERY_DEFAULT: int = 8
 # Tiling caps the pairs processed simultaneously at this value, trading
 # a small Python-loop overhead for an n²/tile_size reduction in peak
 # memory. **Scale of validity**: 256 keeps the inner `n·n` broadcast
-# under ~16 MB for n up to ~256 in float64, comfortable on most GPUs.
+# at 128 MiB for n=256 in float64, per batch member and temporary tensor.
 # Bump higher when memory headroom is generous and lower when n is
 # big. Cataloged as `sinkhorn_tile_default`.
 SINKHORN_TILE_DEFAULT: int = 256
-
-# Convention: distance from a node to itself is 0; "no path" is +inf.
-# We represent +inf with a large finite value derived from the matrix
-# to avoid NaN propagation through Sinkhorn while still strongly
-# disincentivizing transport across disconnected components.
-DISCONNECTED_DISTANCE_MULTIPLIER: float = 1000.0
 
 # Default surgery period for `ricci_flow_with_surgery` — perform surgery
 # every N Ricci-flow steps. Ni-Lin-Luo-Gao (2019) §3.2 use values in
@@ -140,106 +99,53 @@ def ollivier_ricci_curvature(
     n_iter: int = SINKHORN_N_ITER_DEFAULT,
     tol: float = SINKHORN_TOL_DEFAULT,
     tile_size: int = SINKHORN_TILE_DEFAULT,
+    sync_every: int = SINKHORN_SYNC_EVERY_DEFAULT,
 ) -> torch.Tensor:
-    """Pairwise Ollivier-Ricci curvature on a (batched) weighted graph.
+    """Pairwise Ollivier-Ricci curvature on a batched weighted graph.
 
     Args:
-      A: (B, n, n) symmetric weighted adjacency. Non-negative entries
-        interpreted as edge weights (larger = stronger connection,
-        shorter as a length in the shortest-path metric). Zero off-
-        diagonal means no edge.
-      alpha: laziness in [0, 1]. 0 is Ollivier's original convention;
-        0.5 is a common "half lazy" choice in network analysis.
-      reg: entropic-Sinkhorn regularization ε > 0. See module docstring.
-      n_iter: maximum Sinkhorn iteration count.
-      tol: Sinkhorn convergence tolerance — iteration stops early once
-        the max-abs change in log_u across all pairs is below `tol`.
-        With log-domain Sinkhorn at small `reg`, partial convergence
-        can plateau for hundreds of iterations and only flip into the
-        symmetric basin past some threshold; tol-based stopping lets
-        easy cases finish fast while still allowing hard cases to run
-        the full `n_iter` budget.
-      tile_size: chunk the n² pairs into tiles of this size before
-        running Sinkhorn. The peak memory cost of one Sinkhorn iter
-        is O(B · tile_size · n²) bytes; the wall-clock cost is
-        roughly constant in `tile_size` once the GPU is saturated.
-        Default 256 keeps the inner broadcast under ~16 MB at n=256
-        in float64. Smaller tiles → less memory + slightly more
-        Python overhead; larger tiles → more memory + slightly less
-        loop overhead.
+      A: (B, n, n) real floating, symmetric non-negative adjacency.
+        Positive entries are edge lengths, used directly in shortest
+        paths and also as weights in the neighbor walk probabilities.
+        Zero off-diagonal entries mean no edge; self-loops are ignored.
+      alpha: laziness in [0, 1].
+      reg: positive entropic regularization, in the units of edge length.
+      n_iter: positive maximum Sinkhorn iteration count.
+      tol: positive absolute tolerance for both transport marginals.
+        This checks feasibility, not the entropic approximation bias.
+      tile_size: positive number of node pairs per Sinkhorn tile.
+      sync_every: positive interval between marginal checks that sync
+        with the host. The final iteration is always checked.
 
     Returns:
-      κ: (B, n, n) curvature tensor. κ[..., i, j] is the curvature
-        between nodes i and j using the shortest-path metric. The
-        diagonal κ[..., i, i] = 1 by convention (W_1(δ, δ) = 0 and
-        d(x, x) = 0 — we set the diagonal to 1 to avoid 0/0).
-        Pairs from different connected components have undefined
-        geometric meaning; we return 0 there to keep the tensor finite.
+      (B, n, n) curvature tensor, with diagonal 1 by convention and
+      cross-component entries 0. Cross-component curvature is undefined;
+      zero is an output convention, not a transport result.
 
-    Shape note:
-      The result is dense across all pairs, not just edges. To get
-      edge-only curvatures, mask: `κ * (A > 0)`. Computing all pairs
-      costs O(B · n³ · n_iter) for the Sinkhorn step plus O(B · n³)
-      for shortest paths; for large n use a sparse/edge-only follow-on
-      (planned).
-
-    Disconnected components:
-      Ollivier curvature has no standard definition between nodes in
-      different components. We replace the +inf shortest-path distance
-      with a large finite sentinel (DISCONNECTED_DISTANCE_MULTIPLIER ×
-      max finite distance) so Sinkhorn stays numerically stable; the
-      resulting κ for cross-component pairs is close to 1 (since the
-      transport cost is dominated by the within-component support and
-      thus small relative to the inflated d_G). These cross-component
-      values are NOT geometrically meaningful — mask by `A > 0` (or by
-      a connectivity mask) before interpreting κ. The Ricci-flow
-      primitives in this module already do this internally, so the
-      flow is unaffected; only direct consumers of the dense κ tensor
-      need to filter.
+    Notes:
+      A warning reports the achieved marginal error if the iteration
+      budget is exhausted without meeting tol. The returned approximation
+      can then be infeasible. Exact zeros in the walk support stay zero.
+      All-pairs Sinkhorn costs O(B*n**4*n_iter), with
+      O(B*tile_size*n**2) temporary storage. A 256-by-256-by-256
+      float64 tensor alone occupies 128 MiB. Floyd-Warshall costs
+      O(B*n**3). Both algorithms have sequential recurrence steps.
 
     References:
       Ollivier (2009), Definition 1.
-      Cuturi (2013), Algorithm 1 — Sinkhorn iteration.
+      Cuturi (2013), Algorithm 1, for entropic Sinkhorn transport.
     """
-    if not (0.0 <= alpha <= 1.0):
-        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
-    if reg <= 0:
-        raise ValueError(f"reg must be > 0, got {reg}")
-    if tol <= 0:
-        raise ValueError(f"tol must be > 0, got {tol}")
-    if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
-        raise ValueError(
-            f"A must be (..., n, n) symmetric; got A.shape={tuple(A.shape)}"
-        )
-    # Ollivier curvature is defined for symmetric (undirected) graphs.
-    # The Floyd-Warshall step happily returns directed shortest paths
-    # if A is asymmetric; the resulting κ would be silently meaningless.
-    # We warn rather than raise so callers can intentionally feed a
-    # symmetrized form of an asymmetric matrix without first cloning
-    # (`0.5*(A+A.mT)` is one common preprocess); the warning serves as
-    # documentation that we noticed the asymmetry.
-    # 1e-9 is the library's numerical_floor_convention (audit ALLOWED).
-    # Roundoff on any reasonable symmetric construction is far below
-    # 1e-9 even in float32, so this only fires when A is meaningfully
-    # asymmetric (e.g. a directed graph passed by mistake).
-    if not torch.allclose(A, A.mT, atol=1e-9, rtol=0):
-        warnings.warn(
-            "ollivier_ricci_curvature received an asymmetric adjacency; "
-            "the curvature is only well-defined for symmetric (undirected) "
-            "graphs. Symmetrize A first (e.g. `0.5 * (A + A.mT)`) for "
-            "meaningful results.",
-            stacklevel=2,
-        )
-    # Library convention (`CONVENTIONS.md`): graph primitives treat
-    # `A` as a simple graph. Self-loops would change the row sums in
-    # `_lazy_walk_distributions` and propagate through Sinkhorn.
-    A = drop_self_loops(A)
+    A = _validate_curvature_inputs(
+        A, alpha, reg, n_iter, tol, tile_size, sync_every,
+    )
+    if A.numel() == 0:
+        return A.clone()
 
     *batch, n, _ = A.shape
 
     # 1. Shortest-path distances d_G(i, j). Floyd-Warshall on the
     # weighted graph, batched. Treat A[i,j]=0 (off-diagonal) as no edge.
-    d_G = _shortest_path_distances(A)  # (B, n, n)
+    d_G, reachable = _shortest_path_distances(A)  # (B, n, n)
 
     # 2. Lazy-random-walk distributions μ_x for each node x.
     #    μ_x(y) = (1−α) · (A[x,y] / Σ_z A[x,z])   for y in N(x)
@@ -250,16 +156,17 @@ def ollivier_ricci_curvature(
     #    All pairs of rows of `mu` — the cost matrix is d_G.
     W1 = _batched_sinkhorn_w1(
         mu, d_G, reg=reg, n_iter=n_iter, tol=tol, tile_size=tile_size,
+        sync_every=sync_every, reachable=reachable,
     )  # (B, n, n)
 
     # 4. Curvature κ(x, y) = 1 - W_1 / d_G.
     # Diagonal: d_G is 0 there; set κ to 1 by convention (vacuous).
-    safe_dG = torch.where(d_G > 1e-9, d_G, torch.full_like(d_G, 1e-9))
+    safe_dG = torch.where(d_G > 0, d_G, torch.ones_like(d_G))
     kappa = 1.0 - W1 / safe_dG
     # Diagonal entries: 1 by convention.
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand(*batch, n, n)
     kappa = torch.where(eye > 0, torch.ones_like(kappa), kappa)
-    return kappa
+    return torch.where(reachable, kappa, torch.zeros_like(kappa))
 
 
 # ============================================================
@@ -277,6 +184,7 @@ def discrete_ricci_flow(
     n_sinkhorn_iters: int = SINKHORN_N_ITER_DEFAULT,
     sinkhorn_tol: float = SINKHORN_TOL_DEFAULT,
     sinkhorn_tile_size: int = SINKHORN_TILE_DEFAULT,
+    sinkhorn_sync_every: int = SINKHORN_SYNC_EVERY_DEFAULT,
 ) -> torch.Tensor:
     """Discrete Ricci flow on edge weights (Sia 2019, Ni 2019).
 
@@ -289,7 +197,8 @@ def discrete_ricci_flow(
     edges with positive curvature (κ > 0) get shortened. Over many
     steps this is the discrete analog of Perelman's smooth Ricci flow
     on networks: bottleneck edges between communities elongate while
-    intra-community edges contract.
+    intra-community edges contract. Steps are sequential because each
+    curvature computation uses the preceding step's edge lengths.
 
     Args:
       A: (B, n, n) symmetric weighted adjacency. Non-negative weights.
@@ -299,8 +208,9 @@ def discrete_ricci_flow(
       normalize: if True, rescale edge weights after each step so the
         Frobenius norm of A stays constant. Prevents global scaling
         from running away, isolating the *structural* effect of the flow.
-      reg, n_sinkhorn_iters: Sinkhorn parameters for curvature
-        computation.
+      reg, n_sinkhorn_iters, sinkhorn_tol, sinkhorn_tile_size,
+        sinkhorn_sync_every: forwarded to the curvature computation.
+        The sync cadence controls how often marginal checks reach the host.
 
     Returns:
       (B, n, n) adjacency after `n_steps` of flow.
@@ -313,12 +223,10 @@ def discrete_ricci_flow(
         detection on networks with Ricci flow. Scientific Reports
         9:9984.
     """
-    if n_steps < 0:
-        raise ValueError(f"n_steps must be >= 0, got {n_steps}")
-    if dt <= 0:
-        raise ValueError(f"dt must be > 0, got {dt}")
-
-    W = A.clone()
+    W = _validate_flow_inputs(
+        A, n_steps, dt, alpha, reg, n_sinkhorn_iters, sinkhorn_tol,
+        sinkhorn_tile_size, sinkhorn_sync_every,
+    )
     if normalize:
         initial_norm = torch.linalg.matrix_norm(W, dim=(-2, -1), keepdim=True)
         initial_norm = initial_norm.clamp(min=1e-9)
@@ -328,10 +236,11 @@ def discrete_ricci_flow(
         kappa = ollivier_ricci_curvature(
             W, alpha=alpha, reg=reg, n_iter=n_sinkhorn_iters,
             tol=sinkhorn_tol, tile_size=sinkhorn_tile_size,
+            sync_every=sinkhorn_sync_every,
         )
         # Update: w *= (1 - dt * kappa). Mask to existing edges only;
         # non-edges (W == 0) stay zero — surgery is separate.
-        edge_mask = (W > 1e-9).to(W.dtype)
+        edge_mask = (W > 0).to(W.dtype)
         update = (1.0 - dt * kappa) * edge_mask
         W = W * update + W * (1.0 - edge_mask)  # leave non-edges alone
         # Clamp negative weights to zero (edge would have flipped sign)
@@ -358,25 +267,15 @@ def ricci_flow_with_surgery(
     n_sinkhorn_iters: int = SINKHORN_N_ITER_DEFAULT,
     sinkhorn_tol: float = SINKHORN_TOL_DEFAULT,
     sinkhorn_tile_size: int = SINKHORN_TILE_DEFAULT,
+    sinkhorn_sync_every: int = SINKHORN_SYNC_EVERY_DEFAULT,
 ) -> torch.Tensor:
-    """Discrete Ricci flow with surgery — Perelman-on-networks.
+    """Discrete Ricci flow with threshold-based edge surgery.
 
-    Alternates Ricci-flow steps (edges evolve by their curvature) with
-    surgery passes (heavily-stretched edges are removed). The standard
-    use case is community detection: after enough flow steps with
-    surgery, the bottleneck edges between communities are gone and the
-    graph splits into geometric pieces — the discrete analog of
-    Thurston's geometrization that Perelman (2003) proved smoothly
-    for 3-manifolds.
-
-    Algorithm (Ni-Lin-Luo-Gao 2019, §3.2):
-      Repeat `n_steps` times:
-        1. Take one Ricci-flow step: w ← (1 − dt · κ) · w.
-        2. Renormalize if requested.
-        3. Every `surgery_period` steps, surgery: set w_ij = 0 for any
-           edge whose current weight exceeds `surgery_threshold` ×
-           initial mean edge weight. These are the "necks" forming
-           around forming singularities.
+    Each step updates w <- (1 - dt*kappa) w, clamps negative weights to
+    zero, and optionally restores the initial Frobenius norm. Every
+    surgery_period steps, edges above surgery_threshold times the initial
+    mean edge weight are removed. The reference mean excludes self-loops.
+    Steps are sequential because curvature depends on the current graph.
 
     Args:
       A: (B, n, n) symmetric weighted adjacency.
@@ -387,11 +286,8 @@ def ricci_flow_with_surgery(
         `normalize=True`, the cutoff uses the **pre-normalization**
         initial mean as a fixed reference; the per-step normalization
         rescales the weights but the threshold does not move with it.
-        This matches Ni-Lin-Luo-Gao (2019)'s intent of "remove edges
-        that have stretched far past their initial relative scale," but
-        the practical sensitivity of the surgery is then conditioned on
-        the interaction between `dt`, `normalize`, and the curvature
-        magnitudes — tune `surgery_threshold` empirically per dataset.
+        Its effect therefore depends on `dt`, `normalize`, and the
+        curvature magnitudes; choose the threshold for the input scale.
       Other args: as in `discrete_ricci_flow`.
 
     Returns:
@@ -399,27 +295,27 @@ def ricci_flow_with_surgery(
       indicate detected communities.
 
     References:
-      Perelman, G. (2002, 2003). The entropy formula for the Ricci flow
-        and its geometric applications; Ricci flow with surgery on
-        three-manifolds; Finite extinction time. arXiv:math/0211159,
-        math/0303109, math/0307245. (Smooth original.)
-      Sia-Jonckheere-Bogdan (2019), Ni-Lin-Luo-Gao (2019). (Discrete
-        analog for network community detection.)
-      Liu, F., Wang, X., Yau, S.-T., Zeng, W. (2017). A realization of
-        Thurston's geometrization: discrete Ricci flow with surgery.
-        arXiv:1709.08494. (Discrete on 3D simplicial complexes — closest
-        in spirit to Perelman.)
+      Sia, J., Jonckheere, E., Bogdan, P. (2019). Ollivier-Ricci
+        curvature-based method to community detection in complex networks.
+        Scientific Reports 9:9800.
+      Ni, C.-C., Lin, Y.-Y., Luo, F., Gao, J. (2019). Community detection
+        on networks with Ricci flow. Scientific Reports 9:9984, §3.2.
     """
-    if surgery_period <= 0:
-        raise ValueError(f"surgery_period must be > 0, got {surgery_period}")
-    if surgery_threshold <= 0:
+    W = _validate_flow_inputs(
+        A, n_steps, dt, alpha, reg, n_sinkhorn_iters, sinkhorn_tol,
+        sinkhorn_tile_size, sinkhorn_sync_every,
+    )
+    if not isinstance(surgery_period, int) or surgery_period <= 0:
         raise ValueError(
-            f"surgery_threshold must be > 0, got {surgery_threshold}"
+            f"surgery_period must be a positive integer, got {surgery_period}"
+        )
+    if not math.isfinite(surgery_threshold) or surgery_threshold <= 0:
+        raise ValueError(
+            f"surgery_threshold must be finite and > 0, got {surgery_threshold}"
         )
 
-    W = A.clone()
     # Initial mean edge weight — the scale against which we threshold.
-    edge_mask_init = (W > 1e-9).to(W.dtype)
+    edge_mask_init = (W > 0).to(W.dtype)
     n_edges = edge_mask_init.sum(dim=(-2, -1), keepdim=True).clamp(min=1.0)
     initial_mean = (W * edge_mask_init).sum(
         dim=(-2, -1), keepdim=True,
@@ -436,8 +332,9 @@ def ricci_flow_with_surgery(
         kappa = ollivier_ricci_curvature(
             W, alpha=alpha, reg=reg, n_iter=n_sinkhorn_iters,
             tol=sinkhorn_tol, tile_size=sinkhorn_tile_size,
+            sync_every=sinkhorn_sync_every,
         )
-        edge_mask = (W > 1e-9).to(W.dtype)
+        edge_mask = (W > 0).to(W.dtype)
         update = (1.0 - dt * kappa) * edge_mask
         W = W * update + W * (1.0 - edge_mask)
         W = W.clamp(min=0)
@@ -464,24 +361,78 @@ def ricci_flow_with_surgery(
 # ============================================================
 
 
-def _shortest_path_distances(A: torch.Tensor) -> torch.Tensor:
-    """Batched Floyd-Warshall on a weighted adjacency.
+def _validate_curvature_inputs(
+    A: torch.Tensor,
+    alpha: float,
+    reg: float,
+    n_iter: int,
+    tol: float,
+    tile_size: int,
+    sync_every: int,
+) -> torch.Tensor:
+    """Validate shared inputs and return adjacency with its loops removed."""
+    if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
+        raise ValueError(f"A must be (..., n, n); got A.shape={tuple(A.shape)}")
+    if not A.is_floating_point():
+        raise ValueError("A must have a real floating dtype")
+    A = drop_self_loops(A)
+    if not torch.isfinite(A).all() or (A < 0).any():
+        raise ValueError("A must have finite non-negative edge lengths")
+    if not 0 <= alpha <= 1:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+    for name, value in (("reg", reg), ("tol", tol)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and > 0, got {value}")
+    for name, count in (
+        ("n_iter", n_iter), ("tile_size", tile_size), ("sync_every", sync_every),
+    ):
+        if not isinstance(count, int) or count <= 0:
+            raise ValueError(f"{name} must be a positive integer, got {count}")
+    if not torch.allclose(A, A.mT, atol=1e-9, rtol=0):
+        warnings.warn(
+            "ollivier_ricci_curvature received an asymmetric adjacency; "
+            "curvature is only defined here for undirected graphs. "
+            "Symmetrize A first for meaningful results.",
+            stacklevel=2,
+        )
+    return A
 
-    Treats A[i,j] = 0 (off-diagonal, i ≠ j) as "no direct edge" — distance
-    infinity. Diagonal is forced to 0. Symmetric (we don't enforce, but
-    if A is non-symmetric this returns the directed shortest path).
 
-    For disconnected pairs we return a large finite value rather than
-    +inf, so downstream Sinkhorn computations don't underflow exp(−d/ε).
+def _validate_flow_inputs(
+    A: torch.Tensor,
+    n_steps: int,
+    dt: float,
+    alpha: float,
+    reg: float,
+    n_iter: int,
+    tol: float,
+    tile_size: int,
+    sync_every: int,
+) -> torch.Tensor:
+    """Share flow validation, including zero-step calls."""
+    A = _validate_curvature_inputs(A, alpha, reg, n_iter, tol, tile_size, sync_every)
+    if not isinstance(n_steps, int) or n_steps < 0:
+        raise ValueError(f"n_steps must be a non-negative integer, got {n_steps}")
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError(f"dt must be finite and > 0, got {dt}")
+    return A
+
+
+def _shortest_path_distances(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return Floyd-Warshall distances and the original reachability mask.
+
+    The vertex recurrence is sequential, with all batches and endpoint
+    pairs handled by tensor operations. Unreachable distances receive a
+    zero placeholder for transport arithmetic; callers retain the mask.
+    Exact-zero probability support excludes those costs in all transport
+    problems within an undirected component.
     """
     *batch, n, _ = A.shape
     # Build initial distance matrix: A[i,j] where i≠j and A[i,j]>0, else inf.
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand(*batch, n, n)
     off_diag = (eye == 0)
     no_edge = off_diag & (A == 0)
-    # Use a finite "infinity" for numerical stability; will be relaxed
-    # to a large multiple of the diameter at the end if any pair is
-    # still unreachable.
+    # Infinity distinguishes missing paths while the recurrence runs.
     inf_sentinel = torch.full_like(A, float("inf"))
     D = torch.where(no_edge, inf_sentinel, A.clone())
     # Force diagonal to 0
@@ -494,17 +445,12 @@ def _shortest_path_distances(A: torch.Tensor) -> torch.Tensor:
         via_k = D[..., :, k : k + 1] + D[..., k : k + 1, :]
         D = torch.minimum(D, via_k)
 
-    # Replace any remaining +inf with a large finite value derived from
-    # the existing finite distances, to keep Sinkhorn numerics sane.
-    # Always run the replacement (no `.all()` host sync on the happy
-    # path) — `torch.where` is a near-noop when no infs are present,
-    # and the explicit branch would force a GPU→CPU sync every call.
+    # Cross-component outputs are masked by the public function. For
+    # every within-component solve, exact zero marginal support already
+    # excludes these costs. A zero placeholder avoids sentinel/reg
+    # overflow in low-precision dtypes without changing those solves.
     finite_mask = torch.isfinite(D)
-    D_finite = torch.where(finite_mask, D, torch.zeros_like(D))
-    per_batch_max = D_finite.flatten(start_dim=-2).max(dim=-1).values  # (..., )
-    big = (per_batch_max * DISCONNECTED_DISTANCE_MULTIPLIER).clamp(min=1.0)
-    big_full = big.view(*per_batch_max.shape, 1, 1).expand_as(D)
-    return torch.where(finite_mask, D, big_full)
+    return torch.where(finite_mask, D, torch.zeros_like(D)), finite_mask
 
 
 def _lazy_walk_distributions(A: torch.Tensor, alpha: float) -> torch.Tensor:
@@ -544,95 +490,79 @@ def _batched_sinkhorn_w1(
     n_iter: int,
     tol: float,
     tile_size: int,
+    sync_every: int,
+    reachable: torch.Tensor,
 ) -> torch.Tensor:
-    """W_1(μ_i, μ_j) for every pair (i, j) of rows of `mu`, Sinkhorn-based.
+    """Return tiled entropic transport costs, checking both marginals.
 
-    Args:
-      mu:   (..., n, n) — row i is the source distribution μ_i.
-      cost: (..., n, n) — pairwise cost matrix (used for all pairs).
-      reg:  entropic regularization ε > 0.
-      n_iter: maximum Sinkhorn iteration count.
-      tol: stop early when max|Δ log_u| across all pairs is < tol.
-      tile_size: max pairs processed simultaneously inside the loop.
-
-    Returns:
-      (..., n, n) — entry [i, j] is the Sinkhorn-approximated
-      W_1(μ_i, μ_j) using the given cost.
-
-    Algorithm (vectorized across all source/target pairs):
-      Stack pairs as a batch of n² OT problems with a shared cost.
-      Iterate Sinkhorn updates in log-domain for stability.
-
-    Notes:
-      Log-domain Sinkhorn (Cuturi 2013 §4 + Schmitzer 2019) avoids
-      underflow when reg is small. We use it unconditionally for
-      robustness; the cost is one extra logsumexp per iteration.
+    Each pair is an independent transport problem. Sinkhorn iterations
+    are sequential scaling recurrences, but each update covers every
+    batch member and pair in the current tile. Convergence checks ignore
+    unreachable pairs and diagonal pairs, whose output is set directly
+    by the public curvature convention.
     """
-    # Shapes:
-    #   *batch, n, n — for both mu and cost
     *batch, n, _ = mu.shape
     n_pairs = n * n
-
-    # Cost is shared across all pairs. The log-kernel `-cost / reg` is
-    # also shared; compute once. cost_b has the (..., 1, n, n) shape so
-    # broadcasts cleanly against (..., tile, n, ·) duals.
-    cost_b = cost.unsqueeze(dim=-3)            # (*batch, 1, n, n)
-    log_K = -cost_b / reg                       # (*batch, 1, n, n)
-    # Library numerical_floor_convention (1e-9 = `ALLOWED_LITERALS`).
-    log_mu = torch.log(mu.clamp(min=1e-9))      # (*batch, n, n)
-
-    # Output buffer for all pair W_1 values.
+    cost_b = cost[..., None, :, :]
+    log_kernel = -cost_b / reg
+    support = mu > 0
+    # The safe argument also keeps log's backward finite at absent
+    # support. The -inf mask gives those entries exactly zero mass.
+    safe_mu = torch.where(support, mu, torch.ones_like(mu))
+    log_mu = torch.where(support, safe_mu.log(), -torch.inf)
     sink_w1 = torch.empty(*batch, n_pairs, dtype=mu.dtype, device=mu.device)
-
-    # Tile over pairs to keep the inner broadcast tensor bounded.
-    # Pair p ∈ [0, n²) decomposes as p = i·n + j where i is the source
-    # row index and j the target row index in `mu`. We compute the
-    # (i, j) indices via the arange→divmod trick so we never have to
-    # materialize a full (n², n) source or target tensor — each tile
-    # gathers only its own slice.
     pair_idx = torch.arange(n_pairs, device=mu.device)
-    src_idx_all = pair_idx // n   # (n_pairs,)
-    tgt_idx_all = pair_idx % n    # (n_pairs,)
+    src_idx_all = pair_idx // n
+    tgt_idx_all = pair_idx % n
+    worst_error = 0.0
 
-    chunk = max(1, int(tile_size))
-    for start in range(0, n_pairs, chunk):
-        end = min(start + chunk, n_pairs)
-        src_idx = src_idx_all[start:end]       # (tile,)
-        tgt_idx = tgt_idx_all[start:end]       # (tile,)
-        # Gather per-tile sources and targets via advanced indexing.
-        # Result shapes: (*batch, tile, n).
+    for start in range(0, n_pairs, tile_size):
+        end = min(start + tile_size, n_pairs)
+        src_idx = src_idx_all[start:end]
+        tgt_idx = tgt_idx_all[start:end]
+        src = mu[..., src_idx, :]
+        tgt = mu[..., tgt_idx, :]
         log_src = log_mu[..., src_idx, :]
         log_tgt = log_mu[..., tgt_idx, :]
-
+        checked_pairs = reachable[..., src_idx, tgt_idx] & (src_idx != tgt_idx)
         log_u = torch.zeros_like(log_src)
         log_v = torch.zeros_like(log_tgt)
-        sync_cadence = SINKHORN_SYNC_EVERY_DEFAULT
-        prev_log_u = log_u
+        marginal_error = float("inf")
         for it in range(n_iter):
-            # Sum over target support — `dim=-1`. log_K broadcasts from
-            # (*batch, 1, n, n) to (*batch, tile, n, n).
             log_u = log_src - torch.logsumexp(
-                log_K + log_v.unsqueeze(dim=-2), dim=-1,
+                log_kernel + log_v.unsqueeze(dim=-2), dim=-1,
             )
-            # Sum over source support — `dim=-2`.
             log_v = log_tgt - torch.logsumexp(
-                log_K + log_u.unsqueeze(dim=-1), dim=-2,
+                log_kernel + log_u.unsqueeze(dim=-1), dim=-2,
             )
-            # Early stop. The `.item()` host sync amortizes when checked
-            # every `sync_cadence` iters: typically a 8× reduction in
-            # GPU→CPU syncs versus per-iter checking, at the cost of
-            # at most `sync_cadence - 1` extra iters past true
-            # convergence. Bracket the check by `it >= sync_cadence` so
-            # the loop never exits on iter 0 (warmup).
-            if (it + 1) % sync_cadence == 0:
-                delta = (log_u - prev_log_u).abs().max().item()
-                if delta < tol:
+            if (it + 1) % sync_every == 0 or it + 1 == n_iter:
+                # A small dual update alone can conceal an infeasible
+                # plan. Check its row and column sums against the two
+                # probability distributions before declaring convergence.
+                row_mass = torch.exp(log_u + torch.logsumexp(
+                    log_kernel + log_v.unsqueeze(dim=-2), dim=-1,
+                ))
+                col_mass = torch.exp(log_v + torch.logsumexp(
+                    log_kernel + log_u.unsqueeze(dim=-1), dim=-2,
+                ))
+                row_error = (row_mass - src).abs().amax(dim=-1)
+                col_error = (col_mass - tgt).abs().amax(dim=-1)
+                error = torch.maximum(row_error, col_error)
+                error = torch.where(checked_pairs, error, torch.zeros_like(error))
+                # Nonfinite arithmetic must never be reported as convergence.
+                error = torch.where(torch.isfinite(error), error, torch.inf)
+                marginal_error = error.amax().item()
+                if marginal_error <= tol:
                     break
-                prev_log_u = log_u
+        worst_error = max(worst_error, marginal_error)
+        log_pi = log_u.unsqueeze(dim=-1) + log_kernel + log_v.unsqueeze(dim=-2)
+        sink_w1[..., start:end] = (log_pi.exp() * cost_b).sum(dim=(-2, -1))
 
-        # Transport plan + transport cost for this tile.
-        log_pi = log_u.unsqueeze(dim=-1) + log_K + log_v.unsqueeze(dim=-2)
-        pi = torch.exp(log_pi)
-        sink_w1[..., start:end] = (pi * cost_b).sum(dim=(-2, -1))
-
+    if worst_error > tol:
+        warnings.warn(
+            f"Sinkhorn did not converge after {n_iter} iterations: achieved "
+            f"maximum marginal error {worst_error:.6g} exceeds tol={tol:.6g}. "
+            "Increase n_iter or reg, or choose an appropriate tolerance.",
+            stacklevel=2,
+        )
     return sink_w1.reshape(*batch, n, n)

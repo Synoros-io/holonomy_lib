@@ -12,17 +12,16 @@ The sheaf Laplacian is `L_F = δ^T δ`, which is symmetric PSD by
 construction. Its kernel is the space of **global sections**: tuples
 of node-stalk values that all incident edges agree on under the
 restriction maps. For the trivial sheaf this kernel is the constant
-vectors (one per connected component) — exactly the kernel of the
-combinatorial Laplacian.
+vectors in each stalk channel on each connected component, as for
+the scalar graph Laplacian.
 
-Implementation: builds `δ` densely in v1. For a graph with `n_e`
-edges, node-stalk dim `d_v`, edge-stalk dim `d_e`, this is a `(n_e
-· d_e) × (n_v · d_v)` matrix — fine up to thousands of nodes; a
-sparse path is a natural extension for large graphs.
+Dense and sparse COO assembly are available through `sheaf_coboundary`
+and `sheaf_coboundary_sparse`; the Laplacian has matching dense and sparse
+entry points. `sheaf_bottom_spectrum` solves for its lowest eigenmodes.
 
 References:
-  Hansen-Ghrist (2019), §3-4 — sheaf Laplacian + spectral theory.
-  Bodnar et al. (2022), eq. 6 — the cellular-sheaf Laplacian as a
+  Hansen-Ghrist (2019), §3-4; sheaf Laplacian + spectral theory.
+  Bodnar et al. (2022), eq. 6; the cellular-sheaf Laplacian as a
     block matrix.
 """
 
@@ -53,6 +52,10 @@ SHEAF_DENSE_BYTES_CAP: int = 2 * 2**30
 # `SHEAF_KERNEL_HEADROOM` in `notes/magic_numbers.md`.
 SHEAF_KERNEL_HEADROOM: int = 16
 
+# LOBPCG expands the Ritz block with residual and previous-direction blocks
+# (Knyazev 2001). torch.lobpcg requires room for all three blocks.
+_LOBPCG_SUBSPACE_BLOCKS: int = 1 + 2
+
 
 def _coboundary_coo(
     sheaf: GraphSheaf | HeterogeneousGraphSheaf,
@@ -74,8 +77,7 @@ def _coboundary_coo(
     at construction) separates the two column blocks.
     """
     device, dtype = sheaf.device, sheaf.dtype
-    hetero = isinstance(sheaf, HeterogeneousGraphSheaf)
-    if hetero:
+    if isinstance(sheaf, HeterogeneousGraphSheaf):
         dv = sheaf.node_stalk_dims.to(device=device, dtype=torch.long)
         de = sheaf.edge_stalk_dims.to(device=device, dtype=torch.long)
     else:
@@ -87,7 +89,10 @@ def _coboundary_coo(
             (sheaf.n_edges,), sheaf.edge_stalk_dim,
             device=device, dtype=torch.long,
         )
-    shape = (int(de.sum()), int(dv.sum()))
+    if isinstance(sheaf, HeterogeneousGraphSheaf):
+        shape = (sum(t.shape[0] for t in sheaf.F_left), sheaf.total_node_dim)
+    else:
+        shape = (sheaf.n_edges * sheaf.edge_stalk_dim, sheaf.total_node_dim)
 
     n_e = sheaf.n_edges
     if n_e == 0:
@@ -97,7 +102,7 @@ def _coboundary_coo(
             shape,
         )
 
-    if hetero:
+    if isinstance(sheaf, HeterogeneousGraphSheaf):
         left_vals = torch.cat([t.reshape(-1) for t in sheaf.F_left])
         right_vals = torch.cat([t.reshape(-1) for t in sheaf.F_right])
     else:
@@ -108,7 +113,7 @@ def _coboundary_coo(
     eoff = torch.cumsum(de, dim=0) - de              # exclusive row offsets
     voff = torch.cumsum(dv, dim=0) - dv              # exclusive col offsets
 
-    def _side(node_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _side(node_idx: torch.Tensor, size: int) -> tuple[torch.Tensor, torch.Tensor]:
         # Block e is (d_e[e], d_v[node]) laid out row-major in the flattened
         # values; recover (row-in-block, col-in-block) from the flat position.
         w = dv[node_idx]                             # (n_e,) block widths
@@ -117,14 +122,14 @@ def _coboundary_coo(
         eid = torch.repeat_interleave(
             torch.arange(n_e, device=device), m,
         )                                            # (nnz_side,)
-        p = torch.arange(int(m.sum()), device=device) - starts[eid]
+        p = torch.arange(size, device=device) - starts[eid]
         w_el = w[eid]
         rows = eoff[eid] + p // w_el
         cols = voff[node_idx][eid] + p % w_el
         return rows, cols
 
-    rows_l, cols_l = _side(edges[:, 0])
-    rows_r, cols_r = _side(edges[:, 1])
+    rows_l, cols_l = _side(edges[:, 0], left_vals.numel())
+    rows_r, cols_r = _side(edges[:, 1], right_vals.numel())
     indices = torch.stack(
         (torch.cat((rows_l, rows_r)), torch.cat((cols_l, cols_r))),
     )
@@ -138,12 +143,12 @@ def _heterogeneous_coboundary(sheaf: HeterogeneousGraphSheaf) -> torch.Tensor:
     Built from the vectorized COO triplets of `_coboundary_coo`: block
     positions are pairwise disjoint (no self-loops, no duplicate edges,
     enforced at construction), so a single advanced-indexing assignment
-    places every entry exactly once — same semantics as a per-edge slice
+    places every entry exactly once; same semantics as a per-edge slice
     write, without the Python loop over edges.
     """
     device, dtype = sheaf.device, sheaf.dtype
-    total_v = int(sheaf.node_stalk_dims.sum())
-    total_e = int(sheaf.edge_stalk_dims.sum())
+    total_v = sheaf.total_node_dim
+    total_e = sum(t.shape[0] for t in sheaf.F_left)
 
     bytes_per_elem = torch.empty((), dtype=dtype).element_size()
     dense_bytes = 2 * total_e * total_v * bytes_per_elem
@@ -152,7 +157,7 @@ def _heterogeneous_coboundary(sheaf: HeterogeneousGraphSheaf) -> torch.Tensor:
             f"sheaf_coboundary would allocate {dense_bytes:,} bytes for the dense "
             f"δ tensor (Σd_e={total_e}, Σd_v={total_v}); the v1 dense path is "
             f"capped at {SHEAF_DENSE_BYTES_CAP:,} bytes. Restrict to smaller "
-            f"sheaves or contribute a sparse implementation."
+            f"sheaves or use sheaf_coboundary_sparse."
         )
 
     delta = torch.zeros(total_e, total_v, device=device, dtype=dtype)
@@ -173,7 +178,7 @@ def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tenso
     `−F_right[e]` at columns `v·d_v : (v+1)·d_v`.
 
     Args:
-      sheaf: a `GraphSheaf`.
+      sheaf: a `GraphSheaf` or `HeterogeneousGraphSheaf`.
 
     Returns:
       `(n_e · d_e, n_v · d_v)` coboundary on the sheaf's device/dtype.
@@ -202,15 +207,12 @@ def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tenso
             f"sheaf_coboundary would allocate {dense_bytes:,} bytes "
             f"for the dense δ tensor (n_e={n_e}, d_e={d_e}, n_v={n_v}, "
             f"d_v={d_v}); the v1 dense path is capped at "
-            f"{SHEAF_DENSE_BYTES_CAP:,} bytes. A sparse path is on the "
-            f"v0.2 roadmap; for now, restrict to smaller sheaves or "
-            f"contribute a sparse implementation."
+            f"{SHEAF_DENSE_BYTES_CAP:,} bytes. Use "
+            f"sheaf_coboundary_sparse for larger sheaves."
         )
 
-    delta = torch.zeros(n_e * d_e, n_v * d_v, device=device, dtype=dtype)
-
     if n_e == 0:
-        return delta
+        return torch.zeros(0, n_v * d_v, device=device, dtype=dtype)
 
     # Vectorized assembly: build a (n_e, d_e, n_v * d_v) staging tensor
     # then reshape to (n_e * d_e, n_v * d_v). Allocating one big
@@ -250,11 +252,11 @@ def sheaf_laplacian(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor
     For the *trivial* sheaf (every restriction map is identity,
     uniform stalk dim `d`):
       d = 1   → L_F equals the combinatorial graph Laplacian.
-      d > 1   → L_F is the block-diagonal `d × L` (each channel is a
-                copy of the scalar Laplacian, no cross-channel mixing).
+      d > 1   → L_F = L ⊗ I_d in node-major order, permutation-similar
+                to a block diagonal matrix of d scalar Laplacians.
 
     Args:
-      sheaf: a `GraphSheaf`.
+      sheaf: a `GraphSheaf` or `HeterogeneousGraphSheaf`.
 
     Returns:
       `(n_v · d_v, n_v · d_v)` symmetric PSD Laplacian.
@@ -333,13 +335,13 @@ def _node_offsets(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor:
     node `i`'s block of the stacked node-stalk vector is
     `[offsets[i], offsets[i+1])`."""
     if isinstance(sheaf, HeterogeneousGraphSheaf):
-        dims = sheaf.node_stalk_dims.to(dtype=torch.long)
+        dims = sheaf.node_stalk_dims.to(device=sheaf.device, dtype=torch.long)
         return torch.cat(
             (torch.zeros(1, dtype=torch.long, device=dims.device),
              torch.cumsum(dims, dim=0)),
         )
     return torch.arange(
-        sheaf.n_nodes + 1, dtype=torch.long,
+        sheaf.n_nodes + 1, dtype=torch.long, device=sheaf.device,
     ) * sheaf.node_stalk_dim
 
 
@@ -355,17 +357,20 @@ def sheaf_bottom_spectrum(
 
     Returns the `k` smallest **nonzero** eigenpairs of `L_F = δ^T δ`
     (with `drop_kernel=True`, the default): the kernel of `L_F` is the
-    space of global sections — for the trivial sheaf, the constant
-    vectors per connected component — which carries no geometry, so
-    spectral reads start at the first nonzero mode (the sheaf analogue
-    of dropping the trivial mode of a graph Laplacian). Kernel modes are
-    identified at the matrix scale, `λ ≤ max(diag L) · 1e-9` (the
-    library's `numerical_floor_convention`; the same threshold as
-    `spectral.effective_resistance`'s pseudoinverse).
+    space of global sections. For a trivial sheaf these are constant
+    in each stalk channel on each connected component. Dropping them
+    starts the returned spectrum at the first positive mode. Kernel modes are
+    identified at `λ ≤ n · eps(dtype) · scale`, where `scale` is
+    the full spectral norm on the dense path and its upper bound
+    `max_i Σ_j |L[i,j]|` on sparse paths.
 
     The eigensolve runs on the SPARSE Laplacian via
     `algebra.lanczos_eigsh(which="SA")`; see `algebra.eigsh_sparse` for
-    the backend dispatch and its scale-of-validity notes.
+    the backend dispatch and its scale-of-validity notes. Full-spectrum
+    requests and requests too wide for the LOBPCG search subspace use
+    dense `torch.linalg.eigh`. This spectral entry point is deliberately
+    nondifferentiable: maps requiring gradients are rejected on every
+    backend. Use `sheaf_laplacian` and a dense torch eigensolver for autograd.
 
     Args:
       sheaf: a `GraphSheaf` or `HeterogeneousGraphSheaf`.
@@ -387,50 +392,69 @@ def sheaf_bottom_spectrum(
     References:
       Hansen-Ghrist (2019), §3.1 (kernel = global sections), §4
         (harmonic/spectral reads of the sheaf Laplacian).
-      Ericsson-Ruhe (1980); Knyazev (2001) — the sparse bottom-k
+      Ericsson-Ruhe (1980); Knyazev (2001), for the sparse bottom-k
         backends, via `algebra.eigsh_sparse`.
     """
     from holonomy_lib.algebra.lanczos import lanczos_eigsh
 
-    if k < 1:
+    if not isinstance(k, int) or isinstance(k, bool) or k < 1:
         raise ValueError(f"k must be >= 1; got k={k}")
-    if kernel_headroom < 0:
+    if (not isinstance(kernel_headroom, int)
+            or isinstance(kernel_headroom, bool) or kernel_headroom < 0):
         raise ValueError(
             f"kernel_headroom must be >= 0; got {kernel_headroom}"
         )
 
+    if solver not in ("auto", "eigsh", "lobpcg", "torch_lobpcg"):
+        raise ValueError(f"unknown sparse eigensolver {solver!r}")
+    n = sheaf.total_node_dim
+    if k > n:
+        raise ValueError(f"k must not exceed total node dim {n}; got k={k}")
     L = sheaf_laplacian_sparse(sheaf)
-    n = L.shape[0]
-    k_req = min(k + kernel_headroom, n - 1) if drop_kernel else min(k, n - 1)
-    if k_req < 1:
+    if L.requires_grad:
         raise ValueError(
-            f"sheaf has total node dim {n}; cannot request "
-            f"{'k + headroom' if drop_kernel else 'k'} >= 1 modes below n"
+            "sheaf_bottom_spectrum is nondifferentiable; detach restriction "
+            "maps or use torch.linalg.eigh(sheaf_laplacian(sheaf))"
         )
-
-    vals, vecs = lanczos_eigsh(
-        L, k_req, which="SA", solver=solver, generator=generator,
-    )
+    k_req = min(k + kernel_headroom, n) if drop_kernel else k
+    # A zero sheaf has no positive modes. Avoid a singular sparse
+    # factorization and keep the output allocation at n * k_req.
+    if L._nnz() == 0 or not torch.any(L.values()):
+        vals = L.values().new_zeros(k_req)
+        kernel_scale = vals.new_zeros(())
+        vecs = torch.eye(n, k_req, dtype=sheaf.dtype, device=sheaf.device)
+    elif k_req == n or (
+        solver != "eigsh" and n < _LOBPCG_SUBSPACE_BLOCKS * k_req
+    ):
+        vals, vecs = torch.linalg.eigh(L.to_dense())
+        kernel_scale = vals.abs().max()
+        vals, vecs = vals[:k_req], vecs[:, :k_req]
+    else:
+        vals, vecs = lanczos_eigsh(
+            L, k_req, which="SA", solver=solver, generator=generator,
+        )
+        row_magnitudes = L.values().new_zeros(n).scatter_add_(
+            0, L.indices()[0], L.values().abs(),
+        )
+        kernel_scale = row_magnitudes.max()
 
     if not drop_kernel:
         return vals[:k], vecs[:, :k], _node_offsets(sheaf)
 
-    # Kernel threshold at the MATRIX scale: `vals` holds only the
-    # smallest modes, so `vals.max()` would be a too-tiny yardstick that
-    # lets a shift-invert kernel mode (~1e-10) slip through as
-    # "nonzero". `max(diag L) · 1e-9` follows the library's
-    # numerical_floor_convention (CONVENTIONS §3.4).
-    Lc = L  # already coalesced
-    idx = Lc.indices()
-    diag_vals = Lc.values()[idx[0] == idx[1]]
-    diag_max = diag_vals.max() if diag_vals.numel() else vals.new_zeros(())
-    nonzero = vals > diag_max * 1e-9
+    # Partial bottom spectra do not contain the largest mode, so their
+    # maximum cannot set a matrix-scale rank tolerance. The sparse row
+    # norm bounds the spectral norm without another eigensolve.
+    nonzero = vals > n * torch.finfo(sheaf.dtype).eps * kernel_scale
     n_nonzero = int(nonzero.sum())
     if n_nonzero < k:
+        reason = (
+            "the full spectrum contains too few positive modes"
+            if k_req == n else
+            f"increase kernel_headroom={kernel_headroom} to inspect more modes"
+        )
         raise ValueError(
             f"only {n_nonzero} nonzero modes among the {k_req} computed "
-            f"for k={k}; the sheaf kernel (global sections) is larger "
-            f"than kernel_headroom={kernel_headroom} — raise it."
+            f"for k={k}; {reason} (the remaining modes are in the sheaf kernel)"
         )
     vals = vals[nonzero][:k]
     vecs = vecs[:, nonzero][:, :k]
@@ -443,12 +467,12 @@ def sheaf_dirichlet_energy(
     """Per-batch Dirichlet energy `E(x) = x^T L_F x` for sheaf-valued
     signals.
 
-    The Dirichlet energy is the squared coboundary norm — it measures
+    The Dirichlet energy is the squared coboundary norm; it measures
     how much each edge's two restriction-mapped values disagree.
     Minimized at the global sections (kernel of `L_F`).
 
     Args:
-      sheaf: a `GraphSheaf`.
+      sheaf: a `GraphSheaf` or `HeterogeneousGraphSheaf`.
       x: `(B, n_v · d_v)` or `(n_v · d_v,)` node-stalk signals.
 
     Returns:
@@ -458,7 +482,7 @@ def sheaf_dirichlet_energy(
       Hansen-Ghrist (2019), §3.2.
     """
     total = sheaf.total_node_dim
-    if x.shape[-1] != total:
+    if x.ndim not in (1, 2) or x.shape[-1] != total:
         raise ValueError(
             f"x last dim must equal the total node-stalk dim (sum of d_v over "
             f"n_nodes) = {total}; got x.shape={tuple(x.shape)}"

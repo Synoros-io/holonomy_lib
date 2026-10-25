@@ -20,44 +20,61 @@ import torch
 
 
 def enumerate_faces(simplex: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """For a single k-simplex (1-D tensor of k+1 vertex indices), return
-    its k+1 faces (each a (k,)-shape tensor) and their parity signs.
+    """Enumerate oriented faces along the last simplex-table axis.
 
     Args:
-      simplex: (k+1,) int tensor of sorted vertex indices.
+      simplex: (..., k+1) int tensor of sorted vertex indices.
 
     Returns:
-      faces: (k+1, k) int tensor; row i is the face obtained by
+      faces: (..., k+1, k) int tensor; row i is the face obtained by
         dropping the i-th vertex.
       signs: (k+1,) tensor of `(-1)**i` values.
+    References:
+      Munkres, J. R. (1984). Elements of Algebraic Topology, §1.
     """
-    k_plus_1 = simplex.shape[0]
-    faces = torch.empty(
-        (k_plus_1, k_plus_1 - 1), dtype=simplex.dtype, device=simplex.device,
-    )
-    for i in range(k_plus_1):
-        # drop the i-th vertex
-        mask = torch.ones(k_plus_1, dtype=torch.bool, device=simplex.device)
-        mask[i] = False
-        faces[i] = simplex[mask]
-    # Signs: (-1)^0, (-1)^1, ..., (-1)^k
-    signs = torch.tensor(
-        [1 if (i % 2 == 0) else -1 for i in range(k_plus_1)],
-        dtype=torch.int64, device=simplex.device,
-    )
+    width = simplex.shape[-1]
+    positions = torch.arange(width, device=simplex.device)
+    keep = positions.expand(width, width)[
+        ~torch.eye(width, dtype=torch.bool, device=simplex.device)
+    ].reshape(width, width - 1)
+    faces = simplex[..., keep]
+    signs = 1 - 2 * (positions % 2)
     return faces, signs
 
 
-def build_simplex_index(simplices: torch.Tensor) -> dict[tuple[int, ...], int]:
-    """Build a hash-table mapping sorted-vertex-tuple → row index.
+def lookup_rows(
+    reference_rows: torch.Tensor, query_rows: torch.Tensor,
+) -> torch.Tensor:
+    """Return the reference index of each query row by an exact tensor join.
 
     Args:
-      simplices: (n, d) int tensor. Each row is a sorted simplex.
+      reference_rows: (n, d) unique integer keys.
+      query_rows: (m, d) integer keys. Include batch ids in both tables
+        when identical simplices in different batches must stay distinct.
 
     Returns:
-      Dict from `tuple(int, ...)` to row index in `simplices`.
+      (m,) integer reference indices. A missing query raises ValueError.
+
+    References:
+      Munkres, J. R. (1984). Elements of Algebraic Topology, §1,
+        for face incidence; the row join is an implementation detail.
     """
-    out: dict[tuple[int, ...], int] = {}
-    for j in range(simplices.shape[0]):
-        out[tuple(simplices[j].tolist())] = j
-    return out
+    n_reference = reference_rows.shape[0]
+    # Keeping complete rows avoids overflow from encoding a vertex tuple
+    # as a positional integer hash. The shared ids also join across batches.
+    keys, inverse = torch.unique(
+        torch.cat((reference_rows, query_rows)), dim=0, return_inverse=True,
+    )
+    rows = torch.full(
+        (keys.shape[0],), -1, dtype=torch.int64, device=reference_rows.device,
+    )
+    rows[inverse[:n_reference]] = torch.arange(
+        n_reference, device=reference_rows.device,
+    )
+    found = rows[inverse[n_reference:]]
+    if bool((found < 0).any()):
+        raise ValueError(
+            "Malformed complex: every face of a simplex must appear "
+            "in the previous dimension's simplex table."
+        )
+    return found

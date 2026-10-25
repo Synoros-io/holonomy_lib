@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""DenseSimplicialComplex — batched simplicial complex with padded
+"""DenseSimplicialComplex : batched simplicial complex with padded
 dense simplex tables.
 
 Used by Hodge Laplacians on small complexes (where batched dense
@@ -21,7 +21,7 @@ Layout:
 
 References:
   Munkres, J. R. (1984). Elements of Algebraic Topology. Westview
-    Press. §1 — simplicial complexes and chain complexes.
+    Press. §1 : simplicial complexes and chain complexes.
   Kolda, T. G., Bader, B. W. (2009). Tensor decompositions and
     applications. SIAM Review 51(3):455-500. (Tensor-layout
     conventions reused here.)
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from holonomy_lib.simplicial._face_lookup import build_simplex_index
+from holonomy_lib.simplicial._face_lookup import enumerate_faces, lookup_rows
 
 if TYPE_CHECKING:
     from holonomy_lib.simplicial.sparse_complex import SparseSimplicialComplex
@@ -47,7 +47,7 @@ class DenseSimplicialComplex:
     Attributes:
       simplices_by_dim: `dict[k, Tensor (B, n_k_max, k+1)]` of sorted
         vertex tuples. Padding rows are -1.
-      valid_mask: `dict[k, Tensor (B, n_k_max) bool]` — True for real
+      valid_mask: `dict[k, Tensor (B, n_k_max) bool]` : True for real
         simplices, False for padding.
       n_vertices: vertex count (identical across batch elements).
       device, dtype: tensor placement + float dtype used for boundary
@@ -69,7 +69,7 @@ class DenseSimplicialComplex:
 
     @property
     def max_dim(self) -> int:
-        """Highest dim that has any simplices."""
+        """Highest dimension with a table, including an empty table."""
         return max(self.simplices_by_dim) if self.simplices_by_dim else -1
 
     def n_simplices(self, k: int) -> torch.Tensor:
@@ -90,6 +90,9 @@ class DenseSimplicialComplex:
         Args:
           k: simplex dimension. Returns zeros for k=0 (vertices have
             empty boundary in the chain complex).
+
+        References:
+          Munkres, J. R. (1984). Elements of Algebraic Topology, §1.
         """
         if k == 0:
             # ∂_0 maps to the (-1)-chain group; conventionally zero.
@@ -120,49 +123,22 @@ class DenseSimplicialComplex:
         D = torch.zeros(B, n_prev_max, n_k_max,
                          device=self.device, dtype=self.dtype)
 
-        # We build per-batch — each element has its own face-lookup index.
-        # This is O(B · n_k · (k+1) · index-lookup) which is fine for
-        # batched dense use; the heavy lifting in v1 is `eigh` on the
-        # resulting (B, n, n) Laplacian, not the boundary construction.
-        for b in range(B):
-            # Build the (k-1)-simplex → row-index map for this batch
-            # AND hoist all the per-batch lookups out of the inner loop:
-            # `k_cols_list` / `valid_prev_rows_list` are pure CPU lists
-            # so we avoid `.item()` host syncs inside the (j, i) loop
-            # that would otherwise stall every iteration on GPU.
-            valid_prev = prev_simplices[b][prev_valid[b]]
-            prev_index = build_simplex_index(valid_prev)
-            valid_k = k_simplices[b][k_valid[b]]           # (n_k, k+1)
-            k_cols_list = torch.where(k_valid[b])[0].tolist()
-            valid_prev_rows_list = torch.where(prev_valid[b])[0].tolist()
-
-            n_k_actual = valid_k.shape[0]
-            for j in range(n_k_actual):
-                col = k_cols_list[j]
-                simplex = valid_k[j]                       # (k+1,)
-                # Enumerate faces + signs (Koszul: (-1)^i for face dropping vertex i)
-                for i in range(k + 1):
-                    mask = torch.ones(
-                        k + 1, dtype=torch.bool, device=simplex.device,
-                    )
-                    mask[i] = False
-                    face = simplex[mask]
-                    key = tuple(face.tolist())
-                    if key not in prev_index:
-                        # Face missing from (k-1)-dim table — complex is
-                        # malformed. Raise so bugs surface early.
-                        raise ValueError(
-                            f"boundary(k={k}): face {key} of simplex "
-                            f"{tuple(simplex.tolist())} in batch {b} not "
-                            f"found in dim-{k - 1} simplices. The complex "
-                            f"is malformed: every face of every k-simplex "
-                            f"must appear as a (k-1)-simplex."
-                        )
-                    # Map back to the padded row index in prev_simplices
-                    # (prev_index gave us the position in the *valid* slice).
-                    row = valid_prev_rows_list[prev_index[key]]
-                    sign = 1 if (i % 2 == 0) else -1
-                    D[b, row, col] = sign
+        # Face keys include the batch id: a face present in another complex
+        # cannot satisfy a missing face in this one. Keep padded row indices
+        # so noncontiguous valid masks still assemble into the right slots.
+        simplex_batch, simplex_col = torch.where(k_valid)
+        prev_batch, prev_row = torch.where(prev_valid)
+        faces, signs = enumerate_faces(k_simplices[k_valid])
+        face_keys = torch.cat((
+            simplex_batch[:, None, None].expand(-1, k + 1, 1), faces,
+        ), dim=-1).reshape(-1, k + 1)
+        prev_keys = torch.cat((prev_batch[:, None], prev_simplices[prev_valid]),
+                              dim=-1)
+        face_rows = prev_row[lookup_rows(prev_keys, face_keys)]
+        D[simplex_batch.repeat_interleave(k + 1), face_rows,
+          simplex_col.repeat_interleave(k + 1)] = signs.to(self.dtype).repeat(
+              simplex_col.shape[0],
+          )
         return D
 
     def to_sparse(self) -> SparseSimplicialComplex:

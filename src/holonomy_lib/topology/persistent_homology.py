@@ -21,13 +21,11 @@ that survive to the end of the filtration have `death = +inf`.
 
 Two computational paths:
 
-  H₀ — batched union-find on sorted filtration edges. Each merge
-  records the death time of the "younger" component (the component
-  whose latest vertex appeared later in the filtration, by
-  convention). The persistent connected component that survives gets
-  a `(birth, +inf)` bar.
+  H₀: sequential host union-find on sorted filtration edges, dispatched
+  per batch member. All components are born at zero; each merge records
+  one death and every remaining component gets a `(0, +inf)` bar.
 
-  H_{1..max_dim} — Z/2 left-to-right reduction of the boundary
+  H_{1..max_dim}: Z/2 left-to-right reduction of the boundary
   matrix in filtration order (Edelsbrunner-Letscher-Zomorodian
   2002), via `_reduction.reduce_filtration`. Sequential within one
   filtration but batches across point clouds: the public function
@@ -48,11 +46,14 @@ References:
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 
 from holonomy_lib.simplicial import (
+    SparseSimplicialComplex,
     pairwise_distances,
-    vietoris_rips_sparse,
+    vietoris_rips_dense,
 )
 from holonomy_lib.topology._filtration import build_filtration
 from holonomy_lib.topology._reduction import reduce_filtration
@@ -63,7 +64,7 @@ def persistence_diagrams(
     max_dim: int = 2,
     max_radius: float = float("inf"),
     input_is_distance: bool = False,
-    reduction_backend: str = "python",
+    reduction_backend: Literal["python", "torch"] = "python",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Persistence diagrams for dims 0..max_dim of a Vietoris-Rips
     filtration.
@@ -80,9 +81,8 @@ def persistence_diagrams(
       input_is_distance: if True, `points_or_distances` is read as a
         distance matrix directly; otherwise pairwise Euclidean
         distances are computed.
-      reduction_backend: `"python"` (default; CPython set columns,
-        fast for typical inputs) or `"torch"` (LongTensor columns,
-        device-agnostic — runs on the filtration's native device).
+      reduction_backend: `"python"` (default; CPython set columns)
+        or `"torch"` (LongTensor columns on the filtration's device).
         See `_reduction.reduce_filtration` for the tradeoff.
 
     Returns:
@@ -93,7 +93,9 @@ def persistence_diagrams(
         masks[k]: `(B, max_pairs_k)` bool Tensor; True for real
           pairs, False for padding.
 
-      Both lists have length `max_dim + 1`.
+      Both lists have length `max_dim + 1`. H_0 retains one bar per input
+      vertex, including zero-length bars when coincident vertices merge.
+      Higher-dimensional diagrams omit zero-length bars.
 
     Notes:
       Cost is dominated by the matrix reduction for `max_dim ≥ 1`:
@@ -101,6 +103,13 @@ def persistence_diagrams(
       the filtration, but typically much faster due to sparsity. For
       large point clouds, lower `max_radius` or `max_dim` to keep
       the simplex count manageable.
+
+      Simplex construction is batched. Z/2 pivot reduction and H_0 union-find
+      are sequential within each filtration: every pivot or component merge
+      depends on previous ones. Ragged filtrations are dispatched separately.
+      Python reduction is an explicit host boundary; torch reduction keeps
+      columns on device but synchronizes for dependent pivot decisions. Bar
+      coordinates are returned without an autograd connection to the inputs.
 
       Comparison vs `ripser`: tie-breaking on equal birth/death
       values may differ; the persistence diagrams agree under
@@ -110,13 +119,19 @@ def persistence_diagrams(
       Edelsbrunner-Letscher-Zomorodian (2002).
       Cohen-Steiner-Edelsbrunner-Harer (2007) stability.
     """
-    if max_dim < 0:
-        raise ValueError(f"max_dim must be >= 0, got {max_dim}")
     if points_or_distances.ndim != 3:
         raise ValueError(
             f"points_or_distances must be 3-D (B, ...); got "
             f"{tuple(points_or_distances.shape)}"
         )
+    if not points_or_distances.is_floating_point():
+        raise ValueError("points_or_distances must have real floating dtype")
+    if max_dim < 0:
+        raise ValueError(f"max_dim must be >= 0, got {max_dim}")
+    if max_radius < 0:
+        raise ValueError(f"max_radius must be >= 0, got {max_radius}")
+    if reduction_backend not in ("python", "torch"):
+        raise ValueError(f"unknown reduction_backend={reduction_backend!r}")
     B = points_or_distances.shape[0]
 
     if input_is_distance:
@@ -134,9 +149,13 @@ def persistence_diagrams(
         [[] for _ in range(max_dim + 1)] for _ in range(B)
     ]
 
+    # Build all batch members together. Only the ragged sequential reduction
+    # is dispatched per filtration; simplex enumeration stays tensorized.
+    complexes = vietoris_rips_dense(
+        distances, max_radius=max_radius, max_dim=max_dim + 1,
+    ) if max_dim >= 1 else None
     for b in range(B):
         d_b = distances[b]
-        n = d_b.shape[0]
 
         # H_0 — union-find on sorted filtration edges.
         h0_pairs = _persistent_h0(d_b, max_radius)
@@ -148,16 +167,16 @@ def persistence_diagrams(
         # naturally produces empty diagrams when the point cloud has
         # too few vertices to form (max_dim+1)-simplices, so no
         # additional vertex-count guard is needed.
-        if max_dim >= 1:
-            complex = vietoris_rips_sparse(
-                d_b, max_radius=max_radius, max_dim=max_dim + 1,
+        if complexes is not None:
+            complex = SparseSimplicialComplex(
+                {k: table[b][complexes.valid_mask[k][b]]
+                 for k, table in complexes.simplices_by_dim.items()},
+                n_vertices=complexes.n_vertices, device=complexes.device,
             )
             filt = build_filtration(d_b, complex)
             pairs_by_dim = reduce_filtration(filt, backend=reduction_backend)
-            # The reduction returns H_0 as well, but our union-find
-            # path produced cleaner H_0 pairs (no spurious
-            # zero-length bars from tied filtration values); we
-            # discard the reduction's H_0 and use ours.
+            # Union-find already computed H_0 without boundary reduction.
+            # Use only the higher-dimensional pairs from this pass.
             for k in range(1, max_dim + 1):
                 pairs_per_batch_per_dim[b][k] = pairs_by_dim.get(k, [])
 
@@ -181,14 +200,16 @@ def persistence_diagrams(
             B, max_pairs_k, 2,
             dtype=distances.dtype, device=distances.device,
         )
-        mask = torch.zeros(
-            B, max_pairs_k, dtype=torch.bool, device=distances.device,
+        counts = [len(member[k]) for member in pairs_per_batch_per_dim]
+        # Each dimension crosses to the device in bulk, preserving whole pairs.
+        values = torch.tensor(
+            [pair for member in pairs_per_batch_per_dim for pair in member[k]],
+            dtype=distances.dtype, device=distances.device,
         )
-        for b in range(B):
-            for j, (birth, death) in enumerate(pairs_per_batch_per_dim[b][k]):
-                diag[b, j, 0] = birth
-                diag[b, j, 1] = death
-                mask[b, j] = True
+        count_tensor = torch.tensor(counts, device=distances.device)
+        positions = torch.arange(max_pairs_k, device=distances.device)
+        mask = positions < count_tensor[:, None]
+        diag[mask] = values
         diagrams.append(diag)
         masks.append(mask)
 
@@ -209,7 +230,10 @@ def _persistent_h0(
     components are born at time 0 (the vertices). `n − 1` of them
     die when union-find merges them with an earlier component at
     some edge length. One component survives to infinity (the
-    persistent connected component).
+    persistent connected component) when the radius connects the graph.
+    Disconnected components each retain an essential bar. Edges and lengths
+    are transferred in bulk to CPU; union-find is sequential because each
+    merge changes the component partition used by subsequent edges.
     """
     n = distances.shape[0]
     if n == 0:
@@ -227,9 +251,9 @@ def _persistent_h0(
 
     # Sort edges by length, stable for deterministic tie-breaking.
     sort_idx = torch.argsort(edge_lengths, stable=True)
-    iu = iu[sort_idx].tolist()
-    ju = ju[sort_idx].tolist()
-    edge_lengths = edge_lengths[sort_idx].tolist()
+    sorted_u = iu[sort_idx].tolist()
+    sorted_v = ju[sort_idx].tolist()
+    sorted_lengths = edge_lengths[sort_idx].tolist()
 
     # Disjoint-set union with path compression + union-by-rank.
     parent = list(range(n))
@@ -242,13 +266,12 @@ def _persistent_h0(
         return x
 
     pairs: list[tuple[float, float]] = []
-    for u, v, length in zip(iu, ju, edge_lengths):
+    for u, v, length in zip(sorted_u, sorted_v, sorted_lengths, strict=True):
         ru, rv = find(u), find(v)
         if ru == rv:
             continue
-        # Union: the component with the smaller rank (= "younger" by
-        # convention) dies. For ties we pick the one with the larger
-        # root index, matching ripser-style behavior.
+        # All vertices are born at zero, so either representative gives
+        # the same barcode. Rank only keeps the parent trees shallow.
         if rank[ru] < rank[rv]:
             parent[ru] = rv
         elif rank[ru] > rank[rv]:
@@ -256,8 +279,7 @@ def _persistent_h0(
         else:
             parent[rv] = ru
             rank[ru] += 1
-        # Record the death of the younger component. Both components
-        # had birth = 0; the younger dies at this edge's length.
+        # A successful merge kills one zero-born connected component.
         pairs.append((0.0, length))
 
     # The persistent component survives to infinity.

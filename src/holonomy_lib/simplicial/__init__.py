@@ -32,7 +32,7 @@ Construction:
 
 References:
   Munkres, J. R. (1984). Elements of Algebraic Topology. Westview
-    Press. §1 — chain complex + boundary operator.
+    Press. §1 : chain complex + boundary operator.
   Hausmann, J.-C. (1995). On the Vietoris-Rips complexes and a
     cohomology theory for metric spaces. In Prospects in Topology,
     Annals of Math Studies 138.

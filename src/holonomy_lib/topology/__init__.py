@@ -6,10 +6,10 @@
 Built on `holonomy_lib.simplicial`. Two flavors of output:
 
   Hodge / Betti
-    `hodge_laplacian(complex, k)` — the discrete Laplace-Beltrami
+    `hodge_laplacian(complex, k)`; the discrete Laplace-Beltrami
     operator on k-chains: `L_k = ∂_{k+1} ∂_{k+1}^T + ∂_k^T ∂_k`. Its
     kernel has dimension equal to the k-th Betti number.
-    `betti_numbers(complex, max_dim)` — counts near-zero eigenvalues
+    `betti_numbers(complex, max_dim)`; counts near-zero eigenvalues
     of each `L_k` to recover `(β_0, β_1, …, β_max_dim)`.
 
   Persistent homology (added in Phase 4)

@@ -11,6 +11,7 @@ is what makes the simple-graph contract universal across the library.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from holonomy_lib.discrete_geometry import (
@@ -28,7 +29,7 @@ from holonomy_lib.spectral import (
 
 
 def _make_undirected(n: int, seed: int = 0) -> torch.Tensor:
-    g = torch.Generator(); g.manual_seed(seed)
+    g = torch.Generator().manual_seed(seed)
     A = torch.rand(1, n, n, generator=g, dtype=torch.float64)
     A = (A + A.mT) * 0.5
     A.diagonal(dim1=-2, dim2=-1).zero_()
@@ -36,7 +37,7 @@ def _make_undirected(n: int, seed: int = 0) -> torch.Tensor:
 
 
 def _make_directed(n: int, seed: int = 0) -> torch.Tensor:
-    g = torch.Generator(); g.manual_seed(seed)
+    g = torch.Generator().manual_seed(seed)
     A = torch.rand(1, n, n, generator=g, dtype=torch.float64)
     A.diagonal(dim1=-2, dim2=-1).zero_()
     return A
@@ -44,7 +45,7 @@ def _make_directed(n: int, seed: int = 0) -> torch.Tensor:
 
 def _add_self_loops(A: torch.Tensor) -> torch.Tensor:
     """Add random self-loop weights to every node."""
-    g = torch.Generator(); g.manual_seed(42)
+    g = torch.Generator().manual_seed(42)
     out = A.clone()
     diag = torch.rand(A.shape[0], A.shape[-1], generator=g, dtype=A.dtype)
     out.diagonal(dim1=-2, dim2=-1).copy_(diag)
@@ -61,97 +62,42 @@ class TestSelfLoopInvariance:
     `A` and on `A + diag(arbitrary)`. The diagonal is dropped at
     entry, so any self-loop weight is irrelevant."""
 
-    def test_laplacian_combinatorial(self):
-        A = _make_undirected(8, seed=1)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            _L.combinatorial(A), _L.combinatorial(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_laplacian_symmetric_normalized(self):
-        A = _make_undirected(8, seed=2)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            _L.symmetric_normalized(A), _L.symmetric_normalized(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_laplacian_random_walk(self):
-        A = _make_undirected(8, seed=3)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            _L.random_walk(A), _L.random_walk(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_laplacian_signed(self):
-        # Use signed weights for a non-trivial test.
-        g = torch.Generator(); g.manual_seed(4)
-        A = torch.randn(1, 6, 6, generator=g, dtype=torch.float64)
-        A = (A + A.mT) * 0.5
-        A.diagonal(dim1=-2, dim2=-1).zero_()
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            _L.signed(A), _L.signed(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_laplacian_degree(self):
-        A = _make_undirected(6, seed=5)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            _L.degree(A), _L.degree(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_magnetic_combinatorial(self):
-        A = _make_directed(6, seed=6)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            magnetic.combinatorial(A, q=0.25),
-            magnetic.combinatorial(A_with, q=0.25),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_magnetic_symmetric_normalized(self):
-        A = _make_directed(6, seed=7)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            magnetic.symmetric_normalized(A, q=0.25),
-            magnetic.symmetric_normalized(A_with, q=0.25),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_ollivier_ricci_curvature(self):
-        # Small graph + few iters; we only need to verify the entry-
-        # point handling, not numerical convergence here.
-        A = _make_undirected(5, seed=8)
-        A_with = _add_self_loops(A)
-        k1 = ollivier_ricci_curvature(A, alpha=0.0, reg=0.05, n_iter=50)
-        k2 = ollivier_ricci_curvature(A_with, alpha=0.0, reg=0.05, n_iter=50)
-        torch.testing.assert_close(k1, k2, atol=1e-10, rtol=0)
-
-    def test_forman_ricci_simple(self):
-        A = _make_undirected(7, seed=9)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            forman_ricci_simple(A), forman_ricci_simple(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_forman_ricci_augmented(self):
-        A = _make_undirected(7, seed=10)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            forman_ricci_augmented(A), forman_ricci_augmented(A_with),
-            atol=1e-12, rtol=0,
-        )
-
-    def test_effective_resistance(self):
-        A = _make_undirected(6, seed=11)
-        A_with = _add_self_loops(A)
-        torch.testing.assert_close(
-            effective_resistance(A), effective_resistance(A_with),
-            atol=1e-10, rtol=0,
-        )
+    @pytest.mark.parametrize("function,kind,n,seed,kwargs,atol", [
+        (_L.combinatorial, "undirected", 8, 1, {}, 1e-12),
+        (_L.symmetric_normalized, "undirected", 8, 2, {}, 1e-12),
+        (_L.random_walk, "undirected", 8, 3, {}, 1e-12),
+        (_L.signed, "signed", 6, 4, {}, 1e-12),
+        (_L.degree, "undirected", 6, 5, {}, 1e-12),
+        (magnetic.combinatorial, "directed", 6, 6, {"q": 0.25}, 1e-12),
+        (magnetic.symmetric_normalized, "directed", 6, 7, {"q": 0.25}, 1e-12),
+        (ollivier_ricci_curvature, "undirected", 5, 8,
+         {"alpha": 0., "reg": 0.05, "n_iter": 50}, 1e-10),
+        (forman_ricci_simple, "undirected", 7, 9, {}, 1e-12),
+        (forman_ricci_augmented, "binary", 7, 10, {}, 1e-12),
+        (effective_resistance, "undirected", 6, 11, {}, 1e-10),
+    ])
+    def test_laplacian_combinatorial(self, function, kind, n, seed, kwargs, atol):
+        if kind == "directed":
+            adjacency = _make_directed(n, seed=seed)
+        elif kind == "signed":
+            generator = torch.Generator().manual_seed(seed)
+            adjacency = torch.randn(1, n, n, generator=generator,
+                                    dtype=torch.float64)
+            adjacency = (adjacency + adjacency.mT) * 0.5
+            adjacency.diagonal(dim1=-2, dim2=-1).zero_()
+        else:
+            adjacency = _make_undirected(n, seed=seed)
+        if kind == "binary":
+            adjacency = (adjacency > 0).to(adjacency.dtype)
+        fixtures = [adjacency]
+        if kind == "binary":
+            # Preserve the augmented-Forman triangle-plus-isolate fixture.
+            triangle = torch.zeros(1, 4, 4, dtype=torch.float64)
+            triangle[:, :3, :3] = 1. - torch.eye(3, dtype=torch.float64)
+            fixtures.append(triangle)
+        for adjacency in fixtures:
+            torch.testing.assert_close(
+                function(adjacency, **kwargs),
+                function(_add_self_loops(adjacency), **kwargs),
+                atol=atol, rtol=0,
+            )

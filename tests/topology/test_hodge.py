@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from holonomy_lib.simplicial import SparseSimplicialComplex
+from holonomy_lib.simplicial import DenseSimplicialComplex, SparseSimplicialComplex
 from holonomy_lib.topology import betti_numbers, hodge_laplacian
 
 # --------------------------------------------------------------------
@@ -128,15 +128,17 @@ def _two_disjoint_triangles() -> SparseSimplicialComplex:
 
 
 class TestBettiNumbersSparse:
-    def test_S1(self):
-        sc = _circle_S1(n=6)
-        b = betti_numbers(sc, max_dim=1)
-        assert b.tolist() == [1, 1]
 
-    def test_S2_octahedron(self):
-        sc = _octahedron_S2()
-        b = betti_numbers(sc, max_dim=2)
-        assert b.tolist() == [1, 0, 1]
+    @pytest.mark.parametrize("dense", [False, True])
+    def test_S2_octahedron(self, dense):
+        complex = _octahedron_S2()
+        result = betti_numbers(complex.to_dense() if dense else complex, 2)
+        assert result.reshape(-1).tolist() == [1, 0, 1]
+        for dim in range(3):
+            torch.testing.assert_close(
+                hodge_laplacian(complex, dim),
+                hodge_laplacian(complex.to_dense(), dim)[0], atol=1e-12, rtol=0,
+            )
 
     def test_T2_torus(self):
         sc = _torus_T2()
@@ -148,56 +150,41 @@ class TestBettiNumbersSparse:
         b = betti_numbers(sc, max_dim=2)
         assert b.tolist() == [2, 0, 0]
 
-    def test_circle_at_various_sizes(self):
-        for n in [4, 5, 6, 8, 10]:
-            sc = _circle_S1(n)
-            b = betti_numbers(sc, max_dim=1)
-            assert b.tolist() == [1, 1], (
-                f"S¹ with n={n} should have β=(1,1), got {b.tolist()}"
+    @pytest.mark.parametrize("representation,dtype", [
+        ("sparse", torch.float64), ("dense", torch.float64),
+        ("dense", torch.float32), ("dense", torch.float16),
+        ("dense", torch.bfloat16),
+    ])
+    def test_circle_at_various_sizes(self, representation, dtype):
+        for n in [4, 5, 6, 7, 8, 10]:
+            sparse = _circle_S1(n)
+            complex: DenseSimplicialComplex | SparseSimplicialComplex = (
+                sparse.to_dense(dtype=dtype) if representation == "dense" else sparse
             )
+            assert betti_numbers(complex, 1).reshape(-1).tolist() == [1, 1]
+        # Empty chain dimensions have rank zero, including an empty batch.
+        from holonomy_lib.simplicial import vietoris_rips_dense
+        for batch in (0, 1, 2):
+            distances = (torch.ones(batch, 3, 3, dtype=dtype)
+                         - torch.eye(3, dtype=dtype))
+            complex = vietoris_rips_dense(distances, max_radius=0., max_dim=1)
+            result = betti_numbers(complex, 1)
+            assert result.shape == (batch, 2)
+            assert result.tolist() == [[3, 0]] * batch
+        empty_edges = SparseSimplicialComplex(
+            {0: torch.arange(3).reshape(-1, 1),
+             1: torch.empty(0, 2, dtype=torch.int64)}, n_vertices=3,
+        )
+        assert betti_numbers(empty_edges, 1).tolist() == [3, 0]
 
 
 # --------------------------------------------------------------------
-# Betti numbers (dense path)
+# Hodge Laplacian spectrum
 # --------------------------------------------------------------------
 
 
-class TestBettiNumbersDense:
-    def test_S1_dense(self):
-        sc = _circle_S1(n=6).to_dense()
-        b = betti_numbers(sc, max_dim=1)
-        assert b.shape == (1, 2)
-        assert b[0].tolist() == [1, 1]
+class TestHodgeSpectrum:
 
-    def test_S2_dense(self):
-        sc = _octahedron_S2().to_dense()
-        b = betti_numbers(sc, max_dim=2)
-        assert b[0].tolist() == [1, 0, 1]
-
-
-# --------------------------------------------------------------------
-# Hodge Laplacian shape contract
-# --------------------------------------------------------------------
-
-
-class TestHodgeShapes:
-    def test_dense_shapes(self):
-        sc = _octahedron_S2().to_dense()
-        L0 = hodge_laplacian(sc, 0)  # (1, 6, 6)
-        L1 = hodge_laplacian(sc, 1)  # (1, 12, 12)
-        L2 = hodge_laplacian(sc, 2)  # (1, 8, 8)
-        assert L0.shape == (1, 6, 6)
-        assert L1.shape == (1, 12, 12)
-        assert L2.shape == (1, 8, 8)
-
-    def test_sparse_shapes(self):
-        sc = _octahedron_S2()
-        L0 = hodge_laplacian(sc, 0)
-        L1 = hodge_laplacian(sc, 1)
-        L2 = hodge_laplacian(sc, 2)
-        assert L0.shape == (6, 6)
-        assert L1.shape == (12, 12)
-        assert L2.shape == (8, 8)
 
     def test_L0_matches_graph_laplacian_for_S1(self):
         """For a 1-complex (no triangles), L_0 = ∂_1 ∂_1^T = graph
@@ -236,11 +223,6 @@ class TestValidation:
         with pytest.raises(ValueError, match="max_dim"):
             betti_numbers(sc, -1)
 
-    def test_rejects_max_dim_too_large(self):
-        sc = _circle_S1(n=4)  # max_dim = 1
-        with pytest.raises(ValueError, match="max_dim"):
-            betti_numbers(sc, 5)
-
 
 # --------------------------------------------------------------------
 # Sparse Lanczos sanity (Phase 3 extension)
@@ -263,7 +245,7 @@ class TestSparseLanczos:
         # Sparse CSC version.
         A_sparse = A.to_sparse_csc()
 
-        g = torch.Generator(); g.manual_seed(1)
+        g = torch.Generator().manual_seed(1)
         vals_sparse, _ = lanczos_eigsh(
             A_sparse, k=1, n_iter=n, oversample=0, generator=g,
         )

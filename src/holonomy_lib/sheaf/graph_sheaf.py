@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""GraphSheaf dataclass — the data of a cellular sheaf on a graph.
+"""GraphSheaf dataclass; the data of a cellular sheaf on a graph.
 
 The sheaf attaches a `d_v`-dim stalk to each node and a `d_e`-dim
 stalk to each edge. For every edge `e = (u, v)` it carries two
@@ -14,16 +14,15 @@ The coboundary on a node-stalk vector `x ∈ R^{n_v · d_v}` reads each
 edge's contribution as `F_left[e] · x_u − F_right[e] · x_v`. The
 sheaf Laplacian is `δ^T δ`.
 
-v1 restrictions:
-  - Uniform stalk dims: every node has the same `d_v`, every edge the
-    same `d_e`. (Heterogeneous stalks are mathematically fine and a
-    natural v2 extension; v1 keeps the storage as dense tensors.)
+Representations:
+  - `GraphSheaf` stores uniform stalk dimensions in dense tensors.
+    `HeterogeneousGraphSheaf` stores per-cell dimensions and ragged maps.
   - Undirected graphs: edges are unordered, but our (u, v) tuple
     convention encodes the orientation that defines `δ`'s sign
     convention. Two sheaves with the same edge set but swapped (u, v)
-    orientations represent the same underlying sheaf with reversed
-    coboundary signs; the Laplacian `L_F = δ^T δ` is identical in
-    both since it is quadratic in δ.
+    orientations, while swapping their left and right maps, represent
+    the same underlying sheaf with reversed coboundary signs. The
+    Laplacian `L_F = δ^T δ` is identical since it is quadratic in δ.
 """
 
 from __future__ import annotations
@@ -50,7 +49,11 @@ class GraphSheaf:
     Validation:
       - `edges` must be `(n_edges, 2)` int64.
       - `F_left`, `F_right` shapes match `(n_edges, d_e, d_v)`.
-      - All tensors must share `device` and a single float dtype.
+      - All tensors share `device`; restriction maps share a real float dtype.
+
+    References:
+      Hansen, J., Ghrist, R. (2019). Toward a spectral theory of cellular
+        sheaves. Journal of Applied and Computational Topology 3:315–358, §3.
     """
 
     n_nodes: int
@@ -61,8 +64,16 @@ class GraphSheaf:
     F_right: torch.Tensor
 
     def __post_init__(self) -> None:
+        if not isinstance(self.n_nodes, int) or isinstance(self.n_nodes, bool):
+            raise ValueError("n_nodes must be an integer")
         if self.n_nodes <= 0:
             raise ValueError(f"n_nodes must be > 0; got {self.n_nodes}")
+        if (not isinstance(self.node_stalk_dim, int)
+                or isinstance(self.node_stalk_dim, bool)):
+            raise ValueError("node_stalk_dim must be an integer")
+        if (not isinstance(self.edge_stalk_dim, int)
+                or isinstance(self.edge_stalk_dim, bool)):
+            raise ValueError("edge_stalk_dim must be an integer")
         if self.node_stalk_dim <= 0:
             raise ValueError(
                 f"node_stalk_dim must be > 0; got {self.node_stalk_dim}"
@@ -85,6 +96,12 @@ class GraphSheaf:
                     f"edge_stalk_dim={d_e}, node_stalk_dim={d_v}); got "
                     f"shape={tuple(t.shape)}"
                 )
+        if self.edges.dtype != torch.int64:
+            raise ValueError("edges must have dtype int64")
+        if not self.F_left.is_floating_point() or not self.F_right.is_floating_point():
+            raise ValueError("restriction maps must have a real floating dtype")
+        if self.edges.device != self.F_left.device:
+            raise ValueError("edges and restriction maps must share device")
         if self.F_left.device != self.F_right.device:
             raise ValueError(
                 f"F_left and F_right must be on the same device; "
@@ -111,10 +128,10 @@ class GraphSheaf:
                 "self-loops (u == v in edges) are not supported in v1; "
                 "drop them before constructing the GraphSheaf"
             )
-        # Duplicate (u, v) entries would silently double the
+        # Duplicate unordered endpoint pairs would silently double the
         # off-diagonal mass of the sheaf Laplacian, breaking the
         # "trivial sheaf → graph Laplacian" reduction. Reject them.
-        unique_edges = torch.unique(self.edges, dim=0)
+        unique_edges = torch.unique(self.edges.sort(dim=-1).values, dim=0)
         if unique_edges.shape[0] != self.edges.shape[0]:
             raise ValueError(
                 "duplicate edges are not supported in v1; "
@@ -145,7 +162,7 @@ class GraphSheaf:
         n_nodes: int,
         edges: torch.Tensor,
         stalk_dim: int = 1,
-        device: str | torch.device = "cpu",
+        device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float64,
     ) -> GraphSheaf:
         """Construct the *trivial* sheaf: identity restriction maps on
@@ -153,14 +170,29 @@ class GraphSheaf:
 
         With `stalk_dim = 1` this is the sheaf whose Laplacian equals
         the standard combinatorial graph Laplacian; with `stalk_dim
-        = d > 1` it's the block-diagonal `d × L` "d copies of the
-        scalar Laplacian" sheaf. Useful baseline + smoke test.
+        = d > 1` its node-major ordering gives `L ⊗ I_d`. This is
+        permutation-similar to a block diagonal matrix of `d` copies of L.
+
+        The default device is the device of `edges`; an explicit `device`
+        moves both indices and maps there.
+
+        References:
+          Hansen-Ghrist (2019), §3.1, constant sheaves and graph Laplacians.
         """
         if edges.ndim != 2 or edges.shape[-1] != 2:
             raise ValueError(
                 f"edges must be (n_edges, 2); got shape={tuple(edges.shape)}"
             )
+        if edges.dtype != torch.int64:
+            raise ValueError("edges must have dtype int64")
+        if not isinstance(stalk_dim, int) or isinstance(stalk_dim, bool):
+            raise ValueError("stalk_dim must be an integer")
+        if stalk_dim <= 0:
+            raise ValueError("stalk_dim must be > 0")
+        if not dtype.is_floating_point:
+            raise ValueError("restriction maps must have a real floating dtype")
         n_e = edges.shape[0]
+        device = edges.device if device is None else device
         eye = torch.eye(stalk_dim, dtype=dtype, device=device)
         F = eye.unsqueeze(dim=0).expand(n_e, stalk_dim, stalk_dim).contiguous()
         edges = edges.to(device=device, dtype=torch.int64)
@@ -217,6 +249,8 @@ class HeterogeneousGraphSheaf:
     F_right: tuple[torch.Tensor, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.n_nodes, int) or isinstance(self.n_nodes, bool):
+            raise ValueError("n_nodes must be an integer")
         if self.n_nodes <= 0:
             raise ValueError(f"n_nodes must be > 0; got {self.n_nodes}")
         if self.edges.ndim != 2 or self.edges.shape[-1] != 2:
@@ -234,6 +268,11 @@ class HeterogeneousGraphSheaf:
                 f"edge_stalk_dims must be (n_edges={n_e},); got "
                 f"shape={tuple(self.edge_stalk_dims.shape)}"
             )
+        for name, tensor in (("edges", self.edges),
+                             ("node_stalk_dims", self.node_stalk_dims),
+                             ("edge_stalk_dims", self.edge_stalk_dims)):
+            if tensor.dtype != torch.int64:
+                raise ValueError(f"{name} must have dtype int64")
         if (self.node_stalk_dims <= 0).any() or (self.edge_stalk_dims <= 0).any():
             raise ValueError("all stalk dims must be > 0")
         if len(self.F_left) != n_e or len(self.F_right) != n_e:
@@ -249,7 +288,7 @@ class HeterogeneousGraphSheaf:
             raise ValueError(
                 "self-loops (u == v in edges) are not supported; drop them first"
             )
-        if torch.unique(self.edges, dim=0).shape[0] != n_e:
+        if torch.unique(self.edges.sort(dim=-1).values, dim=0).shape[0] != n_e:
             raise ValueError("duplicate edges are not supported")
         # Per-edge restriction-map shapes must match the incident stalk dims.
         node_dims = self.node_stalk_dims.tolist()
@@ -272,6 +311,8 @@ class HeterogeneousGraphSheaf:
         if n_e > 0:
             dev, dt = self.F_left[0].device, self.F_left[0].dtype
             for t in (*self.F_left, *self.F_right):
+                if not t.is_floating_point():
+                    raise ValueError("restriction maps must have a real floating dtype")
                 if t.device != dev or t.dtype != dt:
                     raise ValueError(
                         "all restriction maps must share device and dtype"

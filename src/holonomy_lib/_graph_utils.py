@@ -17,7 +17,7 @@ Conventions enforced here (see `CONVENTIONS.md`):
   including self-loops changes `d_i = Σ_j A[i, j]` and propagates into
   every downstream operation (normalizers, walk distributions, phase
   factors). Letting the caller decide silently produced
-  inconsistent semantics across primitives — different ops gave
+  inconsistent semantics across primitives; different ops gave
   different answers on the same input depending on whether they
   happened to cancel the diagonal.
 
@@ -32,7 +32,7 @@ import torch
 
 
 def drop_self_loops(A: torch.Tensor) -> torch.Tensor:
-    """Return a view of `A` with the diagonal zeroed.
+    """Return a tensor with the diagonal of `A` zeroed.
 
     Args:
       A: (..., n, n) adjacency-like tensor.
@@ -43,9 +43,12 @@ def drop_self_loops(A: torch.Tensor) -> torch.Tensor:
 
     Notes:
       Uses `torch.where` so the operation stays vectorized and is
-      compatible with `torch.vmap` / `torch.compile`. The eye tensor
-      is built with `A`'s dtype to avoid implicit dtype promotion.
+      compatible with `torch.vmap` / `torch.compile`. The boolean eye tensor
+      leaves the input value dtype unchanged.
+
+    References:
+      Chung (1997). Spectral Graph Theory. AMS, Chapter 1, simple graphs.
     """
     n = A.shape[-1]
-    eye = torch.eye(n, device=A.device, dtype=A.dtype).expand_as(A)
-    return torch.where(eye > 0, torch.zeros_like(A), A)
+    eye = torch.eye(n, device=A.device, dtype=torch.bool).expand_as(A)
+    return torch.where(eye, torch.zeros_like(A), A)

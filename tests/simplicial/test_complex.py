@@ -4,7 +4,7 @@
 """Tests for the dense + sparse simplicial complexes and Vietoris-Rips.
 
 Layers:
-  1. Hand-built K_4 (tetrahedron) + K_5 (4-simplex) — verify
+  1. Hand-built K_4 (tetrahedron): verify
      chain-complex property `∂_{k-1} ∘ ∂_k = 0`.
   2. Round-trip dense↔sparse conversion.
   3. Vietoris-Rips on toy point clouds.
@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from holonomy_lib.simplicial import (
+    DenseSimplicialComplex,
     SparseSimplicialComplex,
     pairwise_distances,
     vietoris_rips_dense,
@@ -24,7 +25,7 @@ from holonomy_lib.simplicial import (
 )
 
 # --------------------------------------------------------------------
-# Hand-built complexes — tetrahedron (K_4)
+# Hand-built complexes : tetrahedron (K_4)
 # --------------------------------------------------------------------
 
 
@@ -48,7 +49,7 @@ def _tetrahedron_sparse() -> SparseSimplicialComplex:
 
 
 def _hollow_triangle_sparse() -> SparseSimplicialComplex:
-    """Boundary of triangle — vertices + 3 edges, no 2-simplex.
+    """Boundary of triangle : vertices + 3 edges, no 2-simplex.
 
     Should have β_0 = 1, β_1 = 1 (forms a single 1-cycle).
     """
@@ -71,48 +72,21 @@ class TestChainComplexProperty:
     """`∂_{k-1} ∘ ∂_k = 0` for any simplicial complex. Tested on the
     dense and sparse representations separately."""
 
-    def test_tetrahedron_dense_d0_compose_d1(self):
-        sc = _tetrahedron_sparse().to_dense()
-        d1 = sc.boundary(1)  # (1, n_0, n_1)
-        d0 = sc.boundary(0)  # (1, 0, n_0) — empty
-        prod = torch.matmul(d0, d1)  # (1, 0, n_1)
-        # Empty result; trivially zero.
-        assert prod.shape == (1, 0, 6)
 
-    def test_tetrahedron_dense_d1_compose_d2(self):
-        sc = _tetrahedron_sparse().to_dense()
-        d1 = sc.boundary(1)  # (1, 4, 6)
-        d2 = sc.boundary(2)  # (1, 6, 4)
-        prod = torch.matmul(d1, d2)  # (1, 4, 4)
-        torch.testing.assert_close(
-            prod, torch.zeros_like(prod), atol=1e-12, rtol=0,
+    @pytest.mark.parametrize("representation", ["dense", "sparse"])
+    @pytest.mark.parametrize("dimension", [2, 3])
+    def test_tetrahedron_dense_d1_compose_d2(self, representation, dimension):
+        sparse = _tetrahedron_sparse()
+        sc: SparseSimplicialComplex | DenseSimplicialComplex = (
+            sparse.to_dense() if representation == "dense" else sparse
         )
-
-    def test_tetrahedron_dense_d2_compose_d3(self):
-        sc = _tetrahedron_sparse().to_dense()
-        d2 = sc.boundary(2)  # (1, 6, 4)
-        d3 = sc.boundary(3)  # (1, 4, 1)
-        prod = torch.matmul(d2, d3)  # (1, 6, 1)
+        lower = sc.boundary(dimension - 1)
+        upper = sc.boundary(dimension)
+        if representation == "sparse":
+            lower, upper = lower.to_dense(), upper.to_dense()
+        product = lower @ upper
         torch.testing.assert_close(
-            prod, torch.zeros_like(prod), atol=1e-12, rtol=0,
-        )
-
-    def test_tetrahedron_sparse_d1_compose_d2(self):
-        sc = _tetrahedron_sparse()
-        d1 = sc.boundary(1).to_dense()  # (4, 6)
-        d2 = sc.boundary(2).to_dense()  # (6, 4)
-        prod = torch.matmul(d1, d2)
-        torch.testing.assert_close(
-            prod, torch.zeros_like(prod), atol=1e-12, rtol=0,
-        )
-
-    def test_tetrahedron_sparse_d2_compose_d3(self):
-        sc = _tetrahedron_sparse()
-        d2 = sc.boundary(2).to_dense()  # (6, 4)
-        d3 = sc.boundary(3).to_dense()  # (4, 1)
-        prod = torch.matmul(d2, d3)
-        torch.testing.assert_close(
-            prod, torch.zeros_like(prod), atol=1e-12, rtol=0,
+            product, torch.zeros_like(product), atol=1e-12, rtol=0,
         )
 
 
@@ -172,15 +146,14 @@ class TestVietorisRips:
         assert sc2.n_simplices(0) == 3
         assert sc2.n_simplices(1) == 3
         assert sc2.n_simplices(2) == 1
-
-    def test_no_edges_at_zero_radius(self):
-        pts = torch.tensor(
-            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=torch.float64,
+        # At zero radius, distinct points remain isolated vertices.
+        isolated = vietoris_rips_sparse(
+            pairwise_distances(torch.tensor(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=torch.float64,
+            )), max_radius=0.0, max_dim=2,
         )
-        d = pairwise_distances(pts)
-        sc = vietoris_rips_sparse(d, max_radius=0.0, max_dim=2)
-        assert sc.n_simplices(0) == 3
-        assert sc.n_simplices(1) == 0
+        assert [isolated.n_simplices(k) for k in range(3)] == [3, 0, 0]
+
 
     def test_batched_construction(self):
         # Two batch elements with different geometries.
@@ -195,6 +168,28 @@ class TestVietorisRips:
         assert sc.n_simplices(0).tolist() == [3, 3]
         assert sc.n_simplices(1).tolist() == [3, 0]
         assert sc.n_simplices(2).tolist() == [1, 0]
+        # The face join must use each member's own padded row positions.
+        torch.testing.assert_close(sc.boundary(1)[0], torch.tensor(
+            [[-1., -1., 0.], [1., 0., -1.], [0., 1., 1.]],
+            dtype=pts.dtype,
+        ), atol=0, rtol=0)
+        torch.testing.assert_close(sc.boundary(2)[0], torch.tensor(
+            [[1.], [-1.], [1.]], dtype=pts.dtype,
+        ), atol=0, rtol=0)
+        assert torch.count_nonzero(sc.boundary(1)[1]) == 0
+        assert torch.count_nonzero(sc.boundary(2)[1]) == 0
+        # Tile boundaries cannot change simplex order or batch membership.
+        tiled = vietoris_rips_dense(d, 1.5, 2, candidate_tile_size=1)
+        for dim in range(3):
+            torch.testing.assert_close(sc.simplices_by_dim[dim],
+                                       tiled.simplices_by_dim[dim])
+        empty = vietoris_rips_dense(d[:0], 1.5, 2)
+        assert empty.max_dim == 2
+        assert tuple(empty.simplices_by_dim[0].shape) == (0, 3, 1)
+        for dim in range(3):
+            assert empty.n_simplices(dim).shape == (0,)
+        assert empty.boundary(1).shape == (0, 3, 0)
+        assert empty.boundary(2).shape == (0, 0, 0)
 
     def test_pairwise_distances_shape(self):
         pts2d = torch.tensor([[0.0, 0.0], [3.0, 4.0]])
@@ -208,17 +203,15 @@ class TestVietorisRips:
 
 
 # --------------------------------------------------------------------
-# Cycle complex — sanity check that holes (no triangle) are preserved
+# Cycle complex : sanity check that holes (no triangle) are preserved
 # --------------------------------------------------------------------
 
 
 class TestHollowComplex:
     def test_hollow_triangle_d1_compose_d0_zero(self):
         """For the boundary-of-triangle complex, ∂_1 sends each edge to
-        ±v_1 ∓ v_0. The composition ∂_0 ∘ ∂_1 is trivially zero
-        (∂_0 is empty), but we also verify the rank of ∂_1: rows sum
-        to zero (each vertex appears in two edges with opposite
-        sign)."""
+        v_1 - v_0. Each column therefore sums to zero: the two
+        endpoints have opposite incidence signs."""
         sc = _hollow_triangle_sparse()
         d1 = sc.boundary(1).to_dense()
         # Column sums (per edge) are zero.
@@ -235,7 +228,7 @@ class TestHollowComplex:
 
 
 try:
-    import gudhi  # noqa: F401
+    import gudhi  # type: ignore[import-not-found]  # noqa: F401
     _HAVE_GUDHI = True
 except ImportError:
     _HAVE_GUDHI = False

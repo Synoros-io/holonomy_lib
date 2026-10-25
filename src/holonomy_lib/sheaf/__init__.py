@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""holonomy_lib.sheaf — cellular sheaves and sheaf Laplacians on graphs.
+"""holonomy_lib.sheaf; cellular sheaves and sheaf Laplacians on graphs.
 
 A **cellular sheaf** on a graph attaches a finite-dimensional vector
 space (a "stalk") `F(σ)` to each simplex σ (node or edge) and a linear
@@ -18,21 +18,24 @@ When all stalks have dimension 1 and every restriction map is the
 identity (i.e., the *trivial sheaf*), `L_F` reduces to the standard
 combinatorial graph Laplacian. With higher-dimensional stalks and
 non-trivial restriction maps it captures structure that a scalar
-Laplacian cannot — orientation sheaves, signed cellular sheaves,
+Laplacian cannot; orientation sheaves, signed cellular sheaves,
 connection Laplacians, and the spectral domain that drives Neural
 Sheaf Diffusion (Bodnar et al. 2022).
 
 Currently exposed:
-  GraphSheaf                  — dataclass holding edges + stalks + maps
-  HeterogeneousGraphSheaf     — per-node (heterogeneous) stalk dimensions
-  sheaf_coboundary(sheaf)     — δ as a (n_e·d_e, n_v·d_v) tensor
-  sheaf_laplacian(sheaf)      — L_F = δ^T δ, (n_v·d_v, n_v·d_v), PSD
+  GraphSheaf                 ; dataclass holding edges + stalks + maps
+  HeterogeneousGraphSheaf    ; per-node (heterogeneous) stalk dimensions
+  sheaf_coboundary(sheaf)    ; δ as a (n_e·d_e, n_v·d_v) tensor
+  sheaf_laplacian(sheaf)     ; L_F = δ^T δ, (n_v·d_v, n_v·d_v), PSD
+  sheaf_coboundary_sparse(sheaf); sparse COO coboundary
+  sheaf_laplacian_sparse(sheaf); sparse COO Laplacian
+  sheaf_bottom_spectrum(sheaf, k); bottom-k spectrum with optional kernel removal
   sheaf_dirichlet_energy(sheaf, x)
-                              — `x^T L_F x`, batched-first
+                             ; `x^T L_F x`, batched-first
 
-Restricted to **node-edge sheaves on graphs** in v1; higher-dimensional
+Restricted to **node-edge sheaves on graphs**. Higher-dimensional
 cellular sheaves on simplicial complexes (with 2-cells / faces and
-the corresponding ∂_1 ∘ ∂_2 = 0 chain identity) is planned.
+the corresponding ∂_1 ∘ ∂_2 = 0 chain identity) are not implemented.
 
 References:
   Hansen, J., Ghrist, R. (2019). Toward a spectral theory of cellular
