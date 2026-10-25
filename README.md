@@ -9,7 +9,7 @@ Python 3.12 or later. Install PyTorch for your hardware first, using the
 [PyTorch selector](https://pytorch.org/get-started/locally/), then:
 
 ```bash
-pip install git+https://github.com/Synoros-io/holonomy_lib
+pip install holonomy-lib
 ```
 
 ## Example
@@ -34,7 +34,7 @@ print(R[:, 0, 2])     # tensor([2.0000, 0.6667], dtype=torch.float64)
 
 ## What's in it
 
-[CONTENTS.md](CONTENTS.md) lists every function with its signature and the
+[CONTENTS.md](https://github.com/Synoros-io/holonomy_lib/blob/master/CONTENTS.md) lists every function with its signature and the
 paper it implements.
 
 | Subpackage | Contents |
@@ -60,7 +60,7 @@ and diffusion on graphs, geodesics as curvature passes through zero,
 persistent homology of point clouds, and batch-size timings on your hardware.
 Options: `--device`, `--dtype`, `--port`, `--no-browser`.
 
-![The explorer's graph view](docs/explorer.png)
+![The explorer's graph view](https://raw.githubusercontent.com/Synoros-io/holonomy_lib/master/docs/explorer.png)
 
 ## Experimental
 
@@ -94,8 +94,8 @@ python -m mypy src/
 python tools/audit.py src/holonomy_lib --strict
 ```
 
-[CONVENTIONS.md](CONVENTIONS.md) has the coding and numerical rules;
-[CHANGELOG.md](CHANGELOG.md) has the release history.
+[CONVENTIONS.md](https://github.com/Synoros-io/holonomy_lib/blob/master/CONVENTIONS.md) has the coding and numerical rules;
+[CHANGELOG.md](https://github.com/Synoros-io/holonomy_lib/blob/master/CHANGELOG.md) has the release history.
 
 ## Citation
 
@@ -113,7 +113,7 @@ Please also cite the papers named in the docstrings of the functions you use.
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE.md). You can use and modify it freely; competing
+[FSL-1.1-ALv2](https://github.com/Synoros-io/holonomy_lib/blob/master/LICENSE.md). You can use and modify it freely; competing
 commercial use is reserved to Synoros. Each release becomes Apache-2.0 two
 years after it ships. Releases up to 0.7.0 remain AGPL-3.0-or-later. For other
 terms, contact [contact@synoros.io](mailto:contact@synoros.io).
