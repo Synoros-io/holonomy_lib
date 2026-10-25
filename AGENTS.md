@@ -82,7 +82,7 @@ comes from the installed PyTorch build, not the Python version alone. Check
 
 - install / sync deps: `uv sync --extra dev`
 - test: `python -m pytest -q`
-- audit: `python tools/audit.py src/ --strict`
+- audit: `python tools/audit.py src/holonomy_lib --strict`
 - lint: `python -m ruff check src/ tests/`
 - types: `python -m mypy src/`
 - explorer: `holonomy-explorer` or `python -m holonomy_explorer`

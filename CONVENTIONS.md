@@ -2,7 +2,7 @@
 
 These are the binding rules every primitive in this library follows.
 They're enforced by:
-- the audit tool (`python tools/audit.py src/ --strict`) for the
+- the audit tool (`python tools/audit.py src/holonomy_lib --strict`) for the
   numerical-constant rules,
 - the test suite for the API-shape rules,
 - and code review for the rest.
@@ -239,7 +239,10 @@ Every numerical literal in source code must fall into one of:
      distribution changes substantially),
    - the file path where it's used.
 
-Run `python tools/audit.py src/ --strict`. It scans Python AST numeric
+Run `python tools/audit.py src/holonomy_lib --strict`. The catalog covers the
+library's mathematical constants; the explorer's interface constants (ports,
+size caps, layout) are named with a comment in `src/holonomy_explorer` and are
+not cataloged. The audit scans Python AST numeric
 literals, accepts allowlisted values and cataloged assignment names, and
 fails on undocumented literals or missing, unreadable, or unparseable input.
 It is a heuristic, not a proof: it cannot establish mathematical derivations,

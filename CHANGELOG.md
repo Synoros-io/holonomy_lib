@@ -139,6 +139,20 @@ Additional corrections and checks from the implementation reviews:
 - LSQR substitutes safe Givens inputs for finished batch members, so gradients
   are finite. Normalized Ricci flows guard only an exactly zero norm instead of
   clamping at an absolute `1e-9`, which distorted graphs at very small scale.
+- A batched dense A of batch size 1 with a lone `b` now keeps its batch axis in
+  `regularized_lstsq`, `cg` and `lsqr`; the output shape no longer depends on
+  the batch size. A CG member that breaks down (`pAp <= 0`) keeps its last good
+  iterate instead of taking the untrusted step, and still warns.
+- Dense `lanczos_eigsh` warns on asymmetry with the same per-member
+  `n · eps · max|A|` tolerance as the sparse path, instead of `allclose`
+  defaults; `oversample` and `n_iter` reject booleans.
+- `random_so3` accepts an index-less CUDA generator for `device="cuda:0"`.
+  `fisher_information_categorical` stays finite in float16 at `p = 0`.
+  `hyperbolic_heat_kernel` raises for curvature `k >= 0` instead of silently
+  returning the hyperbolic answer for `|k|`.
+- Comments and docstrings across the library were checked against the code;
+  stale descriptions of earlier algorithms, signatures and catalog names were
+  corrected.
 
 - **B01/B02/B18/B24:** metric-aware gradients repair SPD optimization.
   Daleckii–Krein derivatives handle repeated SPD eigenvalues; fixed-rank

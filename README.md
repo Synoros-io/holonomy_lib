@@ -144,7 +144,7 @@ uv sync --extra dev
 python -m pytest -q
 python -m ruff check src/ tests/
 python -m mypy src/
-python tools/audit.py src/ --strict
+python tools/audit.py src/holonomy_lib --strict
 ```
 
 Run these commands in the synced environment. See [CONVENTIONS.md](CONVENTIONS.md)
