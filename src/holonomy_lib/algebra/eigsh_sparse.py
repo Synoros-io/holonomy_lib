@@ -3,11 +3,12 @@
 
 """Smallest-algebraic eigenpairs of sparse real symmetric matrices.
 
-CPU inputs use SciPy shift-invert eigsh or preconditioned LOBPCG; other
-devices use torch.lobpcg. The SciPy boundary explicitly computes in CPU
-float64 and casts the result back. All backends are nondifferentiable.
-A Gershgorin lower bound puts every shift-invert pole below the spectrum,
-including for indefinite inputs. Full/near-full requests use dense eigh.
+By default, CPU inputs use SciPy shift-invert eigsh or preconditioned LOBPCG,
+and other devices use torch.lobpcg. The SciPy boundary computes in CPU float64
+and casts the result back. All backends are nondifferentiable. A Gershgorin
+lower bound places the default shift-invert pole below the spectrum, including
+for indefinite inputs. Full requests, and LOBPCG requests with n < 3k, use
+dense eigh.
 
 References:
   Ericsson, T., Ruhe, A. (1980). The spectral transformation Lanczos
@@ -40,8 +41,9 @@ SPILU_FILL_FACTOR: int = 10
 LOBPCG_TOL: float = 1e-6
 LOBPCG_MAXITER: int = 100
 
-# LOBPCG uses current vectors, residuals and previous search directions.
-# torch.lobpcg requires n >= 3*k for this three-block Ritz subspace.
+# LOBPCG works in a Ritz subspace built from three blocks: the current
+# vectors, their residuals, and the previous search directions. That subspace
+# has up to 3k columns, so it needs n >= 3k. Smaller problems go to dense eigh.
 LOBPCG_SUBSPACE_BLOCKS: int = len(("iterate", "residual", "search_direction"))
 
 _SPARSE_LAYOUTS = (torch.sparse_coo, torch.sparse_csr, torch.sparse_csc)
@@ -61,8 +63,9 @@ def eigsh_sparse_sa(
       A: real sparse ``(n, n)`` COO/CSR/CSC. Asymmetry emits a warning.
         Grad-requiring inputs raise an error; detach explicitly to use
         this nondifferentiable solver.
-      k: number of eigenpairs, ``1 <= k <= n``. Full/near-full requests
-        use dense eigh because iterative backend subspaces do not fit.
+      k: number of eigenpairs, ``1 <= k <= n``. Full requests, and LOBPCG
+        requests with n < 3k, use dense eigh because the iterative subspace
+        does not fit.
       sigma: optional eigsh pole, strictly below the Gershgorin lower
         bound. The default is that bound minus a dtype-scaled margin.
         LOBPCG does not use a pole; explicit sigma is rejected there.
@@ -107,9 +110,14 @@ def eigsh_sparse_sa(
     from holonomy_lib.algebra.lanczos import _warn_asymmetric
 
     _warn_asymmetric(A)
+    # Coalesce first so duplicate entries are summed before the Gershgorin sums
+    # below read the values. A nonfinite entry would poison the bounds and the
+    # SciPy conversion, so it is rejected here.
     coo = A.to_sparse_coo().coalesce()
     if not torch.isfinite(coo.values()).all():
         raise ValueError("A must have finite entries")
+    # Auto: non-CPU devices take torch.lobpcg. On CPU, eigsh's sparse LU is used
+    # up to SPARSE_SA_ITER_SOLVER_N, past which its fill-in grows too fast.
     if solver == "auto":
         if A.device.type != "cpu":
             solver = "torch_lobpcg"
@@ -120,6 +128,10 @@ def eigsh_sparse_sa(
     if sigma is not None and solver != "eigsh":
         raise ValueError("sigma is only used by the eigsh backend")
 
+    # Gershgorin discs: row i is centered on its diagonal entry, with radius
+    # equal to the sum of its off-diagonal magnitudes. Every eigenvalue lies in
+    # some disc, so the leftmost disc edge, `lower`, bounds the spectrum from
+    # below. `scale` is the largest |center| + radius and sizes the margins.
     row, column = coo.indices()
     entries = coo.values()
     diagonal = entries.new_zeros(n).scatter_add(0, row, entries * (row == column))
@@ -128,10 +140,13 @@ def eigsh_sparse_sa(
     scale = (diagonal.abs() + radius).amax()
     if sigma is not None and not bool(sigma < lower):
         raise ValueError("sigma must be strictly below the Gershgorin lower bound")
-    # Zero operators have an arbitrary orthonormal eigenspace and need
-    # neither an iterative solve nor a singular sparse factorization.
+    # With scale zero the default pole lands exactly on the zero spectrum, so
+    # shift-invert would factor a singular matrix. Every vector is an
+    # eigenvector of the zero operator, so the first k identity columns work.
     if not bool(scale):
         return entries.new_zeros(k), torch.eye(n, k, dtype=A.dtype, device=A.device)
+    # Dense eigh when there is no room for an iterative subspace: k == n, or
+    # LOBPCG with n below its 3k requirement.
     if k == n or (solver != "eigsh" and n < LOBPCG_SUBSPACE_BLOCKS * k):
         values, vectors = torch.linalg.eigh(A.to_dense())
         return values[:k], vectors[:, :k]
@@ -146,6 +161,8 @@ def eigsh_sparse_sa(
             tol=LOBPCG_TOL,
             niter=LOBPCG_MAXITER,
         )
+        # torch.lobpcg does not promise an order, so sort to return ascending
+        # values like the other backends.
         order = values.argsort()
         return values[order], vectors[:, order]
 
@@ -153,6 +170,8 @@ def eigsh_sparse_sa(
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
 
+    # SciPy works in host float64. The COO data is copied out here, and the
+    # results are cast back to A's device and dtype on return.
     indices_np = coo.indices().cpu().numpy()
     A_sp = sp.coo_matrix(
         (entries.to(torch.float64).cpu().numpy(), (indices_np[0], indices_np[1])),
@@ -168,6 +187,7 @@ def eigsh_sparse_sa(
             )
         else:
             pole = sigma
+        # ARPACK's random start, drawn on A's device and moved to host float64.
         initial_vector = (
             torch.randn(
                 n,
@@ -179,6 +199,9 @@ def eigsh_sparse_sa(
             .cpu()
             .numpy()
         )
+        # Shift-invert with the pole below the spectrum. ARPACK's largest inverse
+        # eigenvalues are the eigenvalues of A nearest the pole. Every eigenvalue
+        # is above the pole, so those are the k smallest.
         values_np, vectors_np = spla.eigsh(
             A_sp,
             k=k,
@@ -187,14 +210,16 @@ def eigsh_sparse_sa(
             v0=initial_vector,
         )
     else:
-        # Shift below a proven lower bound, so the preconditioner's
-        # target is positive definite even when A itself is indefinite.
+        # Shift below the Gershgorin bound. The matrix being factored, A - shift I,
+        # is then positive definite even when A is indefinite, and LOBPCG's
+        # preconditioner is its incomplete LU.
         shift = float(lower - SPILU_EPS_FRAC * scale)
         ilu = spla.spilu(
             (A_sp - shift * sp.identity(n, format="csc")).tocsc(),
             drop_tol=SPILU_DROP_TOL,
             fill_factor=SPILU_FILL_FACTOR,
         )
+        # The preconditioner applies the ILU solve, which approximates (A - shift I)^-1.
         preconditioner = spla.LinearOperator((n, n), matvec=ilu.solve)
         initial_block = (
             torch.randn(
@@ -216,6 +241,7 @@ def eigsh_sparse_sa(
             tol=LOBPCG_TOL,
             maxiter=LOBPCG_MAXITER,
         )
+    # The backends don't promise an order, so sort ascending before returning.
     order_np = np.argsort(values_np)
     return (
         torch.from_numpy(values_np[order_np].copy()).to(device=A.device, dtype=A.dtype),

@@ -6,10 +6,11 @@
 The two workhorse iterative solvers for the library's linear systems:
 
   - `cg`: symmetric positive-definite `A x = b` (Hestenes-Stiefel 1952).
-    Batched-first over dense operators, single-instance over sparse,
-    and operator-form via a callable matvec; the same operator can be
-    "A is never materialized" (e.g. normal equations `AᵀA + λI` applied
-    as two matvecs, or a sheaf Laplacian applied as `δᵀ(δx)`).
+    Dense operators may be batched, `(B, n, n)`. A sparse operator is one
+    `(n, n)` matrix shared by the whole right-hand-side batch. A callable
+    matvec covers operators that are never materialized, such as normal
+    equations `AᵀA + λI` applied as two matvecs, or a sheaf Laplacian applied
+    as `δᵀ(δx)`.
   - `lsqr`: least squares `min ‖Ax − b‖` for rectangular `A`, with
     optional Tikhonov damping `min ‖Ax − b‖² + damp²·‖x‖²`
     (Paige-Saunders 1982, via Golub-Kahan bidiagonalization). More
@@ -83,6 +84,8 @@ def _sym_matvec(A: Operator) -> Callable[[torch.Tensor], torch.Tensor]:
             raise ValueError(
                 f"sparse A must be (n, n); got A.shape={tuple(A.shape)}"
             )
+        # CSC is converted to CSR once, up front, so the matvec below does not
+        # repeat the conversion on every call.
         A_coo = (
             A if A.layout != torch.sparse_csc else A.to_sparse_csr()
         )
@@ -107,8 +110,12 @@ def _normalize_rhs(b: torch.Tensor) -> tuple[torch.Tensor, bool]:
 
 def _safe_norm(v: torch.Tensor) -> torch.Tensor:
     """Euclidean norm without unscaled squares; empty vectors have norm zero."""
+    # amax has no value on an empty dimension, so the empty case is handled first.
     if v.shape[-1] == 0:
         return v.new_zeros(v.shape[:-1])
+    # Divide by the largest magnitude before squaring, so the squares stay in
+    # range and a vector with huge entries does not overflow to inf. A zero
+    # vector divides by 1 instead of 0, and its norm is 0 either way.
     scale = v.abs().amax(dim=-1)
     denominator = torch.where(scale > 0, scale, torch.ones_like(scale))
     return scale * torch.linalg.vector_norm(v / denominator.unsqueeze(-1), dim=-1)
@@ -123,13 +130,22 @@ def _rhs_scale(b: torch.Tensor) -> torch.Tensor:
 def _scale_matrix(
     A: torch.Tensor, damp: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Scale an operator and its damping together without densifying sparse inputs."""
+    """Divide `A` by its largest magnitude, floored at `damp`. Sparse stays sparse.
+
+    Input: dense `(..., n, n)` or sparse 2-D `A`; `damp >= 0`.
+    Output: `(scaled A, scale)`. The caller divides its own damping by `scale`.
+    The floor makes `damp / scale` at most 1 after scaling.
+    """
     if A.layout in _SPARSE_LAYOUTS:
         coo = A.to_sparse_coo().coalesce()
         values = coo.values()
+        # amax fails on an empty value tensor, so an all-zero matrix gets scale 0.
         scale = values.abs().amax() if values.numel() else values.new_zeros(())
         scale = scale.clamp(min=damp)
+        # A zero scale (zero matrix, damp 0) becomes 1, so the division is a no-op.
         scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+        # Only the stored values are scaled. The indices come from a coalesced
+        # tensor, so the invariant check can be skipped.
         scaled = torch.sparse_coo_tensor(
             coo.indices(), values / scale, coo.shape, device=A.device, dtype=A.dtype,
             check_invariants=False,
@@ -153,9 +169,10 @@ def cg(
     """Conjugate gradient solve of symmetric positive-definite `A x = b`.
 
     Math: minimizes the quadratic `½ xᵀAx − bᵀx` over expanding Krylov
-    subspaces; in exact arithmetic terminates in at most `n` steps, in
-    floating point converges at rate `((√κ − 1)/(√κ + 1))^k` with
-    `κ = cond(A)` (Saad 2003, §6.11).
+    subspaces. In exact arithmetic it terminates in at most `n` steps. In
+    floating point the A-norm of the error falls off like
+    `((√κ − 1)/(√κ + 1))^k` up to a constant factor, with `κ = cond(A)`
+    (Saad 2003, §6.11).
 
     Args:
       A: the operator. One of: dense `(n, n)` or `(B, n, n)` tensor;
@@ -199,11 +216,16 @@ def cg(
         maxiter = n
     if rtol < 0 or atol < 0 or maxiter < 0:
         raise ValueError("rtol, atol and maxiter must be nonnegative")
+    # An empty batch or an empty system has nothing to solve. A copy of b
+    # already has the right shape.
     if B == 0 or n == 0:
         return b.clone()
 
     # Solve in relative units so large finite right-hand sides do not overflow
-    # when their entries are multiplied in the CG recurrence.
+    # in the CG recurrence. A dense or sparse matrix is scaled to max magnitude 1
+    # (Ã = A / a) and the rhs to unit scale (b̃ = b / s). Then x̃ = (a/s) x, so
+    # x = x̃ * solution_scale with solution_scale = s / a. A callable is not
+    # scaled, which is the same as a = 1.
     bscale = _rhs_scale(b2)
     solution_scale = bscale
     if isinstance(A, torch.Tensor):
@@ -225,21 +247,31 @@ def cg(
     z = _precondition(r)
     p = z.clone()
     rz = (r * z).sum(dim=-1)
+    # Stopping target in scaled units. The test ||r|| <= max(rtol ||b||, atol)
+    # becomes the same test on r / s, with ||b̃|| = ||b|| / s.
     target = torch.maximum(_safe_norm(rhs) * rtol, atol / bscale)
     finite = torch.isfinite(x).all(dim=-1) & torch.isfinite(r).all(dim=-1)
     done = finite & (_safe_norm(r) <= target)
     failed = ~finite
     n_done = 0
     for it in range(1, maxiter + 1):
+        # Members that are done or failed are frozen. Their alpha is zeroed below,
+        # and their search direction is set to zero at the end of the step.
         active = ~(done | failed)
         Ap = matvec(p)
         pAp = (p * Ap).sum(dim=-1)
+        # Keep the division safe for frozen members and for pAp == 0. A zero pAp
+        # is a breakdown, and it is marked failed below.
         denominator = torch.where(active & (pAp != 0), pAp, torch.ones_like(pAp))
         alpha = torch.where(active, rz / denominator, torch.zeros_like(rz))
         candidate = x + alpha.unsqueeze(-1) * p
         r_new = r - alpha.unsqueeze(-1) * Ap
         finite = (torch.isfinite(candidate).all(dim=-1)
                   & torch.isfinite(r_new).all(dim=-1) & torch.isfinite(pAp))
+        # pAp <= 0 means A is not positive definite along p, or roundoff has
+        # gotten there first, so CG cannot continue for this member. The x update
+        # below still runs for it, so the returned iterate includes that bad step.
+        # The warning covers this case.
         failed = failed | (active & (~finite | (pAp <= 0)))
         x = torch.where(active.unsqueeze(-1), candidate, x)
         r = torch.where(active.unsqueeze(-1), r_new, r)
@@ -252,10 +284,14 @@ def cg(
                         z + beta.unsqueeze(-1) * p, torch.zeros_like(p))
         rz = rz_new
         n_done = it
+        # The all-done check forces a host sync, so it runs every sync_every steps
+        # and on the last step.
         if it % sync_every == 0 or it == maxiter:
             if bool((done | failed).all()):
                 break
 
+    # Undo the scaling. A result that is nonfinite after unscaling counts as
+    # failed, even when the scaled iterate was finite.
     result = x * solution_scale.unsqueeze(-1)
     finite_result = torch.isfinite(result).all(dim=-1)
     failed = failed | ~finite_result
@@ -333,7 +369,8 @@ def lsqr(
     condition-limit test):
       1. compatible systems: `‖r‖ ≤ btol·‖b‖ + atol·‖A‖·‖x‖`
       2. least-squares:      `‖Aᵀr‖ ≤ atol·‖A‖·‖r‖`
-    with `‖A‖` the running Frobenius estimate from the bidiagonalization.
+    with `‖A‖` the running Frobenius estimate from the bidiagonalization,
+    damping term included.
 
     Args:
       A: dense `(m, n)` / `(B, m, n)`, or sparse 2-D `(m, n)` (applied
@@ -391,6 +428,9 @@ def lsqr(
     matvec, rmatvec, _, _ = _lsqr_matvecs(scaled_A)
     bscale = _rhs_scale(b2)
     rhs = b2 / bscale.unsqueeze(-1)
+    # The damping is in A's units, so it is divided by the same scale as A. The
+    # solution is multiplied back by s / a at the end, which leaves the ridge
+    # problem unchanged.
     damping = damp / ascale
 
     def _safe_normalize(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -402,13 +442,16 @@ def lsqr(
         return torch.where(t != 0, t, torch.ones_like(t))
 
     def _hypot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        # hypot(0, 0) has undefined derivatives even when a later mask
-        # discards its value. Supply a safe pair before calling it.
+        # At (0, 0), torch.hypot's backward is 0/0, and a torch.where mask does
+        # not stop that NaN from reaching the gradient. Feed hypot a safe pair
+        # there, then mask the output to zero.
         nonzero = (a != 0) | (b != 0)
         safe_a = torch.where(nonzero, a, torch.ones_like(a))
         safe_b = torch.where(nonzero, b, torch.zeros_like(b))
         return torch.where(nonzero, torch.hypot(safe_a, safe_b), 0.0)
 
+    # Start of Golub-Kahan: u1 = b / beta1 and v1 = Aᵀu1 / alpha1. Both
+    # normalizations are guarded, so a zero b or a zero Aᵀb leaves the vector at zero.
     u, beta = _safe_normalize(rhs)
     bnorm = beta.clone()
     v, alfa = _safe_normalize(rmatvec(u))
@@ -419,6 +462,8 @@ def lsqr(
     anorm = torch.zeros_like(beta)
     damped_residual = torch.zeros_like(beta)
     finite = torch.isfinite(beta) & torch.isfinite(alfa)
+    # beta = 0 means b = 0, and alfa = 0 means Aᵀb = 0. In either case x = 0 is
+    # already the least-squares answer, so those members are done before the loop.
     done = finite & ((beta == 0) | (alfa == 0))
     failed = ~finite
     n_done = 0
@@ -459,6 +504,9 @@ def lsqr(
                   & torch.isfinite(arnorm) & torch.isfinite(anorm)
                   & torch.isfinite(u).all(dim=-1) & torch.isfinite(v).all(dim=-1))
         failed = failed | (active & ~finite)
+        # Paige-Saunders tests 1 and 2 (see the docstring). Test 1 asks whether the
+        # residual is small for a compatible system. Test 2 asks whether Aᵀr is
+        # small next to the matrix and the residual. Passing either one is done.
         compatible = rnorm <= btol * bnorm + atol * anorm * _safe_norm(x)
         least_squares = arnorm <= atol * anorm * rnorm
         done = done | (active & finite & (compatible | least_squares))

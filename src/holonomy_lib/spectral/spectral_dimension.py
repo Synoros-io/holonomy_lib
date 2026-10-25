@@ -78,19 +78,25 @@ def spectral_dimension(
     if not torch.isfinite(eigenvalues).all():
         raise ValueError("eigenvalues must be finite")
 
+    # a lone (n,) spectrum gets a batch axis of 1 here and loses it at the
+    # end. The clamp removes tiny negative eigenvalues from the eigensolver,
+    # which would otherwise make exp(-t·λ) grow with t
     squeeze = eigenvalues.ndim == 1
     lam = (eigenvalues.unsqueeze(0) if squeeze else eigenvalues).clamp(min=0.0)
 
-    # least-squares slope of log p against log t, per batch element
+    # least-squares slope of log p against log t, per batch element. The
+    # slope is Σ (x - x̄)(y - ȳ) / Σ (x - x̄)², with x = log t shared by every
+    # batch element, so x is centered and its variance computed once
     log_t = torch.log(t)                                    # (T,)
     lt_centered = log_t - log_t.mean()                      # (T,)
     variance = lt_centered.square().sum()
+    # all t equal (repeated values) means there is no slope to fit
     if variance == 0:
         raise ValueError("t must have nonzero log-time variance")
     # Keep the sum in log space, since valid late times can underflow
     # every exp(-t * lambda) even though the fitted slope is finite.
     log_p = torch.logsumexp(-lam.unsqueeze(-2) * t.unsqueeze(-1), dim=-1)
-    log_p = log_p - math.log(lam.shape[-1])
+    log_p = log_p - math.log(lam.shape[-1])               # mean, not sum
     lp_centered = log_p - log_p.mean(dim=-1, keepdim=True)  # (B, T)
     slope = (lp_centered * lt_centered).sum(dim=-1) / variance
     d_s = -2.0 * slope

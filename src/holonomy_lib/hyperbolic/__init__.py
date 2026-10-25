@@ -7,7 +7,7 @@ The primitives in this module take a manifold (e.g.
 `LorentzManifold`) as an explicit dependency and operate on points
 embedded in that manifold. This is the layer where graph algorithms
 meet differential geometry: Fréchet (intrinsic) means,
-parallel-transport-based similarity,
+a manifold-aware inner product (log maps at the origin),
 and the manifold heat kernel.
 
 Manifold is passed in by dependency injection so primitives

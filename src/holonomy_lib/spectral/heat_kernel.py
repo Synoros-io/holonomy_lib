@@ -67,7 +67,7 @@ from holonomy_lib.spectral.laplacian import _warn_if_asymmetric
 # Laplacian (τ ≤ 5). Larger t calls for K ≈ 2τ + 10 to stay tight; the
 # function accepts `K` as a parameter for that case. **Scale of validity**:
 # K should grow roughly linearly with `t · λ_max / 2`. Cataloged as
-# `heat_kernel_chebyshev_k_default`.
+# `CHEBYSHEV_ORDER_DEFAULT`.
 CHEBYSHEV_ORDER_DEFAULT: int = 30
 
 # Default upper bound on the Laplacian spectrum. The symmetric-normalized
@@ -76,7 +76,7 @@ CHEBYSHEV_ORDER_DEFAULT: int = 30
 # Laplacians (combinatorial, signed) the caller MUST pass `lambda_max`
 # matching their input. **Scale of validity**: this constant is the
 # canonical L_sym bound; not a tuned parameter. Cataloged as
-# `lambda_max_l_sym`.
+# `LAMBDA_MAX_L_SYM`.
 LAMBDA_MAX_L_SYM: float = 2.0
 
 
@@ -100,8 +100,9 @@ def heat_kernel_chebyshev(
         `K_t @ signal` directly using the same Chebyshev recurrence
         applied to vectors. Big memory + time savings when k ≪ n.
         If None, returns the dense `K_t = exp(−t · L)` of shape (B, n, n).
-      K: Chebyshev expansion order. Default 30. Increase to ~2 · t + 10
-        for very large t.
+      K: Chebyshev expansion order. Default 30. Increase to ~2τ + 10,
+        with τ = t · lambda_max / 2, for very large t (at the default
+        lambda_max = 2 that is ~2t + 10).
       lambda_max: upper bound on the spectrum of L. Default 2.0 (the
         L_sym bound). For other Laplacians, pass the actual upper bound
         (an over-estimate is safe but reduces accuracy; an under-
@@ -113,6 +114,7 @@ def heat_kernel_chebyshev(
     References:
       Hammond-Vandergheynst-Gribonval (2011), eq. 3.3.
 
+    Notes:
     The polynomial recurrence is sequential in K: each term depends on
     the two preceding terms. Batch members and signal columns are
     processed together. Coefficients use SciPy on CPU and one transfer
@@ -129,9 +131,9 @@ def heat_kernel_chebyshev(
             f"L must be (..., n, n); got L.shape={tuple(L.shape)}"
         )
     if signal is not None:
-        # `signal` is (..., n, k_signal); the check compares
-        # (..., n) against L's (..., n) — this covers both the leading
-        # batch dims and the node count in a single equality test.
+        # `signal` is (..., n, k_signal); the check compares its (..., n)
+        # against L's (..., n), which covers both the leading batch dims
+        # and the node count in a single equality test.
         if signal.shape[:-1] != L.shape[:-1]:
             raise ValueError(
                 f"signal's batch + node dims {tuple(signal.shape[:-1])} must "
@@ -140,17 +142,20 @@ def heat_kernel_chebyshev(
 
     _warn_if_asymmetric(L)
     n = L.shape[-1]
-    # Rescale L to L̃ with spectrum in [-1, 1] for the Chebyshev domain.
+    # Chebyshev polynomials only behave on [-1, 1], so map [0, λ_max] onto
+    # it. The shift by I moves to the coefficients as the exp(-τ) factor
+    # that ive() already carries
     eye = torch.eye(n, device=L.device, dtype=L.dtype).expand_as(L)
     L_scaled = (2.0 / lambda_max) * L - eye
     tau = t * lambda_max / 2.0
 
     # Chebyshev coefficients: c_k(τ) = (2 − δ_{k,0}) · (−1)^k · ive(k, τ).
     # ive(k, τ) = exp(−τ) · I_k(τ) is numerically stable for any τ.
-    # We compute the coeffs in float64 on CPU then move to L's device.
-    # `torch.from_numpy().to(device=...)` is robust across CPU/CUDA/ROCm;
-    # `torch.as_tensor(numpy, device='cuda')` historically raises on
-    # some backends because numpy is CPU-bound.
+    # The coeffs are computed in float64 on CPU (scipy is the only place a
+    # general-order scaled Bessel lives), then moved to L's device in one
+    # transfer. from_numpy builds the CPU tensor first and .to moves it,
+    # which works the same on CPU, CUDA and ROCm. The two where() masks
+    # are the (2 - δ_{k,0}) and (-1)^k factors
     coeffs_np = scipy.special.ive(np.arange(K + 1), tau)
     coeffs_np = coeffs_np * np.where(
         np.arange(K + 1) == 0, 1.0, 2.0
@@ -176,21 +181,22 @@ def _chebyshev_dense(
 ) -> torch.Tensor:
     """Build K_t = Σ c_k · T_k(L_scaled) as a dense (B, n, n) tensor.
 
-    Three-term recurrence: T_0 = I, T_1 = L̃, T_{k+1} = 2·L̃·T_k − T_{k−1}.
+    Takes the rescaled Laplacian `(B, n, n)`, the `K + 1` coefficients, and
+    a matching identity, returns the dense kernel. Three-term recurrence:
+    T_0 = I, T_1 = L̃, T_{k+1} = 2·L̃·T_k − T_{k−1}, so only two previous
+    terms are ever held, not all K.
     """
     K = coeffs.shape[0] - 1
     if K < 0:
-        # Degenerate: K = −1 makes no sense; K = 0 should fall through
-        # to the regular path. We're guarded against K < 0 in the
-        # public entry.
+        # an empty coefficient vector. The public entry rejects K < 0, so
+        # landing here means a caller inside the library skipped that check
         raise RuntimeError("internal: K < 0 reached _chebyshev_dense")
 
-    # k = 0 contribution
-    result = coeffs[0] * eye
+    result = coeffs[0] * eye                      # k = 0 term
     if K == 0:
         return result
 
-    # k = 1 contribution
+    # k = 1 term, then the recurrence takes over from k = 2
     T_prev = eye
     T_curr = L_scaled
     result = result + coeffs[1] * T_curr
@@ -208,7 +214,9 @@ def _chebyshev_apply_to_signal(
 ) -> torch.Tensor:
     """Compute K_t @ signal without building dense K_t.
 
-    Same recurrence but on the signal vectors: T_k(L̃) · v computed
+    Takes the rescaled Laplacian `(B, n, n)`, the signal `(B, n, k)`, and
+    the coefficients, returns `(B, n, k)`. Same recurrence but on the
+    signal vectors: T_k(L̃) · v computed
     one matmul at a time. Memory O(B · n · k) vs O(B · n²) for the
     dense form, and the per-iter matmul is O(B · n² · k) vs O(B · n³).
     """

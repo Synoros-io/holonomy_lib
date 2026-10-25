@@ -6,7 +6,8 @@
 The objective is the weighted sum of squared geodesic distances. On a
 Hadamard manifold it has a unique minimizer, but that fact alone does not
 make unit Karcher steps converge. This implementation controls each batch's
-step with backtracking on the objective.
+step with backtracking on the objective. Each batch member picks its own
+step size.
 
 References:
   Karcher, H. (1977). Riemannian center of mass and mollifier smoothing.
@@ -25,12 +26,15 @@ from typing import Any
 import torch
 from torch.autograd.function import once_differentiable
 
-# Retain the existing work budget; convergence is checked rather than assumed.
+# Iteration cap. The loop breaks early once every residual is at most tol, so
+# this only limits the case where some batch member never gets there.
 FRECHET_MAX_ITER_DEFAULT = 100
-# Match the host-check cadence in CONVENTIONS §4.1.
+# Convergence is checked on the host every this many iterations. Each check is
+# a .item() sync, which CONVENTIONS §4.1 allows for convergence checks.
 FRECHET_SYNC_EVERY_DEFAULT = 8
-# A bounded line search tries unit steps through 2**-15. If these fail,
-# the batch stays put and the final residual warning reports the failure.
+# Trial steps halve from the last accepted step, so 16 trials starting at 1
+# reach 2**-15. If none passes, that batch member stays put and the final
+# residual warning reports it.
 FRECHET_MAX_BACKTRACKS_DEFAULT = 16
 
 
@@ -60,8 +64,8 @@ def frechet_mean(
         iterations. At most `sync_every - 1` extra small updates occur
         after all residuals first meet the tolerance.
       max_backtracks: number of trial step sizes, starting at the last
-        accepted step and halving (initially one). A batch with no
-        acceptable trial stays at its current point.
+        accepted step and halving (initially one). A batch still above
+        `tol` with no acceptable trial stays where it is.
 
     Returns:
       `(B, ambient_dim)` mean estimate. `B=0` returns an empty tensor.
@@ -119,6 +123,7 @@ def frechet_mean(
     else:
         if not torch.isfinite(weights).all() or (weights < 0).any():
             raise ValueError("weights must be finite and non-negative")
+        # Match the points' device and dtype so the weighted sums do not mix types.
         weights = weights.to(device=points.device, dtype=points.dtype)
         total = weights.sum(dim=-1, keepdim=True)
         if not torch.isfinite(total).all() or (total <= 0).any():
@@ -130,6 +135,7 @@ def frechet_mean(
     if batch == 0:
         # Keep both differentiable inputs connected even for an empty batch.
         return (normalized_weights.unsqueeze(-1) * points).sum(dim=1)
+    # The implicit-gradient Function is only entered for nonempty batches.
     return _ImplicitFrechetMean.apply(
         points, normalized_weights, manifold, max_iter, tol,
         sync_every, max_backtracks,
@@ -142,10 +148,13 @@ def _frechet_mean_forward(
 ) -> torch.Tensor:
     """Karcher descent for validated inputs; called without an autograd graph."""
     batch, count, dimension = points.shape
+    # Descent starts at each batch member's first input point.
     mean = points[:, 0].clone()
+    # One flat (batch * count, dim) call per manifold op, so the work is vectorized.
     flat_points = points.reshape(batch * count, dimension)
 
     def average_log(base: torch.Tensor) -> torch.Tensor:
+        # Log map from each base to every point, then the weighted sum over N.
         expanded = base.unsqueeze(1).expand(batch, count, dimension)
         logarithms = manifold.log(
             expanded.reshape(batch * count, dimension), flat_points,
@@ -159,6 +168,7 @@ def _frechet_mean_forward(
         ).reshape(batch, count)
         return (normalized_weights * distances.square()).sum(dim=-1)
 
+    # Every batch member's first sweep starts at unit step.
     previous_step = points.new_ones(batch)
     for iteration in range(max_iter):
         tangent = average_log(mean)
@@ -167,12 +177,15 @@ def _frechet_mean_forward(
         active = residual > tol
         with torch.no_grad():
             cost = objective(mean)
-            # Keeping the accepted step avoids restarting at a large step
-            # when objective differences are below floating-point resolution.
+            # Start from the last accepted step instead of 1. Near the minimum
+            # the objective change is below rounding, so a restart at a large
+            # step would be judged on noise.
             step = previous_step
-            # Preserve the solver's small accepted updates until the next
-            # convergence check. Backward is independent of their count.
+            # Converged batches still move by their last step until the next
+            # host check. That move is at most tol, and backward only sees the
+            # final mean, so it does not change the gradient.
             accepted_step = torch.where(active, torch.zeros_like(step), step)
+            # Converged batches count as accepted, so the trial loop skips them.
             accepted = ~active
             # The derivative of the normalized squared-distance objective
             # along average_log is -2*residual**2. Armijo with coefficient
@@ -192,21 +205,27 @@ def _frechet_mean_forward(
                     trial_residual < residual,
                     trial_cost <= cost - decrease + rounding,
                 )
+                # Keep the first passing trial. Non-finite trial costs never pass.
                 take = ~accepted & torch.isfinite(trial_cost) & improved
                 accepted_step = torch.where(take, step, accepted_step)
                 accepted = accepted | take
                 step = step * 0.5
+        # Only active batches move their starting step. A rejected active batch
+        # has accepted_step 0, so it stays put and its starting step becomes 0.
         previous_step = torch.where(active, accepted_step, previous_step)
         mean = manifold.exp(mean, accepted_step.unsqueeze(-1) * tangent)
+        # The loop's one host sync: an early exit, checked every sync_every steps.
         if (iteration + 1) % sync_every == 0 and not active.any().item():
             break
 
+    # A non-finite or off-manifold mean fails loudly rather than being returned.
     if not torch.isfinite(mean).all():
         raise RuntimeError("frechet_mean produced non-finite output")
     if hasattr(manifold, "is_on_manifold") and not manifold.is_on_manifold(mean).all():
         raise RuntimeError("frechet_mean produced a point outside the manifold")
     with torch.no_grad():
         final_residual = manifold.norm(mean, average_log(mean)).max().item()
+    # NaN compares false with everything, so the isfinite test makes it a warning too.
     if not math.isfinite(final_residual) or final_residual > tol:
         warnings.warn(
             f"frechet_mean did not converge: residual {final_residual:.6g} "
@@ -217,11 +236,20 @@ def _frechet_mean_forward(
 
 
 def _tangent_frame(mean: torch.Tensor, manifold: Any) -> torch.Tensor:
-    """Return metric-orthonormal tangent columns, with the base held fixed."""
+    """Tangent frame at each mean, orthonormal under `manifold.inner`.
+
+    Input: `mean` `(B, ambient)` on the manifold. The manifold must expose
+      `dim`, `projection`, and `inner`. The base point is treated as a constant.
+    Output: `(B, ambient, dim)` columns, orthonormal under `manifold.inner`
+      at each mean.
+    Assumes the projected ambient axes span the tangent space, which has
+      dimension `manifold.dim`.
+    """
     batch, ambient = mean.shape
     dimension = manifold.dim
     axes = torch.eye(ambient, dtype=mean.dtype, device=mean.device)
     axes = axes.expand(batch, ambient, ambient)
+    # Full-dimensional manifold: every ambient axis is already a tangent direction.
     if dimension == ambient:
         frame = axes
     else:
@@ -234,6 +262,7 @@ def _tangent_frame(mean: torch.Tensor, manifold: Any) -> torch.Tensor:
         frame = torch.linalg.svd(projected, full_matrices=False).U[..., :dimension]
 
     rows = frame.mT
+    # Gram matrix G_ij = <f_i, f_j> at each mean, from one batched inner call.
     bases = mean[:, None, None, :].expand(batch, dimension, dimension, ambient)
     left = rows[:, :, None, :].expand_as(bases)
     right = rows[:, None, :, :].expand_as(bases)
@@ -241,6 +270,7 @@ def _tangent_frame(mean: torch.Tensor, manifold: Any) -> torch.Tensor:
         bases.reshape(-1, ambient), left.reshape(-1, ambient),
         right.reshape(-1, ambient),
     ).reshape(batch, dimension, dimension)
+    # G = L L^T, so applying L^{-1} to the frame gives metric-orthonormal vectors.
     factor = torch.linalg.cholesky(gram)
     return torch.linalg.solve_triangular(factor, rows, upper=False).mT
 
@@ -257,6 +287,7 @@ class _ImplicitFrechetMean(torch.autograd.Function):
             points, weights, manifold, max_iter, tol, sync_every, max_backtracks,
         )
         ctx.manifold = manifold
+        # Only the inputs and the converged mean are saved. The iterates are not needed.
         ctx.save_for_backward(points, weights, mean)
         return mean
 
@@ -265,6 +296,15 @@ class _ImplicitFrechetMean(torch.autograd.Function):
     def backward(
         ctx: Any, grad_mean: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None, None]:
+        """Gradients of the Fréchet mean with respect to points and weights.
+
+        Input: `grad_mean` `(B, ambient)`, the cotangent of the mean.
+        Output: `grad_points` `(B, N, ambient)` and `grad_weights` `(B, N)`.
+          A batch member with a singular or non-finite stationarity Jacobian
+          gets NaN in both.
+        Assumes `mean` is a converged Fréchet mean, since the implicit
+          equation holds only there. The manifold is treated as fixed.
+        """
         points, weights, mean = ctx.saved_tensors
         manifold = ctx.manifold
         mean = mean.detach()
@@ -275,24 +315,28 @@ class _ImplicitFrechetMean(torch.autograd.Function):
         with torch.enable_grad():
             points = points.detach().requires_grad_(True)
             weights = weights.detach().requires_grad_(True)
+            # Tangent coordinates at the mean. Zero coordinates give base = mean.
             coordinates = mean.new_zeros(batch, dimension, requires_grad=True)
             tangent = (frame @ coordinates.unsqueeze(-1)).squeeze(-1)
+            # F(c): the stationarity residual with the base at exp(mean, frame c).
             base = manifold.exp(mean, tangent)
             expanded = base[:, None, :].expand(batch, count, ambient)
             logarithms = manifold.log(
                 expanded.reshape(-1, ambient), points.reshape(-1, ambient),
             ).reshape(batch, count, ambient)
             average = (weights.unsqueeze(-1) * logarithms).sum(dim=1)
+            # Project the averaged log back onto the tangent space at the mean.
             projected = manifold.projection(mean, average)
             bases = mean[:, None, :].expand(batch, dimension, ambient)
             vectors = projected[:, None, :].expand_as(bases)
+            # Residual component along each frame vector, in the metric at the mean.
             stationarity = manifold.inner(
                 bases.reshape(-1, ambient), frame.mT.reshape(-1, ambient),
                 vectors.reshape(-1, ambient),
             ).reshape(batch, dimension)
 
-            # Summing one coordinate across the batch gives every member's
-            # Jacobian row together: manifold operations never mix members.
+            # Summing over the batch lets one backward pass give every member's
+            # Jacobian row, since no manifold operation mixes batch members.
             jacobian = torch.stack([
                 torch.autograd.grad(
                     stationarity[:, direction].sum(), coordinates,
@@ -300,9 +344,12 @@ class _ImplicitFrechetMean(torch.autograd.Function):
                 )[0]
                 for direction in range(dimension)
             ], dim=-2)
+            # base equals mean at c = 0, so this cotangent is frame^T grad_mean.
             cotangent = torch.autograd.grad(
                 base, coordinates, grad_mean, retain_graph=True,
             )[0]
+            # A non-finite Jacobian is zeroed so the SVD and solve stay finite.
+            # The member is flagged invalid below.
             finite = torch.isfinite(jacobian).all(dim=(-2, -1))
             safe_jacobian = torch.where(
                 finite[:, None, None], jacobian, torch.zeros_like(jacobian),
@@ -314,6 +361,8 @@ class _ImplicitFrechetMean(torch.autograd.Function):
                 dimension * torch.finfo(mean.dtype).eps * singular_values[:, 0]
             )
             nonsingular = finite & (singular_values[:, -1] > rank_tolerance)
+            # Singular members get the identity so solve_ex stays finite. Their
+            # multipliers are zeroed and their gradients become NaN below.
             identity = torch.eye(dimension, dtype=mean.dtype, device=mean.device)
             system = torch.where(
                 nonsingular[:, None, None], safe_jacobian.mT, identity,
@@ -321,9 +370,12 @@ class _ImplicitFrechetMean(torch.autograd.Function):
             multiplier, info = torch.linalg.solve_ex(system, cotangent)
             valid = nonsingular & (info == 0)
             multiplier = torch.where(valid[:, None], multiplier, 0.0)
+            # Implicit function theorem: dm/dtheta = -J^{-1} dF/dtheta, so the
+            # gradient is -multiplier . dF/dtheta with J^T multiplier = cotangent.
             grad_points, grad_weights = torch.autograd.grad(
                 stationarity, (points, weights), -multiplier,
             )
+        # NaN marks invalid members, so a bad solve is never returned as a gradient.
         grad_points = torch.where(valid[:, None, None], grad_points, float("nan"))
         grad_weights = torch.where(valid[:, None], grad_weights, float("nan"))
         return grad_points, grad_weights, None, None, None, None, None

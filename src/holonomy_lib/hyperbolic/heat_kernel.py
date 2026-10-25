@@ -41,26 +41,23 @@ import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
 
-# Dimensions with dedicated closed-form / quadrature routines. Above
-# these we fall back to the Grigor'yan–Noguchi recursion. Documented
-# in `notes/magic_numbers.md` (the values are mathematical ; 3 is the
-# lowest dim with a Davies–Mandouvalos closed form; 2 is the lowest
-# dim that needs the integral representation; both are fixed by the
-# geometry, not tuning choices).
+# Dimensions with dedicated closed-form or quadrature routines. Above
+# these we fall back to the Grigor'yan–Noguchi recursion. The values are
+# fixed by the geometry, not tuned: 3 is the lowest dimension with a
+# Davies–Mandouvalos closed form, and 2 is the lowest that needs the
+# integral representation. `notes/magic_numbers.md` records them.
 _N_GRIGORYAN_INTEGRAL: int = 2
 _N_DAVIES_MANDOUVALOS: int = 3
 
-# n = 5 has a clean polynomial closed form derived from the
-# operator chain (1/sinh r · ∂_r)² applied analytically; using it
-# directly is both faster AND more precise than the autograd-based
-# recursion path (which compounds float noise through two
-# `torch.autograd.grad` calls).
+# n = 5 has a polynomial closed form, obtained by applying the operator
+# chain (1/sinh r · ∂_r)² analytically. Using it directly skips the
+# autograd recursion, which adds float noise through two
+# `torch.autograd.grad` calls.
 _N_DAVIES_MANDOUVALOS_N5_CLOSED: int = 5
 
-# n = 7 has a clean polynomial closed form one operator-chain step
-# beyond n=5 (derived + verified in
-# notes/verification/heat_kernel_n7_sympy.py): same precision/speed
-# argument as n=5, and it seeds the odd-n recursion at n ≥ 9.
+# n = 7 has a polynomial closed form, one operator-chain step beyond n = 5
+# (derived and checked symbolically in notes/verification/heat_kernel_n7_sympy.py).
+# It is the same argument as n = 5, and it seeds the odd-n recursion at n >= 9.
 _N_OPERATOR_CHAIN_N7_CLOSED: int = 7
 
 # Default quadrature resolution, checked by node refinement and independent
@@ -75,7 +72,8 @@ HEAT_KERNEL_QUADRATURE_NODES: int = 32
 HEAT_KERNEL_QUADRATURE_TAIL_BUDGET: float = 20.0
 
 
-# The Gaussian normalization is (4 pi t)^(-n/2), not a fitted scale.
+# The 4 in the Gaussian normalization (4 pi t)^(-n/2) and in the exponent
+# d^2 / (4t). It is a geometric constant, not a fitted scale.
 _GAUSSIAN_TIME_SCALE = 2 * 2
 
 # Sixteen powers of r^2 retain terms through r^30. The switching radius
@@ -148,7 +146,7 @@ def _small_radius(n: int, d: torch.Tensor) -> torch.Tensor:
 
 
 def _heat_kernel_unit_n1(t: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
-    """Heat kernel on H^1 = R ; standard Gaussian.
+    """Heat kernel on H^1, which is R: the standard Gaussian.
 
         k^1_t(d) = (4πt)^{-1/2} · exp(-d²/4t)
 
@@ -163,6 +161,8 @@ def _heat_kernel_unit_n1(t: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
 
 def _csch_and_coth(r: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Hyperbolic reciprocals for positive r without sinh/cosh overflow."""
+    # Everything is written in e^(-r), so large r does not overflow. expm1
+    # keeps 1 - e^(-2r) accurate for small r.
     exp_minus_r = torch.exp(-r)
     denominator = -torch.expm1(-2 * r)
     return 2 * exp_minus_r / denominator, (1 + exp_minus_r.square()) / denominator
@@ -179,10 +179,13 @@ def _odd_closed_form(
     Grigor'yan-Noguchi (1998), equation (1.4), gives the coefficients.
     Factoring out powers of csch(r) avoids overflowing hyperbolic powers;
     the small-radius series avoids cancellation in the remaining bracket.
-    An overridden spectral decay combines dimension descent's exponent
-    before either factor can underflow or overflow on its own.
+    A spectral decay override goes into the same exponential as the Gaussian
+    term, so the two are evaluated together.
     """
     small = _small_radius(n, d)
+    # The closed form is 0/0 near r = 0, and torch.where still evaluates it.
+    # Those lanes get r = 1 so the discarded branch stays finite. The series
+    # below replaces them.
     r = torch.where(small, torch.ones_like(d), d)
     csch, coth = _csch_and_coth(r)
     if n == _N_DAVIES_MANDOUVALOS:
@@ -190,7 +193,7 @@ def _odd_closed_form(
     elif n == _N_DAVIES_MANDOUVALOS_N5_CLOSED:
         ratio = csch.square() * (r.square() + 2 * t * (r * coth - 1))
     else:
-        # Coefficients of the third radial operator, derived from (1.4).
+        # n = 7 bracket: the operator-chain step after n = 5, derived from (1.4).
         three = _N_DAVIES_MANDOUVALOS
         six = 2 * three
         eight = 2 * _GAUSSIAN_TIME_SCALE
@@ -201,8 +204,11 @@ def _odd_closed_form(
             + (eight * t.square() - six * t) * r
             + twelve * t.square() * (r * csch.square() - coth)
         )
+    # The series is in q = r^2. Outside the small band q is zero, and the
+    # series output there is discarded.
     q = torch.where(small, d.square(), torch.zeros_like(d))
     ratio = torch.where(small, _odd_radial_series(n, t, q), ratio)
+    # Default decay rho^2 with rho = (n-1)/2 is the bottom of the L^2 spectrum of H^n.
     decay = ((n - 1) / 2) ** 2 if spectral_decay is None else spectral_decay
     return (
         (_GAUSSIAN_TIME_SCALE * math.pi * t) ** (-n / 2)
@@ -258,11 +264,11 @@ def _heat_kernel_unit_n2(
     # The square-root endpoint substitution has a nonuniform radial
     # derivative at zero. Use the smooth descent integral there instead.
     d = torch.where(small, torch.ones_like(d), d)
-    # Gauss–Legendre nodes/weights come from the library-wide cache
-    # (`_quadrature.gauss_legendre_nodes`): computed once per n_quad,
-    # cast per call. `nodes ∈ (-1, 1)`; rescale to `(0, sqrt_S)` per
-    # element. The radial increment is `sqrt(4 * tail_budget * t)`; t may
-    # be batched, so we rescale per element after broadcasting.
+    # Gauss–Legendre nodes and weights come from the library-wide cache
+    # (`_quadrature.gauss_legendre_nodes`), computed once per n_quad and cast
+    # here. Nodes lie in (-1, 1). Since t may be batched, each element is
+    # rescaled to u in (0, sqrt_S), and s = r + u^2 then runs up to
+    # r + sqrt(4 * tail_budget * t).
     nodes, weights = gauss_legendre_nodes(
         n_quad,
         dtype=d.dtype,
@@ -272,8 +278,7 @@ def _heat_kernel_unit_n2(
     # Broadcast t and d to a common shape and add a quadrature-node axis.
     t_b, d_b = torch.broadcast_tensors(t, d)
     sqrt_S = (_GAUSSIAN_TIME_SCALE * tail_budget * t_b).sqrt().sqrt()  # (...,)
-    # Map nodes ∈ (-1, 1) → u ∈ (0, sqrt_S) ; half the standard linear
-    # change of variable for a non-zero lower endpoint:
+    # Affine map from nodes in (-1, 1) onto u in (0, sqrt_S):
     #   u = (sqrt_S / 2) · (node + 1)
     #   du = (sqrt_S / 2) · d(node)
     u = 0.5 * sqrt_S.unsqueeze(-1) * (nodes + 1.0)  # (..., n_quad)
@@ -299,12 +304,14 @@ def _heat_kernel_unit_n2(
     # Numerical integration: Σ weights · jacobian · integrand
     integral = (weights * jacobian * integrand).sum(dim=-1)
 
-    # exp(-t/4) factor ; write as t/(2·2) so both literals are ALLOWED.
+    # Prefactor of equation (1.7): sqrt(2) exp(-t/4) (4 pi t)^(-3/2).
     prefactor = math.sqrt(2.0) * torch.exp(-t_b / (2.0 * 2.0))
     prefactor = prefactor / (_GAUSSIAN_TIME_SCALE * math.pi * t_b) ** (
         _N_DAVIES_MANDOUVALOS / 2
     )
     regular = prefactor * integral
+    # The descent branch needs real radii only where small is true. Elsewhere it
+    # gets zero, which keeps it finite. The where below discards its output there.
     small_d = torch.where(small, original_d, torch.zeros_like(original_d))
     smooth = _even_descent(_N_GRIGORYAN_INTEGRAL, t, small_d, n_quad, tail_budget)
     return torch.where(small, smooth, regular)
@@ -340,13 +347,17 @@ def _even_descent(
     # s-r = u^2/(s+r) avoids subtraction when r dominates u.
     minus = u.square() / (2 * (s + r))
 
+    # log(sinh(x)/x) = x + log(1 - e^(-2x)) - log(2x). expm1 keeps the middle
+    # term accurate for small x, and nothing overflows for large x.
     def log_sinhc(x: torch.Tensor) -> torch.Tensor:
         return x + torch.log(-torch.expm1(-2 * x)) - torch.log(2 * x)
 
+    # This equals sinh(s)/s · u / (2 sqrt(sinh(plus) sinh(minus))), because
+    # plus · minus = u^2 / 4.
     weight = torch.exp(log_sinhc(s) - (log_sinhc(plus) + log_sinhc(minus)) / 2)
-    # Combine exp((2n-1)t/4) with the odd kernel's exp(-n^2 t/4).
-    # The resulting decay is (n-1)^2/4; evaluating separate exponentials
-    # would lose representable even kernels to intermediate underflow.
+    # The Abel prefactor exp((2n-1)t/4) and the odd kernel's exp(-n^2 t/4)
+    # combine into one exponential with decay (n-1)^2/4. Two separate ones
+    # could underflow where the even kernel is still representable.
     odd = _heat_kernel_unit(
         n + 1,
         t_b.unsqueeze(-1),
@@ -368,21 +379,20 @@ def _apply_one_recursion(
 ) -> torch.Tensor:
     """Apply one step of the Grigor'yan recursion.
 
-    The CORRECT recursion (derived from the operator chain on the
-    spectrally-shifted Gaussian; see also `notes/validation/
-    heat_kernel_results.md` for the validation history) is
+    The recursion, derived from the operator chain on the
+    spectrally-shifted Gaussian (validation results in
+    `notes/validation/heat_kernel_results.md`), is
 
         k^{n_prev + 2}(t, r) = -exp(-n_prev · t) / (2π · sinh r)
                                 · ∂_r k^{n_prev}(t, r).
 
-    The `exp(-n_prev · t)` factor is essential. Heat kernels on
+    The `exp(-n_prev · t)` factor is required. Heat kernels on
     `H^{n}` carry a spectral-bottom factor `exp(-((n-1)/2)²·t)`; going
     from `n_prev` to `n_prev+2` shifts the spectral bottom by
     `((n_prev+1)/2)² − ((n_prev-1)/2)² = n_prev`, so we multiply by
-    `exp(-n_prev · t)`. The earlier omission of this factor was
-    caught by the heat-equation-residual validation
-    (`notes/validation/heat_kernel_validation.py`); without it, the
-    residual was O(1) for n ≥ 5 instead of the float-noise floor.
+    `exp(-n_prev · t)`. The heat-equation-residual check in
+    `notes/validation/heat_kernel_validation.py` depends on it: without
+    the factor, the residual is O(1) for n ≥ 5 instead of float noise.
 
     Args:
       prev_kernel_fn: function `(t, d) -> k^{n_prev}(t, d)`.
@@ -394,24 +404,33 @@ def _apply_one_recursion(
     Returns:
       `k^{n_prev + 2}(t, d)`, heat kernel two dimensions higher.
     """
+    # Read the caller's grad mode before enable_grad() turns it on.
     keep_graph = torch.is_grad_enabled() and (t.requires_grad or d.requires_grad)
     with torch.enable_grad():
         # Differentiate each broadcast pair independently. Differentiating the
         # original scalar d instead would sum derivatives across the time batch.
         t_b, d_b = torch.broadcast_tensors(t, d)
+        # A fresh leaf when the caller gave no grad-tracked d. A d already in a
+        # graph is kept, so the outer graph survives.
         if not d_b.requires_grad:
             d_b = d_b.detach().requires_grad_(True)
         kn = prev_kernel_fn(t_b, d_b)
+        # kn.sum() is safe because each element depends only on its own d, so
+        # the gradient is elementwise.
         (dk_dd,) = torch.autograd.grad(kn.sum(), d_b, create_graph=True)
+        # At d = 0 the csch factor is singular. Those lanes take a finite
+        # placeholder and then get the limit below.
         nonzero = d_b != 0
         safe_d = torch.where(nonzero, d_b, torch.ones_like(d_b))
         csch, _ = _csch_and_coth(safe_d)
         radial_derivative = dk_dd * csch
-        # An even radial kernel has k'(r)/sinh(r) -> k''(0).
+        # At d = 0, k'(d)/sinh(d) tends to k''(0) by L'Hopital's rule.
         (d2k_dd2,) = torch.autograd.grad(dk_dd.sum(), d_b, create_graph=True)
         radial_derivative = torch.where(nonzero, radial_derivative, d2k_dd2)
         shift = torch.exp(-n_prev * t_b) if apply_spectral_shift else 1
         result = -shift * radial_derivative / (2 * math.pi)
+    # Detach unless the inputs needed a graph, so the recursion does not keep
+    # graphs nobody asked for.
     return result if keep_graph else result.detach()
 
 
@@ -443,6 +462,8 @@ def _heat_kernel_unit(
 
     # Equation (1.8) applies to both parities. Closure construction is
     # sequential in dimension; each evaluation stays fully batched.
+    # The recursion starts from the n = 7 closed form (odd n) or the n = 2
+    # integral (even n), then raises the dimension by two until it reaches n.
     current_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
     if n % 2 == 1:
         current_n = _N_OPERATOR_CHAIN_N7_CLOSED
@@ -469,6 +490,8 @@ def _heat_kernel_unit(
                 dimension,
                 _t,
                 _d,
+                # Odd targets: the seed already carries the final decay, so each
+                # step is radial only. Even targets: each step adds exp(-n_prev t).
                 apply_spectral_shift=(n % 2 == 0),
             )
 
@@ -478,6 +501,8 @@ def _heat_kernel_unit(
         current_fn = raise_dimension(current_fn, current_n)
         current_n += 2
 
+    # Even n: the recursion divides by sinh near zero, so the small band uses
+    # the smooth descent integral and the rest uses the recursion.
     if n % 2 == 0:
         small = _small_radius(n, d)
         safe_d = torch.where(small, torch.ones_like(d), d)
@@ -488,6 +513,7 @@ def _heat_kernel_unit(
     small = _small_radius(n, d)
     safe_d = torch.where(small, torch.ones_like(d), d)
     regular = current_fn(t, safe_d)
+    # Odd n: the small band uses the even-in-r series, which is smooth at zero.
     q = torch.where(small, d.square(), torch.zeros_like(d))
     series = (
         (_GAUSSIAN_TIME_SCALE * math.pi * t) ** (-n / 2)
@@ -526,8 +552,9 @@ def hyperbolic_heat_kernel(
         be broadcastable with `t`.
       manifold: a manifold object exposing `.n` (intrinsic dim) and
         `.k` (sectional curvature, expected `k < 0`).
-      n_quad: number of Gauss–Legendre nodes for the n=2 integral.
-        Default 32; cataloged as `HEAT_KERNEL_QUADRATURE_NODES`.
+      n_quad: number of Gauss–Legendre nodes for the quadrature: the n=2
+        integral and the even-dimension descent. Default 32; cataloged as
+        `HEAT_KERNEL_QUADRATURE_NODES`.
       tail_budget: integration-upper-bound budget factor (truncate at
         `d + sqrt(4 * tail_budget * t)`). Default 20. Cataloged.
         The small-radius descent integral ends at
@@ -541,10 +568,11 @@ def hyperbolic_heat_kernel(
       n=1 is Gaussian; n=2 uses quadrature; n=3,5,7 have closed forms.
       Remaining dimensions use the spectral-shifted recurrence. Near
       zero, odd dimensions use a series and even dimensions use a smooth
-      descent integral. These paths preserve gradients in time and radius,
-      including under inference with torch.no_grad(). Quadrature accuracy
-      depends on n_quad and tail_budget; very high dimensions, extreme
-      times and large radii can still exceed floating-point range.
+      descent integral. Gradients flow through `t` and `distances`. Under
+      `torch.no_grad()` the same values come back with no graph kept.
+      Quadrature accuracy depends on n_quad and tail_budget; very high
+      dimensions, extreme times and large radii can still exceed
+      floating-point range.
 
     References:
       Davies–Mandouvalos (1988); Grigor'yan (2009), Theorem 8.21;
@@ -554,13 +582,14 @@ def hyperbolic_heat_kernel(
     abs_k = abs(manifold.k)
 
     # Curvature scaling: convert to unit-curvature arguments, evaluate,
-    # then rescale the output by |k|^{n/2}.
+    # then rescale the output by |k|^{n/2}. abs(k) only takes the magnitude,
+    # so k must be negative here; a k >= 0 is not checked.
     t_unit = abs_k * t
     sqrt_abs_k = math.sqrt(abs_k)
     d_unit = sqrt_abs_k * distances
 
-    # Ensure tensors (constants get the right dtype for downstream
-    # numpy/scipy conversions).
+    # A Python float t makes t_unit a float. Turn it into a tensor with the
+    # distances' dtype and device before the kernel runs.
     if not isinstance(t_unit, torch.Tensor):
         t_unit = torch.as_tensor(
             t_unit,

@@ -22,9 +22,10 @@ from typing import Literal
 import torch
 
 # Default oversampling parameter for randomized SVD, per
-# Halko-Martinsson-Tropp (2011) §1.2. The catalog entry is
-# `randomized_svd_oversample`. Five additional projection columns
-# typically give relative spectral error below 1e-3 for matrices whose
+# Halko-Martinsson-Tropp (2011) §1.2. Cataloged as
+# `RANDOMIZED_SVD_OVERSAMPLE_DEFAULT` in notes/magic_numbers.md.
+# Five additional projection columns typically give relative spectral
+# error below 1e-3 for matrices whose
 # singular values decay smoothly past index r. Scale of validity:
 # adequate when the (r+1)-th singular value is small relative to the
 # r-th; increase to 10 when the spectrum is flat near the truncation.
@@ -34,7 +35,7 @@ RANDOMIZED_SVD_OVERSAMPLE_DEFAULT: int = 5
 # Halko-Martinsson-Tropp (2011) §4.5; q=2 is the standard recommendation
 # for matrices with slowly decaying spectra. Two iterations multiply the
 # singular-value gap by (σ_{r+1}/σ_r)^(2q+1), which is enough for typical
-# low-rank truncation. Cataloged as `randomized_svd_n_iter`.
+# low-rank truncation. Cataloged as `RANDOMIZED_SVD_N_ITER_DEFAULT`.
 RANDOMIZED_SVD_N_ITER_DEFAULT: int = 2
 
 
@@ -84,6 +85,8 @@ def truncated_svd(
     m, n = M.shape[-2:]
     if not (M.is_floating_point() or M.is_complex()):
         raise ValueError(f"M must be floating point or complex, got {M.dtype}")
+    # bool is a subclass of int, so True would pass an int check and quietly
+    # mean rank 1. It is rejected by name.
     if isinstance(r, bool) or not isinstance(r, int) or r <= 0:
         raise ValueError(f"r must be > 0 and an integer, got r={r}")
     for name, value in (("oversample", oversample), ("n_iter", n_iter)):
@@ -96,6 +99,9 @@ def truncated_svd(
 
     if mode == "exact":
         U_full, S_full, Vh_full = torch.linalg.svd(M, full_matrices=False)
+        # The slices are views into the full factors, and a view keeps all of
+        # the full factor alive. .contiguous() copies the strided slices so the
+        # full factors can be freed.
         return (
             U_full[..., :, :r].contiguous(),
             S_full[..., :r].contiguous(),
@@ -118,6 +124,10 @@ def _randomized_svd(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Halko-Martinsson-Tropp randomized SVD with subspace iteration.
 
+    Input M is (..., m, n), already checked by truncated_svd, with 1 <= r and
+    nonnegative integers for oversample and n_iter. Output is (U, S, Vh)
+    truncated to r, with the same shapes truncated_svd documents.
+
     Algorithm (Halko-Martinsson-Tropp 2011, Algorithm 5.1 + 4.4):
 
       1. Draw Ω ∈ R^{n × ℓ}, ℓ = r + oversample, Gaussian.
@@ -138,8 +148,9 @@ def _randomized_svd(
     """
     *batch, m, n = M.shape
     ell = r + oversample
+    # The sketch would need more columns than the matrix has, so there is no
+    # smaller subspace to randomize. Exact SVD is the answer here.
     if ell > min(m, n):
-        # Can't oversample past full rank; fall back to exact (cheaper anyway).
         return truncated_svd(M, r, mode="exact")
 
     Omega = torch.randn(*batch, n, ell, generator=generator,
@@ -157,6 +168,8 @@ def _randomized_svd(
 
     Q, _ = torch.linalg.qr(Y)            # (..., m, ℓ)
     B = torch.matmul(Q.mH, M)            # (..., ℓ, n)
+    # B = Qᴴ M is only ℓ × n, so its SVD is cheap and gives M's leading triples
+    # once Q is multiplied back in.
     U_small, S, Vh = torch.linalg.svd(B, full_matrices=False)
     U = torch.matmul(Q, U_small)         # (..., m, ℓ)
 

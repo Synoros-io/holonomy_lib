@@ -20,7 +20,7 @@ eigenvector encodes the balance partition; Kunegis 2010). The caller
 decides.
 
 This routine uses dense `torch.linalg.eigh`, with O(n³) cost. For sparse
-operators, use `holonomy_lib.algebra.lanczos_eigsh` or `eigsh_sparse`.
+operators, use `holonomy_lib.algebra.lanczos_eigsh` or `eigsh_sparse_sa`.
 
 References:
   Belkin, M., Niyogi, P. (2003). Laplacian eigenmaps for dimensionality
@@ -57,7 +57,9 @@ def laplacian_eigenmaps(
         random_walk, signed).
       k: number of eigenvectors to return. Must satisfy 1 ≤ k ≤ n.
       laplacian_type: which Laplacian to diagonalize.
-        - "symmetric_normalized" (default, Belkin-Niyogi 2003 convention)
+        - "symmetric_normalized" (default). Belkin-Niyogi (2003) solve
+          the generalized problem L f = λ D f, which is the
+          "random_walk" option below; L_sym has the same eigenvalues.
         - "combinatorial" (unnormalized)
         - "random_walk" (non-symmetric; the returned eigenvectors are
           the L_rw eigenvectors, obtained by D^{−1/2}-scaling the
@@ -104,12 +106,16 @@ def laplacian_eigenmaps(
         # eigenvector for λ_i, then v_i = D^{−1/2} u_i is the L_rw
         # right-eigenvector for the same λ_i. (Equivalently, v_i is the
         # solution to the generalized eigenproblem L v = λ D v.)
+        # L_rw is not symmetric, so eigh cannot take it directly. Solving
+        # the symmetric L_sym and mapping its eigenvectors over keeps the
+        # real, sorted eigh output
         L_sym = _L.symmetric_normalized(A)
         eigvals, u = torch.linalg.eigh(L_sym)  # (B, n), (B, n, n)
         d = _L.degree(A, signed=False)
-        # L_rw and L_sym both have an isolated diagonal entry of one.
-        # Extending the similarity transform by identity preserves that
-        # eigenvector instead of annihilating it with a zero degree factor.
+        # an isolated node has a diagonal entry of one in both L_rw and
+        # L_sym. Using degree 1 there makes the similarity transform the
+        # identity on that coordinate, so its eigenvector survives instead
+        # of being multiplied by a zero (pseudoinverse) degree factor
         safe_degree = torch.where(d > 0, d, 1.0)
         d_inv_sqrt = safe_degree.rsqrt()
         eigvecs = u * d_inv_sqrt.unsqueeze(dim=-1)  # broadcast over columns
@@ -120,5 +126,6 @@ def laplacian_eigenmaps(
             f"got {laplacian_type!r}"
         )
 
-    # `eigh` returns ascending order already; take bottom k.
+    # eigh already returns ascending order, so the bottom k are the first k.
+    # contiguous() so the caller gets owning tensors, not strided slices
     return eigvals[..., :k].contiguous(), eigvecs[..., :, :k].contiguous()

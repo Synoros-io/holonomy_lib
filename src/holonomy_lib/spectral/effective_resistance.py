@@ -107,8 +107,12 @@ def commute_time(A: torch.Tensor) -> torch.Tensor:
     A = _checked_adjacency(A)
     resistance, connected = _resistance_and_reachability(A)
     degree = A.sum(dim=-1)
+    # Row u of `connected` marks the component of u, so this matmul sums the
+    # degrees over that component, which is its volume.
     volume = (connected.to(A.dtype) @ degree.unsqueeze(-1)).squeeze(-1)
-    # Zero-volume isolated components must not turn 0 * inf into NaN.
+    # Cross-component entries of `resistance` are inf. An isolated node has
+    # volume 0, and 0 * inf is NaN, so those entries are zeroed before the
+    # multiply. The where below puts inf back on the cross-component pairs.
     finite_resistance = torch.where(connected, resistance, 0.0)
     return torch.where(
         connected, volume.unsqueeze(-1) * finite_resistance, float("inf"),
@@ -121,7 +125,15 @@ def commute_time(A: torch.Tensor) -> torch.Tensor:
 
 
 def _checked_adjacency(A: torch.Tensor) -> torch.Tensor:
-    """Validate dense conductances and drop loops before any network quantity."""
+    """Validate a dense adjacency and zero its diagonal.
+
+    Takes a dense `(..., n, n)` real floating-point tensor and returns it with
+    the diagonal zeroed. Raises ValueError if it is not square, not floating
+    point, or has a negative off-diagonal entry. Self-loops are dropped before
+    the sign check, so a negative diagonal entry is ignored rather than
+    rejected. Assumes A is symmetric. This function does not check that; the
+    Laplacian it feeds warns when it is not.
+    """
     if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
         raise ValueError(f"A must be (..., n, n); got A.shape={tuple(A.shape)}")
     if not A.is_floating_point():
@@ -135,29 +147,53 @@ def _checked_adjacency(A: torch.Tensor) -> torch.Tensor:
 def _resistance_and_reachability(
     A: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return resistance and connectivity for a validated loop-free adjacency."""
+    """Return resistance and connectivity for a validated, loop-free adjacency.
+
+    Takes the output of `_checked_adjacency`: a `(B, n, n)` symmetric,
+    non-negative adjacency with zero diagonal. Returns `(resistance,
+    connected)`, both `(B, n, n)`. `connected` is a Boolean mask of the pairs
+    in the same component, diagonal included. `resistance` is inf wherever
+    `connected` is False. Assumes symmetry; the Laplacian it builds warns
+    otherwise.
+    """
     n = A.shape[-1]
+    # A node always reaches itself, so the identity goes into the pattern.
     connected = (A > 0) | torch.eye(n, device=A.device, dtype=torch.bool)
+    # An empty batch or a zero-node graph has nothing to invert. A.clone() is
+    # already the right, possibly empty, shape for the result.
     if n == 0 or A.numel() == 0:
         return A.clone(), connected
-    # Paths have at most n - 1 edges. Each squaring doubles the length
-    # covered, with every graph in the batch advancing together.
+    # A simple path has at most n - 1 edges. Each squaring doubles the path
+    # length the mask covers, and all graphs in the batch square together, so
+    # bit_length(n - 1) rounds cover every pair.
     for _ in range((n - 1).bit_length()):
         paths = connected.to(A.dtype)
         connected = connected | (paths @ paths > 0)
     laplacian = _L.combinatorial(A)
     degree = A.sum(dim=-1)
+    # Each node takes the largest degree in its own component. Entries outside
+    # the component are zeroed before the max, so they cannot win it.
     component_scale = torch.where(connected, degree.unsqueeze(-2), 0.0).amax(-1)
-    # One scale per component preserves symmetry. Isolates have zero
-    # Laplacian and a unit projector, so their inverse needs no rescaling.
+    # Every node in a component gets the same scale, so dividing rows by it
+    # keeps the matrix symmetric. An isolate has degree 0, and dividing its
+    # zero Laplacian row by 0 would give NaN, so its scale is swapped for 1.
     component_scale = torch.where(
         component_scale > 0, component_scale, torch.ones_like(component_scale),
     ).unsqueeze(-1)
+    # Projector onto the constant vectors of each component, P = 1 1^T / |c|.
+    # Adding it turns the zero eigenvalue of each component into 1, which makes
+    # the scaled Laplacian positive definite.
     projector = connected.to(A.dtype) / connected.sum(dim=-1, keepdim=True)
     grounded = laplacian / component_scale + projector
+    # grounded^{-1} - P is the pseudoinverse of L / s. Dividing by s undoes the
+    # scaling, since (L / s)^+ = s L^+.
     inverse = (
         torch.cholesky_inverse(torch.linalg.cholesky(grounded)) - projector
     ) / component_scale
+    # Expanding (e_u - e_v)^T L^+ (e_u - e_v) gives the two diagonal entries
+    # minus twice the off-diagonal one.
     diagonal = inverse.diagonal(dim1=-2, dim2=-1)
     resistance = diagonal.unsqueeze(-1) + diagonal.unsqueeze(-2) - 2.0 * inverse
+    # The inverse is block diagonal, so a cross-component entry is 0 and its
+    # resistance comes out finite. Those pairs have no path, so they get inf.
     return torch.where(connected, resistance, float("inf")), connected

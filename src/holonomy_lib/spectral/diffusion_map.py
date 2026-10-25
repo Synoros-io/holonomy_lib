@@ -27,15 +27,19 @@ The trivial top eigenpair (μ_1 = 1, φ_1 = constant) is dropped; it
 encodes only "we're somewhere on the graph", carrying no metric
 information.
 
-Implementation: diagonalize the full random-walk Laplacian, convert
-its eigenvalues by `μ_j = 1 − λ_j`, and select the k largest absolute
-nontrivial transition eigenvalues. Multiply its right eigenvectors by
-sqrt(vol(A)) to normalize under π, then by the signed integer power
-`μ_j^t`. The first Laplacian eigenvector is dropped.
+Implementation: take the full spectrum of the random-walk Laplacian
+(`laplacian_eigenmaps` with `k = n`), drop its smallest eigenvalue, and
+convert the rest to transition eigenvalues `μ_j = 1 − λ_j`. Keep the k
+modes with the largest |μ_j|. The right eigenvectors are unit-norm
+eigenvectors of L_sym scaled by D^{-1/2}, which makes their π-weighted
+squared norm 1/vol(A). Multiplying by sqrt(vol(A)) puts them in the π
+normalization. Last, each mode is raised to the signed integer power μ_j^t.
 
-Disconnected components have multiple zero L-eigenvalues; we drop only
-one. Callers on disconnected graphs should mask by component
-membership before interpreting cross-component distances.
+Each connected component with edges gives one zero Laplacian eigenvalue,
+and those eigenvectors span the component indicators. Dropping index 0
+removes only one direction from that span, so the others stay in the
+embedding. Callers on disconnected graphs should mask by component
+membership before reading cross-component distances.
 
 References:
   Coifman, R. R., Lafon, S. (2006). Diffusion maps. Applied and
@@ -102,32 +106,37 @@ def diffusion_map(
         )
     if not A.is_floating_point():
         raise ValueError("A must have a real floating-point dtype")
+    # Zero the diagonal so self-loops count neither as walk steps nor toward degree.
     A = drop_self_loops(A)
     n = A.shape[-1]
     if k <= 0 or k > n - 1:
         raise ValueError(
             f"k must satisfy 1 <= k <= n - 1 = {n - 1}, got k={k}"
         )
+    # bool is a subclass of int, so without this check True would pass as t = 1.
     if isinstance(t, bool) or not isinstance(t, Integral) or t < 0:
         raise ValueError(f"diffusion time t must be a nonnegative integer, got {t}")
     if (A < 0).any():
         raise ValueError("A must have nonnegative weights")
 
-    # Small Laplacian eigenvalues alone miss negative transition modes.
-    # We need the full spectrum before sorting by transition magnitude.
+    # The k smallest Laplacian eigenvalues are not enough. A mode with a
+    # strongly negative transition eigenvalue (λ near 2 gives μ near -1)
+    # sits at the top of the spectrum, so take all of it and sort by |μ| below.
     eigvals, eigvecs = laplacian_eigenmaps(
         A, k=n, laplacian_type="random_walk",
     )
-    # A disconnected graph has a stationary mode for each nontrivial
-    # component. Removing any one of these preserves within-component
-    # differences, but it need not remove the global constant mode.
     degree = _L.degree(A)
-    # L_sym has spectrum in [0, 2]; the eigensolver's roundoff grows
-    # with the dimension, rather than with the adjacency's units.
+    # The normalized Laplacian's spectrum is in [0, 2] whatever the scale of A.
+    # Eigensolver roundoff grows with n, so the zero test uses eps * n * 2,
+    # which does not depend on the weights.
     tolerance = torch.finfo(A.dtype).eps * n * NORMALIZED_LAPLACIAN_SPECTRAL_RADIUS
     counts = (eigvals.abs() <= tolerance).sum(dim=-1)
+    # .item() syncs once, so the warning can be decided on the host.
     n_near_zero = int(counts.max().item()) if counts.numel() else 0
     has_isolates = bool((degree == 0).any())
+    # Each connected component with edges has one zero eigenvalue. Only index 0
+    # is dropped below, so the other zero modes stay in the embedding and the
+    # warning is raised.
     if n_near_zero > 1 or has_isolates:
         warnings.warn(
             "diffusion_map: input graph is disconnected or has isolated nodes. "
@@ -136,20 +145,25 @@ def diffusion_map(
             "are set to zero.",
             stacklevel=2,
         )
-    # Drop index 0 (the smallest eigenvalue, ≈ 0; eigenvector is the
-    # stationary mode).
+    # Index 0 is the smallest eigenvalue, about 0. For a connected graph its
+    # eigenvector is constant, the trivial mode the docstring drops.
     eigvals_non_null = eigvals[..., 1:]
     eigvecs_non_null = eigvecs[..., 1:]
 
-    # Convert L_rw eigenvalues to P eigenvalues: μ = 1 − λ.
+    # L_rw = I − P, so each transition eigenvalue is μ = 1 − λ. Signs survive.
     transition_eigvals = 1.0 - eigvals_non_null
+    # Keep the k modes with the largest |μ|. A kept mode may have μ < 0.
     order = transition_eigvals.abs().argsort(dim=-1, descending=True)[..., :k]
     transition_eigvals = transition_eigvals.gather(-1, order)
     eigvecs_non_null = eigvecs_non_null.gather(
         -1, order.unsqueeze(-2).expand(*A.shape[:-2], n, k),
     )
+    # sqrt(vol(A)) brings each eigenvector to unit π-norm (see the module docstring).
     volume_scale = degree.sum(dim=-1).sqrt().unsqueeze(-1).unsqueeze(-1)
     embedding = eigvecs_non_null * volume_scale
+    # An isolated node has no stationary mass, so its row is zeroed. Its
+    # eigenvector there is not a diffusion coordinate.
     embedding = torch.where((degree > 0).unsqueeze(-1), embedding, 0.0)
+    # Ψ_t: each mode scaled by μ_j^t. A negative μ_j keeps its sign for odd t.
     embedding = embedding * transition_eigvals.pow(int(t)).unsqueeze(-2)
     return transition_eigvals, embedding

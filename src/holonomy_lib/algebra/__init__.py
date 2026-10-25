@@ -5,15 +5,16 @@
 
 Currently implemented:
   linear.truncated_svd:  batched truncated SVD (exact + randomized).
-  lanczos_eigsh:         largest/smallest algebraic dense eigenpairs;
-                         explicit dense shifts target nearby modes.
+  lanczos_eigsh:         largest/smallest algebraic eigenpairs of dense or
+                         sparse A; an explicit sigma (with which="SA")
+                         targets nearby modes.
                          Full subspaces use torch.linalg.eigh.
                          Sparse SA uses the backends in eigsh_sparse
                          (bounded-pole SciPy eigsh / preconditioned
                          SciPy LOBPCG / torch.lobpcg).
   eigsh_sparse.eigsh_sparse_sa: the sparse smallest-k backend, callable
                          directly for backend control.
-  solvers.cg:            conjugate gradient for SPD systems : batched
+  solvers.cg:            conjugate gradient for SPD systems: batched
                          dense, sparse, or callable-operator form.
   solvers.lsqr:          iterative (damped) least squares via
                          Golub-Kahan bidiagonalization.

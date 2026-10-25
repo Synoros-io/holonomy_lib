@@ -82,7 +82,7 @@ from holonomy_lib._graph_utils import drop_self_loops
 # `q = 1/4` is the value that maximally separates the directed
 # eigenmodes for a cycle and is therefore the standard literature
 # default. **Scale of validity**: dimensionless ratio of magnetic flux
-# units; does not depend on n. Cataloged as `magnetic_charge_default`.
+# units; does not depend on n. Cataloged as `MAGNETIC_CHARGE_DEFAULT`.
 MAGNETIC_CHARGE_DEFAULT: float = 0.25
 
 
@@ -145,8 +145,10 @@ def symmetric_normalized(
     A_s = 0.5 * (A + A.mT)
     D_s = A_s.sum(dim=-1)                         # (B, n)
 
-    # Moore-Penrose pseudoinverse handling for isolated nodes — same
+    # Moore-Penrose pseudoinverse handling for isolated nodes, the same
     # convention as `holonomy_lib.spectral.laplacian.symmetric_normalized`.
+    # The clamp keeps rsqrt finite on the branch `where` throws away, so
+    # an isolated node never puts an inf into the autograd graph
     floor = torch.finfo(A.dtype).tiny
     safe_D = D_s.clamp(min=floor)
     d_inv_sqrt = torch.where(
@@ -155,7 +157,9 @@ def symmetric_normalized(
 
     H_times_As = _magnetic_phase_times_adj(A, A_s, q)
 
-    # D^{-1/2} H ⊙ A_s D^{-1/2} via broadcasting.
+    # D^{-1/2} (H ⊙ A_s) D^{-1/2} as an outer product of the two scalings.
+    # The real scale has to be cast to complex before it multiplies the
+    # complex phase matrix
     scale = (
         d_inv_sqrt.unsqueeze(dim=-1) * d_inv_sqrt.unsqueeze(dim=-2)
     ).to(H_times_As.dtype)
@@ -282,7 +286,10 @@ def sign_magnetic_symmetric_normalized(
 def _validate_real_adjacency(A: torch.Tensor, q: float) -> None:
     """Shared input validation for the magnetic Laplacian primitives.
 
-    Rejects complex-valued `A` outright: the phase factor
+    Takes the adjacency and charge, returns nothing, raises `ValueError`
+    if `A` is not square in its last two dims, is not a real floating
+    dtype (complex and integer tensors both fail), or `q` is outside
+    [0, 1). Complex `A` is rejected outright: the phase factor
     `H = exp(i · 2π · q · (A − A^T))` is only defined for real
     antisymmetric arguments. Passing a complex `A` would let
     `torch.cos`/`torch.sin` produce complex outputs and
@@ -308,19 +315,21 @@ def _magnetic_phase_times_adj(
 ) -> torch.Tensor:
     """Return H ⊙ A_s where H_{ij} = exp(i · 2π · q · (A_{ij} - A_{ji})).
 
-    Computed as a single complex tensor of shape (*A_s.shape).
-    For symmetric A the phase is identically 1 and the result reduces
-    to A_s + 0j : but we still pay the complex allocation. For q = 0
-    the phase is also identically 1; we short-circuit that case.
+    Takes the real adjacency `A` (for the phase) and the already
+    symmetrized `A_s` (signed or unsigned, the caller picks), both
+    `(..., n, n)`, and returns one complex tensor of the same shape. For
+    symmetric A the phase is identically 1 and the result reduces to
+    A_s + 0j, but we still pay for building the phase. For q = 0 the
+    phase is also identically 1, and that case skips the trig entirely.
     """
     if q == 0.0:
-        # Phase is identically 1; result is A_s as a complex tensor.
-        # Cast to the appropriate complex dtype matching A.dtype.
+        # no phase at all, so the answer is just A_s cast to complex
         complex_dtype = _matching_complex_dtype(A.dtype)
         return A_s.to(complex_dtype)
 
-    # Antisymmetric part of A; for purely symmetric inputs this is 0
-    # and we land in the q-doesn't-matter regime anyway.
+    # the antisymmetric part A - A^T carries the direction of each edge.
+    # For a symmetric input it is all zeros, the phase is 1 everywhere,
+    # and q has no effect, which is the reduction the module promises
     asym = A - A.mT                                # (B, n, n)
     angle = (2.0 * math.pi * q) * asym             # (B, n, n) real
     phase = torch.complex(torch.cos(angle), torch.sin(angle))
@@ -329,10 +338,14 @@ def _magnetic_phase_times_adj(
 
 
 def _matching_complex_dtype(real_dtype: torch.dtype) -> torch.dtype:
-    """Pick a complex dtype matching the precision of a real dtype."""
+    """Pick a complex dtype matching the precision of a real dtype.
+
+    float64 maps to complex128 and float32 to complex64. Anything else
+    (half, bfloat16) goes up to complex64, since half-precision complex
+    support in torch is thin.
+    """
     if real_dtype == torch.float64:
         return torch.complex128
     if real_dtype == torch.float32:
         return torch.complex64
-    # Fallback for half-precision and others — go up to complex64.
     return torch.complex64

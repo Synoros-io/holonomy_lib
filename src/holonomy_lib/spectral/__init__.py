@@ -3,8 +3,8 @@
 
 """holonomy_lib.spectral: graph Laplacians and spectral utilities.
 
-Currently implemented:
-  laplacian.combinatorial(A)          : L = D - A
+Public names:
+  laplacian.combinatorial(A)        : L = D - A
   laplacian.symmetric_normalized(A)   : L_sym = I - D^{-1/2} A D^{-1/2}
   laplacian.random_walk(A)            : L_rw = I - D^{-1} A
   laplacian.signed(A)                 : L^sigma = D^{|sigma|} - A
@@ -25,6 +25,12 @@ Currently implemented:
   spectral_dimension(eigenvalues, t)  : d_s = -2 d log p / d log t from the
                                           heat-kernel return decay
                                           (Rammal-Toulouse 1983)
+  diffusion_map(A, k, t)              : diffusion-map embedding at time t
+                                          (Coifman-Lafon 2006)
+  effective_resistance(A)             : pairwise effective resistance
+  commute_time(A)                     : pairwise commute time, vol(component) R
+  heat_kernel_chebyshev(L, t, signal=None) : exp(-t L), or exp(-t L) @ signal,
+                                          by a Chebyshev polynomial expansion
 """
 
 from holonomy_lib.spectral import laplacian, magnetic
