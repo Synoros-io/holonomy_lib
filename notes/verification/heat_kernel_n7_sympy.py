@@ -1,6 +1,6 @@
 """Sympy derivation + verification of the closed-form n=7 heat kernel.
 
-Extends C2 (closed-form n=5) one odd dimension higher. The H^7 kernel is
+Extends the n=5 closed form one odd dimension higher. The H^7 kernel is
 one corrected operator-chain recursion step from the (verified) H^5
 closed form,
 

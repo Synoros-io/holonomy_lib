@@ -138,8 +138,9 @@ def _sierpinski_gasket_eigs(level: int) -> torch.Tensor:
 
 
 def _tail_window(eigs: torch.Tensor) -> torch.Tensor:
-    """Asymptotic-tail power-law window (rule from
-    notes/validation/spectral_dimension_validation.py)."""
+    """Asymptotic-tail power-law window (rule from the 0.7.0 validation
+    script notes/validation/spectral_dimension_validation.py, in git history
+    at d26eb84)."""
     eigs = eigs.clamp(min=0.0)
     n = eigs.numel()
     lam_max = float(eigs.max())

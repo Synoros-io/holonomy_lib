@@ -45,7 +45,8 @@ from holonomy_lib.algebra.linear import truncated_svd
 FixedRankPoint = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 # Rank ratio r / min(m, n) where the retraction's top-r truncation stops
-# using randomized SVD. Empirical (see notes/benchmark_baseline.md): above
+# using randomized SVD. Measured on CPU in the 0.7.0 benchmark baseline
+# (notes/benchmark_baseline.md, in git history at d26eb84): above
 # 0.25 the exact SVD's constant factor wins back the gap, and its accuracy
 # and determinism matter more for research workloads. At or below it,
 # randomized SVD (HMT 2011) is strictly faster in our CPU baseline, 37× at

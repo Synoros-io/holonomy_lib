@@ -380,8 +380,8 @@ def _apply_one_recursion(
     """Apply one step of the Grigor'yan recursion.
 
     The recursion, derived from the operator chain on the
-    spectrally-shifted Gaussian (validation results in
-    `notes/validation/heat_kernel_results.md`), is
+    spectrally-shifted Gaussian (checked symbolically in
+    `notes/verification/heat_kernel_recursion_sympy.py`), is
 
         k^{n_prev + 2}(t, r) = -exp(-n_prev · t) / (2π · sinh r)
                                 · ∂_r k^{n_prev}(t, r).
@@ -390,9 +390,9 @@ def _apply_one_recursion(
     `H^{n}` carry a spectral-bottom factor `exp(-((n-1)/2)²·t)`; going
     from `n_prev` to `n_prev+2` shifts the spectral bottom by
     `((n_prev+1)/2)² − ((n_prev-1)/2)² = n_prev`, so we multiply by
-    `exp(-n_prev · t)`. The heat-equation-residual check in
-    `notes/validation/heat_kernel_validation.py` depends on it: without
-    the factor, the residual is O(1) for n ≥ 5 instead of float noise.
+    `exp(-n_prev · t)`. The same sympy script checks both cases: with
+    the factor the result satisfies the H^5 radial heat equation, and
+    without it, it does not.
 
     Args:
       prev_kernel_fn: function `(t, d) -> k^{n_prev}(t, d)`.

@@ -1,7 +1,7 @@
 """Sympy symbolic verification of the κ-sign crossing dispatch on the
 κ-stereographic manifold.
 
-Pseudo-verification for **C4** (research-claims catalog). The claim:
+The claim:
 
     For a learnable curvature κ, the manifold operation
         f(κ, α) = atan_κ(√|κ|·α) / √|κ|
@@ -11,10 +11,10 @@ Pseudo-verification for **C4** (research-claims catalog). The claim:
         f(κ, α) = α                       for κ = 0
         f(κ, α) = arctanh(√|κ|·α)/√|κ|   for κ < 0
     is the restriction of that one analytic function to the three
-    parts of the real line. Hence the runtime dispatch
-        torch.where(κ > 0, _safe_atanc(scaled), _safe_atanhc(scaled))
-    with `scaled = sqrt(|κ|)·α` realizes the analytic function piece-
-    wise, and SGD can push κ across 0 without breakdown.
+    parts of the real line. Hence code that dispatches on the sign of κ
+    realizes one analytic function, and SGD can push κ across 0 without
+    breakdown. `src/holonomy_lib/manifolds/stereographic.py` does this with
+    a signed Taylor series near κ = 0 and safe inputs for inactive branches.
 
 This script verifies the analyticity in three independent ways:
 
@@ -265,14 +265,10 @@ def main():
     print("     as each branch is finite-finite individually, the dispatch")
     print("     is autograd-safe across κ=0.")
     print()
-    print("Caveat (also documented in the strengthening doc): the *masked-")
-    print("out* hyperbolic branch is fine forward when √κ·α < 1, but if")
-    print("the user feeds inputs where √κ·α ≥ 1 (i.e. distances that would")
-    print("escape the Poincaré-ball domain if κ were negative), `atanh`")
-    print("returns ±∞/NaN forward. The outer `torch.where` discards the")
-    print("forward value but NaN gradients can still propagate through")
-    print("the masked branch in backward. We characterize this regime")
-    print("numerically in the C4 strengthening doc.")
+    print("Note: this checks the math only. The library code uses a series")
+    print("near κ = 0 and feeds each inactive branch a safe input, so a")
+    print("masked branch does not send NaN gradients through `torch.where`")
+    print("(CHANGELOG 0.8.0, B10/B11).")
     print()
     print("=" * 72)
     print("Pseudo-verification result")

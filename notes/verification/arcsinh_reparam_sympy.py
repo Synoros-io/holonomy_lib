@@ -1,7 +1,7 @@
 """Sympy symbolic verification of the arcsinh-reparameterization for
 hyperbolic distance and log on the Lorentz model.
 
-Pseudo-verification for **C3** (research-claims catalog). The
+The
 implementation in `src/holonomy_lib/manifolds/lorentz.py:distance`
 uses
 

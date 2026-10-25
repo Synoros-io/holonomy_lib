@@ -129,13 +129,9 @@ choose execution settings, or `--no-browser` to print the URL only.
 - Effective resistance and commute time are `inf` between disconnected components.
   Diffusion maps warn on disconnected graphs and require nonnegative integer time.
 
-Historical measurements: [baseline](notes/benchmark_baseline.md),
-[optimized](notes/benchmark_optimized.md),
-[information geometry](notes/benchmark_info_geometry.md),
-[2026-05-26 sweep](notes/benchmark_2026-05-26_roadmap_sweep.md),
-[2026-07-08 quadrature/sheaves](notes/benchmark_2026-07-08_pr1_quadrature_coboundary.md),
-and [2026-07-08 solvers](notes/benchmark_2026-07-08_solvers.md).
-These describe their recorded versions and workloads, not current performance guarantees.
+The least-squares default dispatch comes from a dated measurement,
+[2026-07-08 solvers](notes/benchmark_2026-07-08_solvers.md). It describes
+that version and workload, not a current performance guarantee.
 
 ## Development
 

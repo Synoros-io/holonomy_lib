@@ -40,32 +40,22 @@ Public API surface (keep in sync when adding or changing a primitive):
   summary, citation. CONVENTIONS §9.2 requires a row here for each new primitive.
 - `CHANGELOG.md` — released behavior, per version.
 
-Research canon (first-class per injected global standards; these are the evidence base for
-the library's claims, not scratch notes):
+Notes the code cites:
 
 - `notes/magic_numbers.md` — catalog of every posited constant with derivation and
   scale-of-validity. The static audit flags undocumented literals; it does not
   certify the derivation or numerical correctness (CONVENTIONS §5).
-- `notes/research_claims_catalog.md` — the "our research" claims with explicit status fields.
-- `notes/research_open_questions.md` — implementation choices not traceable to a published
-  formula. Read before asserting a hyperbolic result is cited.
-- `notes/substrate_provenance.md` — what synoros-substrate and this library gave each other.
-- `notes/scrutiny.md` — running log of critical-review passes: checked, found, fixed.
-- `notes/benchmark_baseline.md`, `notes/benchmark_optimized.md`,
-  `notes/benchmark_info_geometry.md` (+ `.json`) — the benchmark series.
-  `benchmark_baseline.md` is cited by `magic_numbers.md` for
-  `RETRACTION_RANDOMIZED_THRESHOLD`; do not move it.
-- `notes/benchmark_2026-05-26_roadmap_sweep.md`,
-  `notes/benchmark_2026-07-08_pr1_quadrature_coboundary.md`,
-  `notes/benchmark_2026-07-08_solvers.md` — dated run records. These are *not* disposable:
-  each is linked from `README.md`, and `benchmark_2026-07-08_solvers.md` is additionally
-  cited by `CHANGELOG.md`, `notes/magic_numbers.md`, and the docstring of
-  `src/holonomy_lib/convex/least_squares.py`.
-- `notes/validation/` — validation records (results `.md` beside the script that produced
-  them). Cross-checks against geoopt, established closed forms, and synoros-substrate.
-- `notes/strengthening/` — historical C1–C7 work; read the current claims catalog
-  status before using it as evidence for the current implementation.
-- `notes/verification/` — sympy scripts that verify closed forms symbolically.
+- `notes/benchmark_2026-07-08_solvers.md` — dated run record behind the least-squares
+  default dispatch; cited by `README.md`, `CHANGELOG.md`, `CONTENTS.md`,
+  `notes/magic_numbers.md`, and `src/holonomy_lib/convex/least_squares.py`.
+- `notes/verification/` — sympy scripts that verify closed forms symbolically. Run each
+  standalone. `heat_kernel_recursion_sympy.py` and `kappa_crossing_sympy.py` assert their
+  results; the other three print them for reading.
+
+Older research notes (validation records, C1–C7 strengthening, the 2026-05 benchmark
+series, the claims catalog, open questions, scrutiny log, substrate provenance) left the
+public tree on 2026-10-25. They described pre-0.8.0 code. They remain in git history at
+`d26eb84` (0.7.0) and in the local `archive/notes-removed-2026-10-25/`.
 
 Global standards (doc contract, testing, comments, wiring-before-benchmarks) are
 injected by the harness. Machine-specific paths belong there, not in this file.

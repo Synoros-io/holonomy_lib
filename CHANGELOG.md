@@ -73,6 +73,11 @@ version numbers follow [Semantic Versioning](https://semver.org).
 - Content-addressable provenance, recording decorators, replay/inspection,
   MCP server, and Jupyter integration. Removed the `provenance`, `mcp`,
   `jupyter`, and `all` extras. The optional `comparison` and `dev` extras remain.
+- Research notes that described pre-0.8.0 code: validation records, claim
+  strengthening notes, the 2026-05 benchmark series and its JSON, and internal
+  review logs. They remain in the 0.7.0 history. `notes/` keeps the constant
+  catalog, the sympy verification scripts, and the solver measurement that sets
+  the least-squares default.
 - Provenance benchmark records from the active notes. The removed subsystem
   and records remain in repository history; local archive tombstones record
   the requirements for any return.
