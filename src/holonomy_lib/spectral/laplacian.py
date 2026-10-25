@@ -5,7 +5,7 @@
 
 Given a weighted adjacency matrix `A` of shape `(B, n, n)`, this module
 constructs the standard real-valued Laplacian variants. All variants
-assume `A` is symmetric — non-symmetric (directed) graphs need the
+assume `A` is symmetric : non-symmetric (directed) graphs need the
 magnetic Laplacian.
 
 Sparse inputs (CSR/CSC/COO, 2-D `(n, n)`, no batch) are supported on
@@ -16,21 +16,20 @@ end-to-end large-graph spectral chains without ever materializing the
 dense `(n, n)` Laplacian.
 
 Variants:
-  combinatorial(A)          — L = D − A.            Always PSD.
-  symmetric_normalized(A)   — L_sym = I − D^{−1/2} A D^{−1/2}.
+  combinatorial(A)          : L = D − A.            Always PSD.
+  symmetric_normalized(A)   : L_sym = I − D^{−1/2} A D^{−1/2}.
                               PSD, eigenvalues in [0, 2].
-  random_walk(A)            — L_rw = I − D^{−1} A.
+  random_walk(A)            : L_rw = I − D^{−1} A.
                               Eigenvalues real and in [0, 2] (similar to L_sym).
-  signed(A)                 — L^σ = D^{|σ|} − A,
+  signed(A)                 : L^σ = D^{|σ|} − A,
                               D^{|σ|}_{ii} = Σ_j |A_{ij}|.
                               PSD even with negative edge weights (Kunegis 2010).
 
 Isolated nodes (zero degree) are handled by the Moore-Penrose convention:
 when D_{ii} = 0, the corresponding row/column of D^{−1/2} and D^{−1} is
 set to zero. This makes L_sym and L_rw well-defined for arbitrary graphs;
-the isolated node then sits at eigenvalue 1 (for L_rw and the
-combinatorial form) or 0 (for L_sym). Convention follows Cheng-Wu (2024)
-SIAM J. Math. Data Sci.
+the isolated node then sits at eigenvalue 1 for L_rw and L_sym,
+and at eigenvalue 0 for the combinatorial and signed forms.
 
 References:
   Chung, F. R. K. (1997). Spectral Graph Theory. CBMS Regional Conference
@@ -50,6 +49,8 @@ References:
 """
 
 from __future__ import annotations
+
+import warnings
 
 import torch
 
@@ -80,8 +81,8 @@ def degree(A: torch.Tensor, signed: bool = False) -> torch.Tensor:
       Dense `(B, n)` for dense input, dense `(n,)` for sparse input.
 
     References:
-      Chung (1997), §1.2 — weighted degree.
-      Kunegis et al. (2010), eq. 1 — signed degree.
+      Chung (1997), §1.2 : weighted degree.
+      Kunegis et al. (2010), eq. 1 : signed degree.
     """
     if A.layout in _SPARSE_LAYOUTS:
         return _degree_sparse(A, signed=signed)
@@ -104,12 +105,13 @@ def combinatorial(A: torch.Tensor) -> torch.Tensor:
 
     References:
       Chung (1997), §1.2.
-      von Luxburg (2007), §3 — unnormalized Laplacian.
+      von Luxburg (2007), §3 : unnormalized Laplacian.
     """
     if A.layout in _SPARSE_LAYOUTS:
         return _combinatorial_sparse(A)
     _check_square_with_batch(A)
     A = drop_self_loops(A)
+    _warn_if_asymmetric(A)
     d = degree(A, signed=False)              # (B, n)
     return torch.diag_embed(d) - A
 
@@ -128,13 +130,14 @@ def symmetric_normalized(A: torch.Tensor) -> torch.Tensor:
 
     References:
       Chung (1997), §1.2.
-      von Luxburg (2007), §3 — L_sym.
-      Cheng-Wu (2024) — pseudoinverse handling of isolated nodes.
+      von Luxburg (2007), §3 : L_sym.
+      Cheng-Wu (2024) : pseudoinverse handling of isolated nodes.
     """
     if A.layout in _SPARSE_LAYOUTS:
         return _symmetric_normalized_sparse(A)
     _check_square_with_batch(A)
     A = drop_self_loops(A)
+    _warn_if_asymmetric(A)
     d = degree(A, signed=False)               # (B, n)
     d_inv_sqrt = _safe_inv_sqrt(d)            # (B, n) — zeros where d=0
     n = A.shape[-1]
@@ -159,12 +162,13 @@ def random_walk(A: torch.Tensor) -> torch.Tensor:
 
     References:
       Chung (1997), §1.5.
-      von Luxburg (2007), §3 — L_rw.
+      von Luxburg (2007), §3 : L_rw.
     """
     if A.layout in _SPARSE_LAYOUTS:
         return _random_walk_sparse(A)
     _check_square_with_batch(A)
     A = drop_self_loops(A)
+    _warn_if_asymmetric(A)
     d = degree(A, signed=False)               # (B, n)
     d_inv = _safe_inv(d)                       # (B, n) — zeros where d=0
     n = A.shape[-1]
@@ -188,15 +192,16 @@ def signed(A: torch.Tensor) -> torch.Tensor:
       Dense input → `(B, n, n)`. Sparse input → sparse-COO `(n, n)`.
 
     References:
-      Kunegis et al. (2010), eq. 5 — definition of the signed Laplacian.
-      Kunegis et al. (2010), Theorem 3.4 — PSD property and balance.
-      Mercado-Tudisco-Hein (2019), NeurIPS — Signed Power Mean Laplacians
+      Kunegis et al. (2010), eq. 5 : definition of the signed Laplacian.
+      Kunegis et al. (2010), Theorem 3.4 : PSD property and balance.
+      Mercado-Tudisco-Hein (2019), NeurIPS : Signed Power Mean Laplacians
         generalize this to a one-parameter family.
     """
     if A.layout in _SPARSE_LAYOUTS:
         return _signed_sparse(A)
     _check_square_with_batch(A)
     A = drop_self_loops(A)
+    _warn_if_asymmetric(A)
     d_abs = degree(A, signed=True)             # (B, n) — ∑_j |A_ij|
     return torch.diag_embed(d_abs) - A
 
@@ -204,6 +209,26 @@ def signed(A: torch.Tensor) -> torch.Tensor:
 # ----------------------------------------------------------------
 # Internal helpers
 # ----------------------------------------------------------------
+
+
+def _warn_if_asymmetric(A: torch.Tensor) -> None:
+    """Warn when an operator requiring real symmetry receives asymmetry.
+
+    Sparse comparison works on coalesced differences, without allocating
+    an n by n dense matrix. This is an entry check, outside hot loops.
+    """
+    if A.layout in _SPARSE_LAYOUTS:
+        coo = A.to_sparse_coo().coalesce()
+        difference = (coo - coo.mT).coalesce().values()
+        symmetric = torch.allclose(difference, torch.zeros_like(difference))
+    else:
+        symmetric = torch.allclose(A, A.mT)
+    if not symmetric:
+        warnings.warn(
+            "A must be symmetric for this operator; asymmetric input was supplied.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def _check_square_with_batch(A: torch.Tensor) -> None:
@@ -224,7 +249,7 @@ def _safe_inv_sqrt(d: torch.Tensor) -> torch.Tensor:
 
     Moore-Penrose convention for isolated nodes (Cheng-Wu 2024).
     Uses `torch.where` rather than boolean-mask assignment so the
-    operation stays fully vectorized — important for `torch.vmap`,
+    operation stays fully vectorized : important for `torch.vmap`,
     second-order autograd, and `torch.compile`. We pre-clamp the
     rsqrt input so the unselected branch never evaluates to `inf`
     (which would still appear in the autograd graph even though
@@ -274,6 +299,7 @@ def _check_2d_square_sparse(A: torch.Tensor) -> None:
 
 def _coalesced_no_self_loops(A: torch.Tensor) -> torch.Tensor:
     """Coalesce A to sparse-COO and drop diagonal entries."""
+    _warn_if_asymmetric(A)
     A_coo = A.to_sparse_coo().coalesce()
     indices = A_coo.indices()
     values = A_coo.values()
@@ -320,7 +346,7 @@ def _sparse_DminusA(
       Coalesced sparse-COO `(n, n)`.
     """
     n = A_noloop.shape[-1]
-    device, dtype = A_noloop.device, A_noloop.dtype
+    device = A_noloop.device
 
     diag_indices = torch.arange(n, device=device).unsqueeze(0).expand(2, n)
     diag_values = diag_sign * d_diag
@@ -365,7 +391,7 @@ def _random_walk_sparse(A: torch.Tensor) -> torch.Tensor:
     d = torch.sparse.sum(A_noloop, dim=-1).to_dense()       # (n,)
     d_inv = _safe_inv(d)
     row = A_noloop.indices()[0]
-    scale = d_inv[row]                                        # (nnz,) — row scaling only
+    scale = d_inv[row]                       # (nnz,) — row scaling only
     ones = torch.ones_like(d_inv)
     return _sparse_DminusA(A_noloop, ones, A_value_scale=scale)
 

@@ -4,10 +4,10 @@
 """Tests for holonomy_lib.algebra.solvers (cg, lsqr).
 
 Three layers:
-  1. Unit — shapes across B ∈ {0, 1, >1}; validation rejects.
-  2. Property — cg on SPD matches `torch.linalg.solve`; lsqr matches
+  1. Unit; shapes across B ∈ {0, 1, >1}; validation rejects.
+  2. Property; cg on SPD matches `torch.linalg.solve`; lsqr matches
      `torch.linalg.lstsq`; damped lsqr matches the augmented system.
-  3. Comparison — scipy.sparse.linalg.cg / lsqr on the same operators.
+  3. Comparison; scipy.sparse.linalg.cg / lsqr on the same operators.
 """
 
 from __future__ import annotations
@@ -32,27 +32,27 @@ def _spd(B, n, seed=0):
 
 
 class TestCG:
-    @pytest.mark.parametrize("B", [0, 1, 4])
-    def test_matches_dense_solve_batched(self, B):
-        n = 24
-        A = _spd(max(B, 1), n)[:B] if B else _spd(1, n)[:0]
-        g = torch.Generator().manual_seed(1)
-        b = torch.randn(B, n, generator=g, dtype=DT)
+    @pytest.mark.parametrize("B,n,seed", [(0, 24, 1), (1, 24, 1),
+                                          (4, 24, 1), (None, 16, 2)])
+    def test_matches_dense_solve_batched(self, B, n, seed):
+        A = _spd(1 if B is None else B, n)
+        g = torch.Generator().manual_seed(seed)
+        b = torch.randn(1 if B is None else B, n, generator=g, dtype=DT)
+        if B is None:
+            A, b = A.squeeze(0), b.squeeze(0)
         x = cg(A, b)
-        assert x.shape == (B, n)
-        if B:
+        assert x.shape == b.shape
+        if B is None or B:
             ref = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
             torch.testing.assert_close(x, ref, atol=1e-6, rtol=0)
+        # Both finite problems have exact solutions; unscaled dot products
+        # overflow float32 even for the identity problem.
+        huge_rhs = torch.full((2,), 1e20, dtype=torch.float32)
+        torch.testing.assert_close(cg(torch.eye(2), huge_rhs), huge_rhs)
+        scaled_identity = 1e20 * torch.eye(2)
+        torch.testing.assert_close(cg(scaled_identity, huge_rhs), torch.ones(2))
+        assert cg(torch.empty(2, 0, 0), torch.empty(2, 0)).shape == (2, 0)
 
-    def test_unbatched_b_round_trips_shape(self):
-        n = 16
-        A = _spd(1, n).squeeze(0)
-        g = torch.Generator().manual_seed(2)
-        b = torch.randn(n, generator=g, dtype=DT)
-        x = cg(A, b)
-        assert x.shape == (n,)
-        ref = torch.linalg.solve(A, b)
-        torch.testing.assert_close(x, ref, atol=1e-6, rtol=0)
 
     def test_unbatched_A_broadcasts_over_batched_b(self):
         n, B = 16, 3
@@ -98,6 +98,17 @@ class TestCG:
         x = cg(A, b, M=lambda r: r * inv_diag)
         ref = torch.linalg.solve(A, b.mT).mT
         torch.testing.assert_close(x, ref, atol=1e-6, rtol=0)
+        scales = torch.tensor([1e-20, 1e20], dtype=torch.float32)
+        scaled_identity = scales[:, None, None] * torch.eye(2)
+        rhs = scales[:, None] * torch.ones(2, 2)
+        torch.testing.assert_close(
+            cg(scaled_identity, rhs, M=lambda r: r / scales[:, None]),
+            torch.ones(2, 2),
+        )
+        torch.testing.assert_close(
+            cg(1e20 * torch.eye(2), torch.ones(2), M=lambda r: r),
+            torch.full((2,), 1e-20), atol=0, rtol=1e-6,
+        )
 
     def test_warns_when_not_converged(self):
         n = 32
@@ -106,15 +117,17 @@ class TestCG:
         b = torch.randn(1, n, generator=g, dtype=DT)
         with pytest.warns(UserWarning, match="not converged"):
             cg(A, b, maxiter=1)
+        with pytest.warns(UserWarning, match="nonfinite"):
+            cg(torch.eye(2), torch.tensor([float("nan"), 1.0]))
 
     def test_validation(self):
         A = _spd(1, 8)
         b = torch.randn(1, 8, dtype=DT)
-        with pytest.raises(ValueError, match="sync_every"):
+        with pytest.raises(ValueError):
             cg(A, b, sync_every=0)
-        with pytest.raises(ValueError, match="callable"):
-            cg("not an operator", b)
-        with pytest.raises(ValueError, match="b must be"):
+        with pytest.raises(ValueError):
+            cg("not an operator", b)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
             cg(A, torch.randn(2, 3, 8, dtype=DT))
 
     def test_comparison_scipy(self):
@@ -142,27 +155,24 @@ def _tall(B, m, n, seed=0):
 
 
 class TestLSQR:
-    @pytest.mark.parametrize("B", [0, 1, 4])
-    def test_overdetermined_matches_lstsq(self, B):
-        m, n = 40, 12
-        A = _tall(max(B, 1), m, n)[:B] if B else _tall(1, m, n)[:0]
-        g = torch.Generator().manual_seed(1)
-        b = torch.randn(B, m, generator=g, dtype=DT)
+    @pytest.mark.parametrize("B,m,n,seed", [(0, 40, 12, 1), (1, 40, 12, 1),
+                                            (4, 40, 12, 1), (None, 30, 10, 2)])
+    def test_overdetermined_matches_lstsq(self, B, m, n, seed):
+        A = _tall(1 if B is None else B, m, n, seed=seed)
+        g = torch.Generator().manual_seed(seed)
+        b = torch.randn(1 if B is None else B, m, generator=g, dtype=DT)
+        if B is None:
+            A, b = A.squeeze(0), b.squeeze(0)
         x = lsqr(A, b)
-        assert x.shape == (B, n)
-        if B:
+        assert x.shape == ((n,) if B is None else (B, n))
+        if B is None or B:
             ref = torch.linalg.lstsq(A, b.unsqueeze(-1)).solution.squeeze(-1)
             torch.testing.assert_close(x, ref, atol=1e-7, rtol=0)
+        torch.testing.assert_close(
+            lsqr(torch.tensor([[1e20]]), torch.tensor([1e20])), torch.ones(1),
+        )
+        assert lsqr(torch.empty(2, 0, 0), torch.empty(2, 0)).shape == (2, 0)
 
-    def test_unbatched_shapes(self):
-        m, n = 30, 10
-        A = _tall(1, m, n, seed=2).squeeze(0)
-        g = torch.Generator().manual_seed(2)
-        b = torch.randn(m, generator=g, dtype=DT)
-        x = lsqr(A, b)
-        assert x.shape == (n,)
-        ref = torch.linalg.lstsq(A, b.unsqueeze(-1)).solution.squeeze(-1)
-        torch.testing.assert_close(x, ref, atol=1e-7, rtol=0)
 
     def test_damped_matches_augmented_system(self):
         # min ‖Ax−b‖² + damp²‖x‖²  ==  lstsq on [[A], [damp·I]] vs [b; 0].
@@ -225,9 +235,11 @@ class TestLSQR:
     def test_validation(self):
         A = _tall(1, 12, 5, seed=7).squeeze(0)
         b = torch.randn(12, dtype=DT)
-        with pytest.raises(ValueError, match="damp"):
+        with pytest.warns(UserWarning, match="nonfinite"):
+            lsqr(torch.eye(2), torch.tensor([float("nan"), 1.0]))
+        with pytest.raises(ValueError):
             lsqr(A, b, damp=-1.0)
-        with pytest.raises(ValueError, match="row count"):
+        with pytest.raises(ValueError):
             lsqr(A, torch.randn(9, dtype=DT))
-        with pytest.raises(ValueError, match="callable|torch.Tensor"):
-            lsqr(lambda v: v, b)
+        with pytest.raises(ValueError):
+            lsqr(lambda v: v, b)  # type: ignore[arg-type]

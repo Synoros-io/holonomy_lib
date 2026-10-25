@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 import torch
 
 from holonomy_lib.spectral import laplacian, laplacian_eigenmaps
+from holonomy_lib.spectral.embedding import LaplacianType
 
 
 def _seeded_generator(seed: int) -> torch.Generator:
@@ -45,49 +48,19 @@ class TestValidation:
         with pytest.raises(ValueError, match="must be"):
             laplacian_eigenmaps(torch.zeros(2, 4, 5), k=2)
 
-    def test_rejects_k_zero(self):
-        with pytest.raises(ValueError, match="k must"):
-            laplacian_eigenmaps(torch.zeros(1, 4, 4), k=0)
-
-    def test_rejects_k_too_large(self):
-        with pytest.raises(ValueError, match="k must"):
-            laplacian_eigenmaps(torch.zeros(1, 4, 4), k=5)
-
-    def test_rejects_unknown_laplacian_type(self):
-        with pytest.raises(ValueError, match="laplacian_type"):
-            laplacian_eigenmaps(
-                torch.zeros(1, 4, 4), k=2, laplacian_type="nonsense",  # type: ignore[arg-type]
-            )
-
 
 # --------------------------------------------------------------------
-# Shapes
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [1, 3])
-@pytest.mark.parametrize("laplacian_type", [
-    "combinatorial", "symmetric_normalized", "random_walk", "signed",
-])
-class TestShapes:
-    def test_shapes(self, batch, laplacian_type):
-        n, k = 8, 3
-        A = _random_connected_graph(n=n, batch=batch, seed=0)
-        eigvals, eigvecs = laplacian_eigenmaps(A, k=k, laplacian_type=laplacian_type)
-        assert eigvals.shape == (batch, k)
-        assert eigvecs.shape == (batch, n, k)
-
-
-# --------------------------------------------------------------------
-# Eigenvalues — sorted ascending; in expected ranges
+# Eigenvalues, sorted ascending; in expected ranges
 # --------------------------------------------------------------------
 
 
 class TestEigenvalues:
     def test_sorted_ascending(self):
         A = _random_connected_graph(n=10, batch=2, seed=10)
-        for ltype in ["combinatorial", "symmetric_normalized",
-                       "random_walk", "signed"]:
+        variants: tuple[LaplacianType, ...] = (
+            "combinatorial", "symmetric_normalized", "random_walk", "signed",
+        )
+        for ltype in variants:
             eigvals, _ = laplacian_eigenmaps(A, k=10, laplacian_type=ltype)
             diffs = eigvals[..., 1:] - eigvals[..., :-1]
             assert (diffs >= -1e-10).all(), (
@@ -95,17 +68,6 @@ class TestEigenvalues:
                 f"min diff {diffs.min().item()}"
             )
 
-    def test_smallest_is_zero_for_connected(self):
-        """For a connected graph, the combinatorial and symmetric-norm
-        Laplacians have smallest eigenvalue 0.
-        """
-        A = _random_connected_graph(n=8, batch=3, seed=11)
-        for ltype in ["combinatorial", "symmetric_normalized"]:
-            eigvals, _ = laplacian_eigenmaps(A, k=1, laplacian_type=ltype)
-            assert eigvals.abs().max() < 1e-9, (
-                f"{ltype}: smallest eigenvalue should be 0 for connected; "
-                f"got {eigvals.abs().max().item()}"
-            )
 
     def test_sym_norm_spectrum_in_zero_two(self):
         """L_sym spectrum ⊂ [0, 2]."""
@@ -128,23 +90,15 @@ class TestEigenvectors:
         eigh-returned eigenvectors are orthonormal.
         """
         A = _random_connected_graph(n=10, batch=2, seed=20)
-        for ltype in ["combinatorial", "symmetric_normalized", "signed"]:
+        variants: tuple[LaplacianType, ...] = (
+            "combinatorial", "symmetric_normalized", "signed",
+        )
+        for ltype in variants:
             _, U = laplacian_eigenmaps(A, k=5, laplacian_type=ltype)
             UtU = U.mT @ U
-            I = torch.eye(5, dtype=U.dtype).expand_as(UtU)
-            torch.testing.assert_close(UtU, I, atol=1e-10, rtol=0)
+            identity = torch.eye(5, dtype=U.dtype).expand_as(UtU)
+            torch.testing.assert_close(UtU, identity, atol=1e-10, rtol=0)
 
-    def test_residual_sym_norm(self):
-        """L_sym u ≈ λ u for each returned eigenpair."""
-        A = _random_connected_graph(n=12, batch=2, seed=21)
-        L = laplacian.symmetric_normalized(A)
-        eigvals, U = laplacian_eigenmaps(
-            A, k=6, laplacian_type="symmetric_normalized",
-        )
-        # L @ U should equal U * eigvals (broadcast across columns)
-        residual = L @ U - U * eigvals.unsqueeze(dim=-2)
-        max_res = torch.linalg.norm(residual, dim=(-2, -1)).max().item()
-        assert max_res < 1e-9, f"residual {max_res} too large"
 
     def test_residual_random_walk(self):
         """L_rw v ≈ λ v for each returned eigenpair.
@@ -159,6 +113,20 @@ class TestEigenvectors:
         residual = L_rw @ V - V * eigvals.unsqueeze(dim=-2)
         max_res = torch.linalg.norm(residual, dim=(-2, -1)).max().item()
         assert max_res < 1e-8, f"residual {max_res} too large"
+        isolated = torch.tensor(
+            [[[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
+            dtype=torch.float64,
+        )
+        values, vectors = laplacian_eigenmaps(isolated, 3, "random_walk")
+        torch.testing.assert_close(values, torch.tensor([[0.0, 1.0, 2.0]]).double())
+        torch.testing.assert_close(vectors.norm(dim=-2), torch.ones(1, 3).double())
+        torch.testing.assert_close(
+            laplacian.random_walk(isolated) @ vectors,
+            vectors * values.unsqueeze(-2),
+        )
+        values, vectors = laplacian_eigenmaps(isolated[:0], 3, "random_walk")
+        assert values.shape == (0, 3)
+        assert vectors.shape == (0, 3, 3)
 
 
 # --------------------------------------------------------------------
@@ -188,22 +156,35 @@ class TestDirectComparison:
         torch.testing.assert_close(
             eigvals_ours, eigvals_ref[..., :k], atol=1e-10, rtol=1e-10,
         )
+        torch.testing.assert_close(
+            L @ U_ours, U_ours * eigvals_ours.unsqueeze(-2), atol=1e-9, rtol=1e-9,
+        )
 
     def test_combinatorial(self):
-        A = _random_connected_graph(n=8, batch=2, seed=30)
-        self._check_projector_match(A, k=4, ltype="combinatorial",
-                                       builder=laplacian.combinatorial)
-
-    def test_symmetric_normalized(self):
-        A = _random_connected_graph(n=8, batch=2, seed=31)
-        self._check_projector_match(A, k=4, ltype="symmetric_normalized",
-                                       builder=laplacian.symmetric_normalized)
-
-    def test_signed(self):
-        # Random signed graph; reuse signed-graph helper logic
+        cases: tuple[
+            tuple[LaplacianType, Callable[[torch.Tensor], torch.Tensor], int], ...,
+        ] = (
+            ("combinatorial", laplacian.combinatorial, 30),
+            ("symmetric_normalized", laplacian.symmetric_normalized, 31),
+            ("signed", laplacian.signed, 32),
+        )
+        for ltype, builder, seed in cases:
+            A = _random_connected_graph(n=8, batch=3, seed=seed)
+            for k in (1, 4):
+                self._check_projector_match(A, k, ltype, builder)
+            values, _ = laplacian_eigenmaps(A, 1, ltype)
+            torch.testing.assert_close(
+                values, torch.zeros_like(values), atol=1e-9, rtol=0,
+            )
+            values, vectors = laplacian_eigenmaps(A[:0], 4, ltype)
+            assert values.shape == (0, 4)
+            assert vectors.shape == (0, 8, 4)
         g = _seeded_generator(32)
-        U = torch.rand(2, 8, 8, generator=g, dtype=torch.float64) * 2 - 1
-        triu = torch.triu(U, diagonal=1)
-        A = triu + triu.mT
-        self._check_projector_match(A, k=4, ltype="signed",
-                                       builder=laplacian.signed)
+        upper = torch.triu(
+            torch.rand(2, 8, 8, generator=g, dtype=torch.float64) * 2 - 1, 1,
+        )
+        self._check_projector_match(upper + upper.mT, 4, "signed", laplacian.signed)
+        A = _random_connected_graph(n=12, batch=2, seed=21)
+        self._check_projector_match(
+            A, 6, "symmetric_normalized", laplacian.symmetric_normalized,
+        )

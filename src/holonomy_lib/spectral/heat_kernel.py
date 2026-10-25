@@ -10,9 +10,9 @@ direct route through eigendecomposition is O(n³); for medium-to-large
 graphs and small-to-medium diffusion times we instead expand `exp(-tL)`
 in Chebyshev polynomials of a rescaled Laplacian (Hammond, Vandergheynst,
 Gribonval 2011). Each polynomial term costs one matmul with L, so the
-total cost drops to O(K · n³) dense (or O(K · |E|) for sparse — but
-this implementation is dense first; sparse-Lanczos variants are
-planned).
+total cost is O(K · n³) for the dense kernel, or O(K · n² · d)
+when applying it to d signal columns. This implementation accepts
+dense Laplacians; algebra.lanczos_eigsh provides sparse eigenpairs.
 
 The chief advantage is that **K only needs to be modest** (tens, not
 hundreds) for tight accuracy: the Chebyshev coefficients of `exp(-τy)`
@@ -38,7 +38,7 @@ For `L = laplacian.symmetric_normalized(A)` the spectrum is guaranteed
 in `[0, 2]`, so `lambda_max = 2.0` is a safe default. For other
 Laplacians (combinatorial, signed) pass `lambda_max` explicitly or
 estimate via `torch.linalg.eigvalsh(L)[-1]` (still O(n³); cheaper power
-iteration is planned).
+iteration can supply a cheaper estimate).
 
 References:
   Hammond, D. K., Vandergheynst, P., Gribonval, R. (2011). Wavelets on
@@ -49,7 +49,7 @@ References:
     polynomial approximation for distributed signal processing.
     DCOSS 2011. Distributed-implementation companion paper.
   Abramowitz, M., Stegun, I. A. (1972). Handbook of Mathematical
-    Functions, §9.6 — modified Bessel functions and the Jacobi-Anger
+    Functions, §9.6 : modified Bessel functions and the Jacobi-Anger
     identity used to derive `c_k(τ) = (2 − δ_{k,0})(−1)^k I_k(τ)`.
 """
 
@@ -58,6 +58,8 @@ from __future__ import annotations
 import numpy as np
 import scipy.special
 import torch
+
+from holonomy_lib.spectral.laplacian import _warn_if_asymmetric
 
 # Default Chebyshev expansion order. Empirically (Hammond-Vandergheynst-
 # Gribonval 2011 §6 Fig. 4, and our own audit), `K = 30` gives sub-1e-12
@@ -110,6 +112,11 @@ def heat_kernel_chebyshev(
 
     References:
       Hammond-Vandergheynst-Gribonval (2011), eq. 3.3.
+
+    The polynomial recurrence is sequential in K: each term depends on
+    the two preceding terms. Batch members and signal columns are
+    processed together. Coefficients use SciPy on CPU and one transfer
+    to L.device; PyTorch has no general-order scaled Bessel I_k.
     """
     if t < 0:
         raise ValueError(f"diffusion time t must be >= 0, got {t}")
@@ -131,6 +138,7 @@ def heat_kernel_chebyshev(
                 f"match L's {tuple(L.shape[:-1])}"
             )
 
+    _warn_if_asymmetric(L)
     n = L.shape[-1]
     # Rescale L to L̃ with spectrum in [-1, 1] for the Chebyshev domain.
     eye = torch.eye(n, device=L.device, dtype=L.dtype).expand_as(L)

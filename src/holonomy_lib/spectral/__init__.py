@@ -18,7 +18,7 @@ Currently implemented:
                                       : signed-directed Hermitian
                                           Laplacian; unifies Kunegis
                                           signed and magnetic
-                                          (Fiorini 2023; He et al. 2023)
+                                          (He et al. 2022, MSGNN)
   magnetic.sign_magnetic_symmetric_normalized(A, q)
                                       : normalized signed-directed form
   laplacian_eigenmaps(A, k, ...)      : bottom-k spectral embedding

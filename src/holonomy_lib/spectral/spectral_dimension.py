@@ -31,6 +31,8 @@ References:
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 
@@ -62,26 +64,35 @@ def spectral_dimension(
             f"t must be a 1-D tensor of at least 2 sample times, got shape "
             f"{tuple(t.shape)}"
         )
-    if (t <= 0).any():
-        raise ValueError("t must be strictly positive (a log-log slope is fit)")
     if eigenvalues.ndim < 1:
         raise ValueError(
             f"eigenvalues must have a mode axis (ndim >= 1), got shape "
             f"{tuple(eigenvalues.shape)}"
         )
+    if eigenvalues.shape[-1] == 0:
+        raise ValueError("eigenvalues must contain at least one mode")
+    if not eigenvalues.is_floating_point() or not t.is_floating_point():
+        raise ValueError("eigenvalues and t must have real floating-point dtypes")
+    if not torch.isfinite(t).all() or (t <= 0).any():
+        raise ValueError("t must be finite and strictly positive")
+    if not torch.isfinite(eigenvalues).all():
+        raise ValueError("eigenvalues must be finite")
 
     squeeze = eigenvalues.ndim == 1
     lam = (eigenvalues.unsqueeze(0) if squeeze else eigenvalues).clamp(min=0.0)
 
-    # p(t_j) = mean_i exp(-t_j·λ_i): (B, 1, n) * (1, T, 1) -> (B, T, n) -> (B, T)
-    p = torch.exp(-lam[:, None, :] * t[None, :, None]).mean(dim=-1)
-
     # least-squares slope of log p against log t, per batch element
     log_t = torch.log(t)                                    # (T,)
-    log_p = torch.log(p)                                    # (B, T)
     lt_centered = log_t - log_t.mean()                      # (T,)
+    variance = lt_centered.square().sum()
+    if variance == 0:
+        raise ValueError("t must have nonzero log-time variance")
+    # Keep the sum in log space, since valid late times can underflow
+    # every exp(-t * lambda) even though the fitted slope is finite.
+    log_p = torch.logsumexp(-lam.unsqueeze(-2) * t.unsqueeze(-1), dim=-1)
+    log_p = log_p - math.log(lam.shape[-1])
     lp_centered = log_p - log_p.mean(dim=-1, keepdim=True)  # (B, T)
-    slope = (lp_centered * lt_centered).sum(dim=-1) / (lt_centered * lt_centered).sum()
+    slope = (lp_centered * lt_centered).sum(dim=-1) / variance
     d_s = -2.0 * slope
 
     return d_s.squeeze(0) if squeeze else d_s

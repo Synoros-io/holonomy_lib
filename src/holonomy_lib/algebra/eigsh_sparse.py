@@ -1,40 +1,13 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Smallest-algebraic eigenpairs of a sparse symmetric matrix (hybrid backends).
+"""Smallest-algebraic eigenpairs of sparse real symmetric matrices.
 
-The bottom of the spectrum of a large sparse PSD operator (graph/sheaf
-Laplacian) is the regime plain Lanczos handles worst: the smallest
-eigenvalues are clustered near 0 while Krylov iteration converges to the
-dominant end first. The two standard remedies, both used here:
-
-  - **Shift-and-invert** (Ericsson-Ruhe 1980): run the iteration on
-    `(A − σI)^{-1}` with σ just below the spectrum; the smallest λ of A
-    become the dominant eigenvalues of the inverse. Needs a sparse
-    factorization (LU), whose fill-in grows superlinearly with n — the
-    right tool up to medium n.
-  - **LOBPCG** (Knyazev 2001) with an incomplete-LU preconditioner
-    approximating `A^{-1}`: factorization-free iteration whose
-    convergence on the clustered-near-zero modes is restored by the
-    preconditioner — the right tool for large n.
-
-Backend selection (`solver="auto"`):
-  - CUDA sparse input → `torch.lobpcg(largest=False)` (native, stays on
-    device; unpreconditioned — see scale-of-validity note below).
-  - CPU sparse, `n ≤ SPARSE_SA_ITER_SOLVER_N` → SciPy `eigsh` shift-invert.
-  - CPU sparse, larger → SciPy `lobpcg` + `spilu` preconditioner.
-
-The two SciPy branches compute the SAME modes (validated to ~1e-14
-against each other and against dense `eigvalsh` in
-`tests/algebra/test_eigsh_sparse.py`; originally validated in
-synoros-substrate's `sheaf_scale.py`, 2026-06-06). The threshold between
-them is a throughput choice only.
-
-Scale-of-validity, CUDA path: `torch.lobpcg` has no ILU-class
-preconditioner, so its convergence on Laplacians with modes clustered
-near 0 degrades with n; validated here on test-scale problems only.
-For large ill-conditioned spectra prefer the CPU SciPy path until a
-torch-native preconditioner lands.
+CPU inputs use SciPy shift-invert eigsh or preconditioned LOBPCG; other
+devices use torch.lobpcg. The SciPy boundary explicitly computes in CPU
+float64 and casts the result back. All backends are nondifferentiable.
+A Gershgorin lower bound puts every shift-invert pole below the spectrum,
+including for indefinite inputs. Full/near-full requests use dense eigh.
 
 References:
   Ericsson, T., Ruhe, A. (1980). The spectral transformation Lanczos
@@ -43,67 +16,36 @@ References:
   Knyazev, A. V. (2001). Toward the optimal preconditioned eigensolver:
     locally optimal block preconditioned conjugate gradient method.
     SIAM J. Sci. Comput. 23(2):517-541.
-  Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd ed.
-    SIAM, §10.3-10.4 (incomplete-LU preconditioning).
   Saad, Y. (2011). Numerical Methods for Large Eigenvalue Problems,
-    2nd ed. SIAM, §3.2 (shift-and-invert rationale).
+    2nd ed. SIAM, §3.2 (spectral transformation).
+  Golub, G. H., Van Loan, C. F. (2013). Matrix Computations, 4th ed.
+    Johns Hopkins University Press, §7.2 (Gershgorin bounds).
 """
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import torch
 
-# Above this n, the SciPy CPU path switches from eigsh shift-invert
-# (full sparse LU — fill-in grows too fast beyond this) to iterative
-# LOBPCG + incomplete-LU. THROUGHPUT threshold only: both branches
-# solve the same bottom-k modes (verified to ~1e-14 in tests). Set in
-# synoros-substrate `sheaf_scale.py` on sheaf Laplacians up to ~150k
-# stalk-dims (2026-06). **Scale of validity**: CPU, Laplacian-like
-# sparsity (bounded fill per row); re-derive if either changes.
-# Catalog: `SPARSE_SA_ITER_SOLVER_N` in `notes/magic_numbers.md`.
+# Existing throughput threshold from substrate's sheaf_scale.py (2026-06).
+# Its measurements concern Laplacian-like CPU sparsity, not every operator.
 SPARSE_SA_ITER_SOLVER_N: int = 8000
 
-# Shift-invert pole: a small NEGATIVE shift so `(A − σI)` is
-# non-singular despite a λ=0 kernel (Laplacians), placing the pole just
-# below the spectrum so the solve targets the SMALLEST eigenvalues.
-# A pole offset in the spirit of the library's floor convention, not
-# architectural. Catalog: `SPARSE_SA_SHIFT_INVERT_POLE`.
-SPARSE_SA_SHIFT_INVERT_POLE: float = -1e-6
-
-# spilu/LOBPCG numerical knobs for the large-n CPU path. These affect
-# CONVERGENCE RATE and achieved precision of the modes, not WHICH modes
-# (verified against the eigsh branch). eps-shift `SPILU_EPS_FRAC ·
-# mean(diag A)` makes a singular A factorable by the incomplete LU;
-# drop_tol/fill_factor trade preconditioner quality against memory;
-# tol/maxiter are the LOBPCG stopping criteria. Values from
-# synoros-substrate `sheaf_scale.py` (validated 2026-06-06 on sheaf
-# Laplacians, n up to ~150k). Catalog: `SPARSE_SA_SPILU_LOBPCG_KNOBS`
-# (one entry for the set).
+# Existing cataloged convergence/preconditioner knobs from sheaf_scale.py.
 SPILU_EPS_FRAC: float = 1e-3
 SPILU_DROP_TOL: float = 1e-3
 SPILU_FILL_FACTOR: int = 10
 LOBPCG_TOL: float = 1e-6
 LOBPCG_MAXITER: int = 100
 
-_SPARSE_LAYOUTS = (
-    torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,
-)
+# LOBPCG uses current vectors, residuals and previous search directions.
+# torch.lobpcg requires n >= 3*k for this three-block Ritz subspace.
+LOBPCG_SUBSPACE_BLOCKS: int = len(("iterate", "residual", "search_direction"))
 
+_SPARSE_LAYOUTS = (torch.sparse_coo, torch.sparse_csr, torch.sparse_csc)
 Solver = Literal["auto", "eigsh", "lobpcg", "torch_lobpcg"]
-
-
-def _to_scipy_csr(A: torch.Tensor):
-    """Torch sparse (any layout) → SciPy CSR, float64 CPU."""
-    import scipy.sparse as sp
-
-    coo = (A if A.layout == torch.sparse_coo else A.to_sparse_coo()).coalesce()
-    idx = coo.indices().cpu().numpy()
-    vals = coo.values().to(torch.float64).cpu().numpy()
-    return sp.coo_matrix(
-        (vals, (idx[0], idx[1])), shape=tuple(coo.shape),
-    ).tocsr()
 
 
 def eigsh_sparse_sa(
@@ -113,101 +55,171 @@ def eigsh_sparse_sa(
     solver: Solver = "auto",
     generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bottom-k eigenpairs `(eigvals (k,), eigvecs (n, k))` of sparse symmetric `A`.
-
-    Eigenvalues ascend (smallest first); eigenvectors are orthonormal,
-    columns aligned to the eigenvalues. Single-instance 2-D only (same
-    contract as the sparse LA path of `lanczos_eigsh`). Output lands on
-    `A.device` / `A.dtype`; the SciPy branches compute in float64 on CPU
-    and cast back.
+    """Return the smallest algebraic eigenpairs of sparse symmetric ``A``.
 
     Args:
-      A: sparse `(n, n)` symmetric (COO/CSR/CSC). Symmetry is assumed,
-        not checked.
-      k: number of eigenpairs, `1 ≤ k < n` (strict: the iterative
-        backends need at least one leftover dimension).
-      sigma: shift-invert pole for the `eigsh` branch. Default
-        `SPARSE_SA_SHIFT_INVERT_POLE` (just below a PSD spectrum). Only
-        meaningful for `solver="eigsh"`/auto-small; ignored by the
-        LOBPCG branches.
-      solver: `"auto"` (dispatch by device and size), `"eigsh"` (SciPy
-        shift-invert), `"lobpcg"` (SciPy LOBPCG + spilu), or
-        `"torch_lobpcg"` (native, device-preserving, unpreconditioned).
-      generator: torch generator for the LOBPCG starting block (both
-        LOBPCG branches); ignored by `eigsh`.
+      A: real sparse ``(n, n)`` COO/CSR/CSC. Asymmetry emits a warning.
+        Grad-requiring inputs raise an error; detach explicitly to use
+        this nondifferentiable solver.
+      k: number of eigenpairs, ``1 <= k <= n``. Full/near-full requests
+        use dense eigh because iterative backend subspaces do not fit.
+      sigma: optional eigsh pole, strictly below the Gershgorin lower
+        bound. The default is that bound minus a dtype-scaled margin.
+        LOBPCG does not use a pole; explicit sigma is rejected there.
+      solver: ``auto`` selects torch.lobpcg off CPU, SciPy eigsh on CPU
+        up to ``SPARSE_SA_ITER_SOLVER_N``, then SciPy LOBPCG with shifted
+        incomplete-LU preconditioning. The three explicit names are
+        ``eigsh``, ``lobpcg`` and ``torch_lobpcg``.
+      generator: random-start generator compatible with ``A.device``.
+        Used by every iterative backend, including native LOBPCG.
 
     Returns:
-      `(eigvals (k,), eigvecs (n, k))` on `A`'s device/dtype.
+      Ascending eigenvalues ``(k,)`` and orthonormal eigenvector columns
+      ``(n, k)``, on ``A.device`` with ``A.dtype``. SciPy computes in
+      float64 on CPU; its transfer is an explicit backend boundary.
+
+    Notes:
+      Native LOBPCG is unpreconditioned; clustered eigenvalues can need
+      more iterations than the fixed cataloged limit. SciPy's shifted
+      ILU preconditioner is intended for Laplacian-like sparse problems.
 
     References:
-      Ericsson-Ruhe (1980); Knyazev (2001); Saad (2011) §3.2. See the
-      module docstring for the full citations and backend rationale.
+      Ericsson and Ruhe (1980); Knyazev (2001); Saad (2011), §3.2;
+      Golub and Van Loan (2013), §7.2. Full citations above.
     """
-    if A.layout not in _SPARSE_LAYOUTS:
-        raise ValueError(
-            f"A must be a sparse tensor (COO/CSR/CSC); got layout={A.layout}"
-        )
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
-        raise ValueError(
-            f"sparse A must be (n, n); got A.shape={tuple(A.shape)}"
-        )
+        raise ValueError(f"sparse A must be (n, n); got {A.shape}")
+    if A.layout not in _SPARSE_LAYOUTS:
+        raise ValueError("A must be a sparse tensor (COO/CSR/CSC)")
+    if not A.is_floating_point():
+        raise ValueError("A must have a real floating dtype")
     n = A.shape[0]
-    if not 1 <= k < n:
-        raise ValueError(f"k must satisfy 1 <= k < n={n}; got k={k}")
+    if not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= n:
+        raise ValueError(f"k must satisfy 1 <= k <= n={n}; got k={k}")
     if solver not in ("auto", "eigsh", "lobpcg", "torch_lobpcg"):
+        raise ValueError("solver must be auto, eigsh, lobpcg or torch_lobpcg")
+    if A.requires_grad:
         raise ValueError(
-            f"solver must be one of 'auto', 'eigsh', 'lobpcg', "
-            f"'torch_lobpcg'; got solver={solver!r}"
+            "sparse eigensolvers do not support autograd; detach A explicitly"
         )
+    if sigma is not None and not math.isfinite(sigma):
+        raise ValueError("sigma must be finite")
+    from holonomy_lib.algebra.lanczos import _warn_asymmetric
 
+    _warn_asymmetric(A)
+    coo = A.to_sparse_coo().coalesce()
+    if not torch.isfinite(coo.values()).all():
+        raise ValueError("A must have finite entries")
     if solver == "auto":
-        if A.is_cuda:
+        if A.device.type != "cpu":
             solver = "torch_lobpcg"
         elif n <= SPARSE_SA_ITER_SOLVER_N:
             solver = "eigsh"
         else:
             solver = "lobpcg"
+    if sigma is not None and solver != "eigsh":
+        raise ValueError("sigma is only used by the eigsh backend")
+
+    row, column = coo.indices()
+    entries = coo.values()
+    diagonal = entries.new_zeros(n).scatter_add(0, row, entries * (row == column))
+    radius = entries.new_zeros(n).scatter_add(0, row, entries.abs() * (row != column))
+    lower = (diagonal - radius).amin()
+    scale = (diagonal.abs() + radius).amax()
+    if sigma is not None and not bool(sigma < lower):
+        raise ValueError("sigma must be strictly below the Gershgorin lower bound")
+    # Zero operators have an arbitrary orthonormal eigenspace and need
+    # neither an iterative solve nor a singular sparse factorization.
+    if not bool(scale):
+        return entries.new_zeros(k), torch.eye(n, k, dtype=A.dtype, device=A.device)
+    if k == n or (solver != "eigsh" and n < LOBPCG_SUBSPACE_BLOCKS * k):
+        values, vectors = torch.linalg.eigh(A.to_dense())
+        return values[:k], vectors[:, :k]
 
     if solver == "torch_lobpcg":
-        coo = (
-            A if A.layout == torch.sparse_coo else A.to_sparse_coo()
-        ).coalesce()
-        vals, vecs = torch.lobpcg(
-            coo, k=k, largest=False, tol=LOBPCG_TOL, niter=LOBPCG_MAXITER,
+        initial = torch.randn(n, k, dtype=A.dtype, device=A.device, generator=generator)
+        values, vectors = torch.lobpcg(
+            coo,
+            k=k,
+            X=initial,
+            largest=False,
+            tol=LOBPCG_TOL,
+            niter=LOBPCG_MAXITER,
         )
-        order = torch.argsort(vals)
-        return vals[order], vecs[:, order]
+        order = values.argsort()
+        return values[order], vectors[:, order]
 
+    import numpy as np
+    import scipy.sparse as sp
     import scipy.sparse.linalg as spla
 
-    A_sp = _to_scipy_csr(A)
+    indices_np = coo.indices().cpu().numpy()
+    A_sp = sp.coo_matrix(
+        (entries.to(torch.float64).cpu().numpy(), (indices_np[0], indices_np[1])),
+        shape=(n, n),
+    ).tocsr()
     if solver == "eigsh":
-        pole = SPARSE_SA_SHIFT_INVERT_POLE if sigma is None else sigma
-        # which="LM" on the INVERTED operator == closest to the pole ==
-        # smallest of a PSD spectrum with the pole just below it.
-        vals_np, vecs_np = spla.eigsh(A_sp, k=k, sigma=pole, which="LM")
-    else:  # "lobpcg"
-        import numpy as np
-        import scipy.sparse as sp
-
-        eps = SPILU_EPS_FRAC * float(A_sp.diagonal().mean())
+        if sigma is None:
+            # The nextafter step keeps the pole strictly below the bound
+            # even if subtraction rounds back to the bound at this scale.
+            pole_tensor = lower - torch.finfo(A.dtype).eps ** 0.5 * scale
+            pole = float(
+                torch.nextafter(pole_tensor, torch.full_like(lower, -torch.inf))
+            )
+        else:
+            pole = sigma
+        initial_vector = (
+            torch.randn(
+                n,
+                device=A.device,
+                dtype=A.dtype,
+                generator=generator,
+            )
+            .to(torch.float64)
+            .cpu()
+            .numpy()
+        )
+        values_np, vectors_np = spla.eigsh(
+            A_sp,
+            k=k,
+            sigma=pole,
+            which="LM",
+            v0=initial_vector,
+        )
+    else:
+        # Shift below a proven lower bound, so the preconditioner's
+        # target is positive definite even when A itself is indefinite.
+        shift = float(lower - SPILU_EPS_FRAC * scale)
         ilu = spla.spilu(
-            (A_sp + eps * sp.identity(n, format="csc")).tocsc(),
+            (A_sp - shift * sp.identity(n, format="csc")).tocsc(),
             drop_tol=SPILU_DROP_TOL,
             fill_factor=SPILU_FILL_FACTOR,
         )
-        M = spla.LinearOperator((n, n), matvec=ilu.solve)
-        X = torch.randn(
-            n, k, generator=generator, dtype=torch.float64,
-        ).numpy()
-        vals_np, vecs_np = spla.lobpcg(
-            A_sp, X, M=M, largest=False,
-            tol=LOBPCG_TOL, maxiter=LOBPCG_MAXITER,
+        preconditioner = spla.LinearOperator((n, n), matvec=ilu.solve)
+        initial_block = (
+            torch.randn(
+                n,
+                k,
+                device=A.device,
+                dtype=A.dtype,
+                generator=generator,
+            )
+            .to(torch.float64)
+            .cpu()
+            .numpy()
         )
-        order = np.argsort(vals_np)
-        vals_np, vecs_np = vals_np[order], vecs_np[:, order]
-
-    vals = torch.from_numpy(vals_np).to(device=A.device, dtype=A.dtype)
-    vecs = torch.from_numpy(vecs_np).to(device=A.device, dtype=A.dtype)
-    order = torch.argsort(vals)
-    return vals[order], vecs[:, order]
+        values_np, vectors_np = spla.lobpcg(
+            A_sp,
+            initial_block,
+            M=preconditioner,
+            largest=False,
+            tol=LOBPCG_TOL,
+            maxiter=LOBPCG_MAXITER,
+        )
+    order_np = np.argsort(values_np)
+    return (
+        torch.from_numpy(values_np[order_np].copy()).to(device=A.device, dtype=A.dtype),
+        torch.from_numpy(vectors_np[:, order_np].copy()).to(
+            device=A.device, dtype=A.dtype
+        ),
+    )

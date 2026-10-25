@@ -7,7 +7,7 @@ The two workhorse iterative solvers for the library's linear systems:
 
   - `cg`: symmetric positive-definite `A x = b` (Hestenes-Stiefel 1952).
     Batched-first over dense operators, single-instance over sparse,
-    and operator-form via a callable matvec — the same operator can be
+    and operator-form via a callable matvec; the same operator can be
     "A is never materialized" (e.g. normal equations `AᵀA + λI` applied
     as two matvecs, or a sheaf Laplacian applied as `δᵀ(δx)`).
   - `lsqr`: least squares `min ‖Ax − b‖` for rectangular `A`, with
@@ -21,7 +21,7 @@ Defaults are derived, not tuned: convergence tolerances default to
 `sqrt(eps(dtype))` (the point past which normal-equation-quality error
 stops improving; ≈1.5e-8 for float64, ≈3.5e-4 for float32), CG's
 iteration cap defaults to `n` (finite-termination bound of the Krylov
-space), LSQR's to `2·min(m, n)` (SciPy's convention).
+space), LSQR's to `2·n` (SciPy's convention).
 
 Convergence checks force a device sync (`.item()`), so they run every
 `sync_every` iterations (CONVENTIONS §4.1; same cadence pattern as
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import Union
 
 import torch
 
@@ -57,11 +56,11 @@ _SPARSE_LAYOUTS = (
     torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,
 )
 
-Operator = Union[torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]
+Operator = torch.Tensor | Callable[[torch.Tensor], torch.Tensor]
 
 
 def _default_tol(dtype: torch.dtype) -> float:
-    """`sqrt(eps(dtype))` — derived default tolerance (module docstring)."""
+    """`sqrt(eps(dtype))`; derived default tolerance (module docstring)."""
     return float(torch.finfo(dtype).eps) ** 0.5
 
 
@@ -106,6 +105,41 @@ def _normalize_rhs(b: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return b, False
 
 
+def _safe_norm(v: torch.Tensor) -> torch.Tensor:
+    """Euclidean norm without unscaled squares; empty vectors have norm zero."""
+    if v.shape[-1] == 0:
+        return v.new_zeros(v.shape[:-1])
+    scale = v.abs().amax(dim=-1)
+    denominator = torch.where(scale > 0, scale, torch.ones_like(scale))
+    return scale * torch.linalg.vector_norm(v / denominator.unsqueeze(-1), dim=-1)
+
+
+def _rhs_scale(b: torch.Tensor) -> torch.Tensor:
+    """Per-member maximum magnitude, with unit scale for a zero right-hand side."""
+    scale = b.abs().amax(dim=-1)
+    return torch.where(scale > 0, scale, torch.ones_like(scale))
+
+
+def _scale_matrix(
+    A: torch.Tensor, damp: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scale an operator and its damping together without densifying sparse inputs."""
+    if A.layout in _SPARSE_LAYOUTS:
+        coo = A.to_sparse_coo().coalesce()
+        values = coo.values()
+        scale = values.abs().amax() if values.numel() else values.new_zeros(())
+        scale = scale.clamp(min=damp)
+        scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+        scaled = torch.sparse_coo_tensor(
+            coo.indices(), values / scale, coo.shape, device=A.device, dtype=A.dtype,
+            check_invariants=False,
+        ).coalesce()
+        return scaled, scale
+    scale = A.abs().amax(dim=(-2, -1)).clamp(min=damp)
+    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    return A / scale[..., None, None], scale
+
+
 def cg(
     A: Operator,
     b: torch.Tensor,
@@ -134,73 +168,107 @@ def cg(
         applying `M⁻¹` (e.g. a Jacobi inverse-diagonal multiply).
       x0: optional `(B, n)` / `(n,)` initial guess (default zeros).
       rtol: relative tolerance on `‖r‖ ≤ max(rtol·‖b‖, atol)`; default
-        `sqrt(eps(dtype))` (derived — see module docstring).
+        `sqrt(eps(dtype))` (derived; see module docstring).
       atol: absolute tolerance floor (default 0).
       maxiter: iteration cap; default `n` (finite-termination bound).
       sync_every: convergence-check cadence (CONVENTIONS §4.1).
 
+    Iterations are sequential Krylov recurrences; all batch members advance
+    together, with converged members frozen. Tensor operators and right-hand
+    sides are scaled before iteration to avoid overflow in inner products.
+
     Returns:
       `x` with `b`'s shape. Warns (`UserWarning`) if any batch element
-      has not met the tolerance at `maxiter`.
+      has not met the tolerance at `maxiter`, or a nonfinite iterate occurs.
 
     References:
       Hestenes-Stiefel (1952); Saad (2003) §6.7, §6.11.
     """
     b2, squeeze = _normalize_rhs(b)
     B, n = b2.shape
+    matvec = _sym_matvec(A)
+    if isinstance(A, torch.Tensor) and A.shape[-1] != n:
+        raise ValueError(f"A last dimension must match b: {A.shape}, {b.shape}")
     if not b2.is_floating_point():
         raise ValueError(f"b must be floating point; got dtype={b2.dtype}")
     if sync_every < 1:
         raise ValueError(f"sync_every must be >= 1; got {sync_every}")
-    if B == 0:
-        return b.clone()
-
-    matvec = _sym_matvec(A)
     if rtol is None:
         rtol = _default_tol(b2.dtype)
     if maxiter is None:
         maxiter = n
-    tiny = torch.finfo(b2.dtype).tiny
+    if rtol < 0 or atol < 0 or maxiter < 0:
+        raise ValueError("rtol, atol and maxiter must be nonnegative")
+    if B == 0 or n == 0:
+        return b.clone()
 
-    x = torch.zeros_like(b2) if x0 is None else x0.reshape(B, n).clone()
-    r = b2 - matvec(x)
-    z = M(r) if M is not None else r
+    # Solve in relative units so large finite right-hand sides do not overflow
+    # when their entries are multiplied in the CG recurrence.
+    bscale = _rhs_scale(b2)
+    solution_scale = bscale
+    if isinstance(A, torch.Tensor):
+        scaled_A, ascale = _scale_matrix(A)
+        matvec = _sym_matvec(scaled_A)
+        solution_scale = bscale / ascale
+    rhs = b2 / bscale.unsqueeze(-1)
+
+    def _precondition(residual: torch.Tensor) -> torch.Tensor:
+        z = M(residual) if M is not None else residual
+        # A scalar rescaling of z also rescales r·z and the next search
+        # direction, so the CG step is unchanged. Keeping z in unit range
+        # avoids overflow for either a large or a small preconditioner.
+        return z / _rhs_scale(z).unsqueeze(-1)
+
+    x = (torch.zeros_like(rhs) if x0 is None
+         else x0.reshape(B, n) / solution_scale.unsqueeze(-1))
+    r = rhs - matvec(x)
+    z = _precondition(r)
     p = z.clone()
-    rz = (r * z).sum(dim=-1)                          # (B,)
-    # Per-element residual target ‖r‖ ≤ max(rtol·‖b‖, atol).
-    target = torch.linalg.norm(b2, dim=-1) * rtol
-    target = torch.clamp(target, min=atol)
-
+    rz = (r * z).sum(dim=-1)
+    target = torch.maximum(_safe_norm(rhs) * rtol, atol / bscale)
+    finite = torch.isfinite(x).all(dim=-1) & torch.isfinite(r).all(dim=-1)
+    done = finite & (_safe_norm(r) <= target)
+    failed = ~finite
     n_done = 0
     for it in range(1, maxiter + 1):
+        active = ~(done | failed)
         Ap = matvec(p)
         pAp = (p * Ap).sum(dim=-1)
-        alpha = rz / pAp.clamp(min=tiny)              # (B,)
-        x = x + alpha.unsqueeze(-1) * p
-        r = r - alpha.unsqueeze(-1) * Ap
-        z = M(r) if M is not None else r
+        denominator = torch.where(active & (pAp != 0), pAp, torch.ones_like(pAp))
+        alpha = torch.where(active, rz / denominator, torch.zeros_like(rz))
+        candidate = x + alpha.unsqueeze(-1) * p
+        r_new = r - alpha.unsqueeze(-1) * Ap
+        finite = (torch.isfinite(candidate).all(dim=-1)
+                  & torch.isfinite(r_new).all(dim=-1) & torch.isfinite(pAp))
+        failed = failed | (active & (~finite | (pAp <= 0)))
+        x = torch.where(active.unsqueeze(-1), candidate, x)
+        r = torch.where(active.unsqueeze(-1), r_new, r)
+        done = done | (active & ~failed & (_safe_norm(r) <= target))
+        z = _precondition(r)
         rz_new = (r * z).sum(dim=-1)
-        beta = rz_new / rz.clamp(min=tiny)
-        p = z + beta.unsqueeze(-1) * p
+        denominator = torch.where(rz != 0, rz, torch.ones_like(rz))
+        beta = rz_new / denominator
+        p = torch.where((~(done | failed)).unsqueeze(-1),
+                        z + beta.unsqueeze(-1) * p, torch.zeros_like(p))
         rz = rz_new
+        n_done = it
         if it % sync_every == 0 or it == maxiter:
-            n_done = it
-            if bool(
-                (torch.linalg.norm(r, dim=-1) <= target).all()
-            ):
+            if bool((done | failed).all()):
                 break
 
-    resid = torch.linalg.norm(r, dim=-1)
-    if bool((resid > target).any()):
-        worst = float((resid / target.clamp(min=tiny)).max())
+    result = x * solution_scale.unsqueeze(-1)
+    finite_result = torch.isfinite(result).all(dim=-1)
+    failed = failed | ~finite_result
+    unsuccessful = ~done | failed
+    if bool(unsuccessful.any()):
         warnings.warn(
-            f"cg: {int((resid > target).sum())}/{B} batch elements not "
-            f"converged after {n_done} iterations (worst residual "
-            f"{worst:.2e}x its target). Result returned as-is; raise "
-            f"maxiter, loosen rtol, or precondition.",
+            f"cg: {int(unsuccessful.sum())}/{B} batch elements not converged "
+            f"after {n_done} iterations (nonfinite or breakdown failures: "
+            f"{int(failed.sum())}). Result returned as-is; raise maxiter, "
+            "loosen rtol, or precondition.",
             stacklevel=2,
         )
-    return x.squeeze(0) if squeeze else x
+    return result.squeeze(0) if squeeze else result
 
 
 def _lsqr_matvecs(
@@ -261,9 +329,9 @@ def lsqr(
     inconsistent systems (converges to the minimum-norm least-squares
     solution).
 
-    Stopping follows Paige-Saunders §6, tests 1-2 (SciPy's `atol`/`btol`
-    semantics, without the condition-limit test):
-      1. compatible systems: `‖r‖ ≤ btol·‖b‖`
+    Stopping follows Paige-Saunders §6, tests 1-2 (without SciPy's
+    condition-limit test):
+      1. compatible systems: `‖r‖ ≤ btol·‖b‖ + atol·‖A‖·‖x‖`
       2. least-squares:      `‖Aᵀr‖ ≤ atol·‖A‖·‖r‖`
     with `‖A‖` the running Frobenius estimate from the bidiagonalization.
 
@@ -275,14 +343,18 @@ def lsqr(
       damp: Tikhonov damping `≥ 0`; `damp = √λ` solves the ridge
         problem `min ‖Ax − b‖² + λ‖x‖²`.
       atol, btol: stopping tolerances; default `sqrt(eps(dtype))`
-        (derived — see module docstring).
-      maxiter: iteration cap; default `2·min(m, n)` (SciPy convention).
+        (derived; see module docstring).
+      maxiter: iteration cap; default `2·n` (SciPy convention).
       sync_every: convergence-check cadence (CONVENTIONS §4.1).
+
+    Iterations are sequential Golub-Kahan recurrences. Operators and right-hand
+    sides are scaled before iteration; rotations use overflow-safe hypotenuses.
+    Batch members that converge stop updating their solution.
 
     Returns:
       `x`: `(B, n)` (or `(n,)` for unbatched `b`). Warns
       (`UserWarning`) if any batch element met neither stopping test
-      at `maxiter`.
+      at `maxiter`, or a nonfinite iterate occurs.
 
     References:
       Paige-Saunders (1982), ACM TOMS 8(1):43-71, Alg. LSQR + §6
@@ -291,110 +363,104 @@ def lsqr(
     """
     b2, squeeze = _normalize_rhs(b)
     B = b2.shape[0]
-    if not b2.is_floating_point():
-        raise ValueError(f"b must be floating point; got dtype={b2.dtype}")
-    if damp < 0:
-        raise ValueError(f"damp must be >= 0; got {damp}")
-    if sync_every < 1:
-        raise ValueError(f"sync_every must be >= 1; got {sync_every}")
-
-    matvec, rmatvec, m, n = _lsqr_matvecs(A)
+    _, _, m, n = _lsqr_matvecs(A)
     if b2.shape[-1] != m:
         raise ValueError(
             f"b last dim must equal A's row count m={m}; got "
             f"b.shape={tuple(b.shape)}"
         )
-    if B == 0:
+    if not b2.is_floating_point() or not A.is_floating_point():
+        raise ValueError("A and b must be floating point")
+    if damp < 0:
+        raise ValueError(f"damp must be >= 0; got {damp}")
+    if sync_every < 1:
+        raise ValueError(f"sync_every must be >= 1; got {sync_every}")
+    if atol is None:
+        atol = _default_tol(b2.dtype)
+    if btol is None:
+        btol = _default_tol(b2.dtype)
+    if maxiter is None:
+        maxiter = 2 * n
+    if atol < 0 or btol < 0 or maxiter < 0:
+        raise ValueError("atol, btol and maxiter must be nonnegative")
+    if B == 0 or m == 0 or n == 0:
         out = b2.new_zeros(B, n)
         return out.squeeze(0) if squeeze else out
 
-    dtype = b2.dtype
-    if atol is None:
-        atol = _default_tol(dtype)
-    if btol is None:
-        btol = _default_tol(dtype)
-    if maxiter is None:
-        maxiter = 2 * min(m, n)
-    tiny = torch.finfo(dtype).tiny
+    scaled_A, ascale = _scale_matrix(A, damp=damp)
+    matvec, rmatvec, _, _ = _lsqr_matvecs(scaled_A)
+    bscale = _rhs_scale(b2)
+    rhs = b2 / bscale.unsqueeze(-1)
+    damping = damp / ascale
 
     def _safe_normalize(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        nrm = torch.linalg.norm(t, dim=-1)            # (B,)
-        out = torch.where(
-            (nrm > tiny).unsqueeze(-1), t / nrm.clamp(min=tiny).unsqueeze(-1),
-            torch.zeros_like(t),
-        )
-        return out, nrm
+        nrm = _safe_norm(t)
+        denominator = torch.where(nrm > 0, nrm, torch.ones_like(nrm))
+        return t / denominator.unsqueeze(-1), nrm
 
-    # --- Golub-Kahan initialization (Paige-Saunders §3) ---
-    u, beta = _safe_normalize(b2)                     # (B, m), (B,)
+    def _denominator(t: torch.Tensor) -> torch.Tensor:
+        return torch.where(t != 0, t, torch.ones_like(t))
+
+    u, beta = _safe_normalize(rhs)
     bnorm = beta.clone()
-    v, alfa = _safe_normalize(rmatvec(u))             # (B, n), (B,)
+    v, alfa = _safe_normalize(rmatvec(u))
     w = v.clone()
     x = b2.new_zeros(B, n)
     phibar = beta.clone()
     rhobar = alfa.clone()
-    anorm2 = torch.zeros_like(beta)                   # running ‖A‖_F² estimate
-    res2 = torch.zeros_like(beta)                     # Σ ψ² (damped residual part)
-
-    # Per-element convergence mask, maintained ON DEVICE every iteration
-    # (cheap (B,) ops, no host sync): once an element passes a stopping
-    # test its x is frozen. Iterating a converged element past Krylov
-    # breakdown is not benign here — on inconsistent systems `phibar`
-    # stays at ‖r‖ > 0 while `rho` collapses to rounding noise, so an
-    # unfrozen `phi/rho` update explodes (SciPy avoids this by testing
-    # every iteration; we test every iteration too, but only pay the
-    # `.item()` host sync on the `sync_every` cadence).
-    done = torch.zeros(B, dtype=torch.bool, device=b2.device)
+    anorm = torch.zeros_like(beta)
+    damped_residual = torch.zeros_like(beta)
+    finite = torch.isfinite(beta) & torch.isfinite(alfa)
+    done = finite & ((beta == 0) | (alfa == 0))
+    failed = ~finite
     n_done = 0
     for itn in range(1, maxiter + 1):
-        # Bidiagonalization step: next left/right vectors.
-        u = matvec(v) - alfa.unsqueeze(-1) * u
-        u, beta = _safe_normalize(u)
-        anorm2 = anorm2 + alfa * alfa + beta * beta + damp * damp
-        v = rmatvec(u) - beta.unsqueeze(-1) * v
-        v, alfa = _safe_normalize(v)
+        active = ~(done | failed)
+        u, beta = _safe_normalize(matvec(v) - alfa.unsqueeze(-1) * u)
+        anorm = torch.hypot(torch.hypot(anorm, alfa), torch.hypot(beta, damping))
+        v, alfa = _safe_normalize(rmatvec(u) - beta.unsqueeze(-1) * v)
 
-        # Eliminate the damping row (extra Givens rotation).
-        rhobar1 = torch.sqrt(rhobar * rhobar + damp * damp)
-        cs1 = rhobar / rhobar1.clamp(min=tiny)
-        psi = (damp / rhobar1.clamp(min=tiny)) * phibar
+        # Both rotations use hypot: squaring a finite coefficient need not
+        # produce a finite intermediate, even when the rotation is well-defined.
+        rhobar1 = torch.hypot(rhobar, damping)
+        cs1 = rhobar / _denominator(rhobar1)
+        psi = (damping / _denominator(rhobar1)) * phibar
         phibar = cs1 * phibar
-
-        # QR step on the bidiagonal matrix (plane rotation).
-        rho = torch.sqrt(rhobar1 * rhobar1 + beta * beta)
-        cs = rhobar1 / rho.clamp(min=tiny)
-        sn = beta / rho.clamp(min=tiny)
+        rho = torch.hypot(rhobar1, beta)
+        cs = rhobar1 / _denominator(rho)
+        sn = beta / _denominator(rho)
         theta = sn * alfa
         rhobar = -cs * alfa
         phi = cs * phibar
         phibar = sn * phibar
 
-        step = torch.where(done, torch.zeros_like(phi), phi / rho.clamp(min=tiny))
-        x = x + step.unsqueeze(-1) * w
-        w = v - (theta / rho.clamp(min=tiny)).unsqueeze(-1) * w
-
-        # Residual estimates (Paige-Saunders §6): ‖r‖² = φ̄² + Σψ²,
-        # ‖Aᵀr‖ = φ̄·α·|cos| of the current rotation.
-        res2 = res2 + psi * psi
-        rnorm_it = torch.sqrt(phibar * phibar + res2)
-        arnorm_it = alfa * (sn * phi).abs()
-        anorm = torch.sqrt(anorm2)
-        # `done` is monotonic: estimates of already-done elements keep
-        # evolving as garbage past breakdown, but cannot un-set the flag.
-        done = done | (rnorm_it <= btol * bnorm) | (
-            arnorm_it <= atol * anorm * rnorm_it.clamp(min=tiny)
-        )
-
+        candidate = x + (phi / _denominator(rho)).unsqueeze(-1) * w
+        x = torch.where(active.unsqueeze(-1), candidate, x)
+        w = v - (theta / _denominator(rho)).unsqueeze(-1) * w
+        damped_residual = torch.hypot(damped_residual, psi)
+        rnorm = torch.hypot(phibar, damped_residual)
+        arnorm = alfa * (sn * phi).abs()
+        finite = (torch.isfinite(x).all(dim=-1) & torch.isfinite(rnorm)
+                  & torch.isfinite(arnorm) & torch.isfinite(anorm)
+                  & torch.isfinite(u).all(dim=-1) & torch.isfinite(v).all(dim=-1))
+        failed = failed | (active & ~finite)
+        compatible = rnorm <= btol * bnorm + atol * anorm * _safe_norm(x)
+        least_squares = arnorm <= atol * anorm * rnorm
+        done = done | (active & finite & (compatible | least_squares))
+        n_done = itn
         if itn % sync_every == 0 or itn == maxiter:
-            n_done = itn
-            if bool(done.all()):
+            if bool((done | failed).all()):
                 break
 
-    if bool((~done).any()):
+    result = x * (bscale / ascale).unsqueeze(-1)
+    failed = failed | ~torch.isfinite(result).all(dim=-1)
+    unsuccessful = ~done | failed
+    if bool(unsuccessful.any()):
         warnings.warn(
-            f"lsqr: {int((~done).sum())}/{B} batch elements met neither "
-            f"stopping test after {n_done} iterations. Result returned "
-            f"as-is; raise maxiter or loosen atol/btol.",
+            f"lsqr: {int(unsuccessful.sum())}/{B} batch elements met neither "
+            f"stopping test after {n_done} iterations (nonfinite failures: "
+            f"{int(failed.sum())}). Result returned as-is; raise maxiter "
+            "or loosen atol/btol.",
             stacklevel=2,
         )
-    return x.squeeze(0) if squeeze else x
+    return result.squeeze(0) if squeeze else result

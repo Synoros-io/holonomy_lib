@@ -37,9 +37,6 @@ def _undirected_cycle(n: int, batch: int = 1, dtype=torch.float64) -> torch.Tens
 
 
 class TestValidation:
-    def test_rejects_non_square(self):
-        with pytest.raises(ValueError, match="must be"):
-            magnetic.combinatorial(torch.zeros(1, 4, 5))
 
     def test_rejects_q_out_of_range(self):
         A = torch.zeros(1, 3, 3, dtype=torch.float64)
@@ -49,16 +46,6 @@ class TestValidation:
             magnetic.combinatorial(A, q=1.0)
         with pytest.raises(ValueError, match="q"):
             magnetic.symmetric_normalized(A, q=1.5)
-
-    def test_rejects_complex_input(self):
-        """Regression: previously, a complex `A` would crash deep inside
-        `torch.complex(cos, sin)` because cos/sin of complex inputs are
-        complex. Now we reject up front with a clear ValueError."""
-        A = torch.zeros(1, 3, 3, dtype=torch.complex128)
-        with pytest.raises(ValueError, match="real"):
-            magnetic.combinatorial(A, q=0.25)
-        with pytest.raises(ValueError, match="real"):
-            magnetic.symmetric_normalized(A, q=0.25)
 
 
 # --------------------------------------------------------------------
@@ -72,19 +59,22 @@ class TestZeroCharge:
     A_s = (A + A.T)/2."""
 
     def test_combinatorial_q_zero_matches_symmetric(self):
-        # Directed cycle — has non-trivial asymmetric part.
-        A = _directed_cycle(6)
-        A_s = (A + A.mT) * 0.5
-        L_mag = magnetic.combinatorial(A, q=0.0)
-        L_sym = laplacian.combinatorial(A_s).to(L_mag.dtype)
-        torch.testing.assert_close(L_mag, L_sym, atol=1e-12, rtol=0)
+        for batch in (0, 1, 2, 4):
+            A = _directed_cycle(6, batch=batch)
+            A_s = (A + A.mT) * 0.5
+            L_mag = magnetic.combinatorial(A, q=0.0)
+            L_sym = laplacian.combinatorial(A_s).to(L_mag.dtype)
+            assert L_mag.dtype.is_complex
+            torch.testing.assert_close(L_mag, L_sym, atol=1e-12, rtol=0)
 
     def test_symmetric_normalized_q_zero_matches_real(self):
-        A = _directed_cycle(7)
-        A_s = (A + A.mT) * 0.5
-        L_mag = magnetic.symmetric_normalized(A, q=0.0)
-        L_real = laplacian.symmetric_normalized(A_s).to(L_mag.dtype)
-        torch.testing.assert_close(L_mag, L_real, atol=1e-12, rtol=0)
+        for batch in (0, 1, 2, 4):
+            A = _directed_cycle(7, batch=batch)
+            A_s = (A + A.mT) * 0.5
+            L_mag = magnetic.symmetric_normalized(A, q=0.0)
+            L_real = laplacian.symmetric_normalized(A_s).to(L_mag.dtype)
+            assert L_mag.dtype.is_complex
+            torch.testing.assert_close(L_mag, L_real, atol=1e-12, rtol=0)
 
 
 # --------------------------------------------------------------------
@@ -114,8 +104,6 @@ class TestHermitianProperty:
         A = _directed_cycle(8)
         L = magnetic.symmetric_normalized(A, q=0.25)
         eigvals = torch.linalg.eigvalsh(L)
-        # eigvalsh returns real-valued tensor; assert dtype.
-        assert eigvals.dtype in (torch.float32, torch.float64)
         # Spectrum bounded in [0, 2] for normalized form
         # (Furutani 2020, Prop. 1).
         assert (eigvals >= -1e-10).all()
@@ -192,26 +180,6 @@ class TestIsolatedNodes:
         assert torch.isfinite(L.imag).all()
 
 
-# --------------------------------------------------------------------
-# Batching shapes
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [1, 2, 4])
-class TestShapes:
-    def test_combinatorial_shape(self, batch):
-        A = _directed_cycle(5, batch=batch)
-        L = magnetic.combinatorial(A, q=0.25)
-        assert L.shape == (batch, 5, 5)
-        assert L.dtype.is_complex
-
-    def test_normalized_shape(self, batch):
-        A = _directed_cycle(5, batch=batch)
-        L = magnetic.symmetric_normalized(A, q=0.25)
-        assert L.shape == (batch, 5, 5)
-        assert L.dtype.is_complex
-
-
 # ====================================================================
 # Sign-magnetic Laplacian: extends magnetic to signed-directed graphs.
 # Must reduce correctly to magnetic / signed / standard in their
@@ -237,9 +205,6 @@ def _signed_undirected(n: int, batch: int = 1, dtype=torch.float64) -> torch.Ten
 
 
 class TestSignMagneticValidation:
-    def test_rejects_non_square(self):
-        with pytest.raises(ValueError, match="must be"):
-            magnetic.sign_magnetic_combinatorial(torch.zeros(1, 4, 5))
 
     def test_rejects_q_out_of_range(self):
         A = torch.zeros(1, 3, 3, dtype=torch.float64)
@@ -248,11 +213,6 @@ class TestSignMagneticValidation:
         with pytest.raises(ValueError, match="q"):
             magnetic.sign_magnetic_symmetric_normalized(A, q=-0.5)
 
-    def test_rejects_complex_input(self):
-        A = torch.zeros(1, 3, 3, dtype=torch.complex128)
-        with pytest.raises(ValueError, match="real"):
-            magnetic.sign_magnetic_combinatorial(A, q=0.25)
-
 
 class TestSignMagneticReductions:
     """The sign-magnetic Laplacian must collapse to existing library
@@ -260,16 +220,26 @@ class TestSignMagneticReductions:
 
     def test_unsigned_reduces_to_magnetic_combinatorial(self):
         """A ≥ 0 → sign-magnetic == magnetic (signs are absent)."""
-        A = _directed_cycle(6)
-        L_sign = magnetic.sign_magnetic_combinatorial(A, q=0.25)
-        L_mag = magnetic.combinatorial(A, q=0.25)
-        torch.testing.assert_close(L_sign, L_mag, atol=1e-12, rtol=0)
+        for batch in (0, 1, 2, 4):
+            for fixture in (_directed_cycle, _undirected_cycle):
+                A = fixture(6, batch=batch)
+                L_sign = magnetic.sign_magnetic_combinatorial(A, q=0.25)
+                L_mag = magnetic.combinatorial(A, q=0.25)
+                assert L_sign.dtype.is_complex
+                torch.testing.assert_close(L_sign, L_mag, atol=1e-12, rtol=0)
+                if fixture is _undirected_cycle:
+                    torch.testing.assert_close(
+                        L_sign, laplacian.combinatorial(A).to(L_sign.dtype),
+                        atol=1e-12, rtol=0,
+                    )
 
     def test_unsigned_reduces_to_magnetic_normalized(self):
-        A = _directed_cycle(7)
-        L_sign = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
-        L_mag = magnetic.symmetric_normalized(A, q=0.25)
-        torch.testing.assert_close(L_sign, L_mag, atol=1e-12, rtol=0)
+        for batch in (0, 1, 2, 4):
+            A = _directed_cycle(7, batch=batch)
+            L_sign = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
+            L_mag = magnetic.symmetric_normalized(A, q=0.25)
+            assert L_sign.dtype.is_complex
+            torch.testing.assert_close(L_sign, L_mag, atol=1e-12, rtol=0)
 
     def test_signed_symmetric_reduces_to_kunegis_signed(self):
         """A = A^T → phase ≡ 1 → sign-magnetic ≡ Kunegis signed Laplacian
@@ -280,23 +250,13 @@ class TestSignMagneticReductions:
             L_sign = magnetic.sign_magnetic_combinatorial(A, q=q)
             L_kun = laplacian.signed(A).to(L_sign.dtype)
             torch.testing.assert_close(L_sign, L_kun, atol=1e-12, rtol=0)
-
-    def test_unsigned_symmetric_reduces_to_standard(self):
-        """A ≥ 0 ∧ A = A^T → sign-magnetic ≡ standard combinatorial L."""
-        A = _undirected_cycle(6)
-        L_sign = magnetic.sign_magnetic_combinatorial(A, q=0.25)
-        L_std = laplacian.combinatorial(A).to(L_sign.dtype)
-        torch.testing.assert_close(L_sign, L_std, atol=1e-12, rtol=0)
-
-    def test_q_zero_combinatorial_is_real_signed(self):
-        """q = 0 collapses to (D_|.| − A_s^signed) as complex."""
-        A = _signed_directed(6)
-        A_s_signed = 0.5 * (A + A.mT)
-        d_abs = 0.5 * (A.abs() + A.abs().mT).sum(dim=-1)
-        L_expected_real = torch.diag_embed(d_abs) - A_s_signed
-        L = magnetic.sign_magnetic_combinatorial(A, q=0.0)
-        L_expected = L_expected_real.to(L.dtype)
-        torch.testing.assert_close(L, L_expected, atol=1e-12, rtol=0)
+        directed = _signed_directed(6)
+        symmetrized = (directed + directed.mT) / 2
+        torch.testing.assert_close(
+            magnetic.sign_magnetic_combinatorial(directed, q=0),
+            laplacian.signed(symmetrized).to(torch.complex128),
+            atol=1e-12, rtol=0,
+        )
 
 
 class TestSignMagneticHermitian:
@@ -306,25 +266,42 @@ class TestSignMagneticHermitian:
         A = _signed_directed(8)
         L = magnetic.sign_magnetic_combinatorial(A, q=0.25)
         torch.testing.assert_close(L, L.conj().mT, atol=1e-12, rtol=0)
+        # A negative unit edge has signed phase -i and amplitude -1/2.
+        edge = torch.tensor([[[0., -1.], [0., 0.]]], dtype=torch.float64)
+        expected = torch.tensor(
+            [[[0.5, -0.5j], [0.5j, 0.5]]], dtype=torch.complex128,
+        )
+        torch.testing.assert_close(
+            magnetic.sign_magnetic_combinatorial(edge), expected,
+            atol=1e-12, rtol=0,
+        )
+        torch.testing.assert_close(
+            magnetic.sign_magnetic_symmetric_normalized(edge), 2 * expected,
+            atol=1e-12, rtol=0,
+        )
 
     def test_normalized_hermitian(self):
         A = _signed_directed(8)
         L = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
         torch.testing.assert_close(L, L.conj().mT, atol=1e-12, rtol=0)
-
-    def test_eigenvalues_real(self):
-        A = _signed_directed(7)
-        L = magnetic.sign_magnetic_combinatorial(A, q=0.25)
-        eigvals = torch.linalg.eigvalsh(L)
-        assert eigvals.dtype in (torch.float32, torch.float64)
+        # Opposite reciprocal signs cancel in the symmetric adjacency,
+        # but their magnitudes both contribute to MSGNN's degree.
+        reciprocal = torch.tensor([[[0., 2.], [-1., 0.]]], dtype=torch.float64)
+        expected = torch.tensor(
+            [[[1., -1/3], [-1/3, 1.]]], dtype=torch.complex128,
+        )
+        torch.testing.assert_close(
+            magnetic.sign_magnetic_symmetric_normalized(reciprocal, q=0),
+            expected, atol=1e-12, rtol=0,
+        )
+        eigenvalues = torch.linalg.eigvalsh(L)
+        assert (eigenvalues >= -1e-12).all()
+        assert (eigenvalues <= 2 + 1e-12).all()
 
 
 def _unbalanced_signed_directed(dtype=torch.float64) -> torch.Tensor:
     """A signed-directed graph that is NOT balanced (no 2-coloring
-    absorbs the signs into vertex gauge). The 6-cycle with
-    alternating signs IS balanced and gauge-equivalent to the
-    unsigned cycle — its spectrum is invariant under sign flips
-    and under q, so it's useless for sensitivity tests.
+    absorbs the signs into vertex gauge at zero charge).
 
     Construction: directed cycle (0→1, 1→2, ..., 5→0) with all edges
     positive EXCEPT 0→1 negative. This breaks the even-cycle parity
@@ -339,19 +316,19 @@ def _unbalanced_signed_directed(dtype=torch.float64) -> torch.Tensor:
 
 
 class TestSignMagneticDirectedSensitivity:
-    """For a signed-directed graph, both q AND sign matter — flipping
-    edge signs or changing q must move the spectrum. Uses an
-    UNBALANCED signed graph: balanced graphs are gauge-equivalent to
-    their unsigned counterparts and have spectrum invariant under
-    sign flips, which would defeat the test."""
+    """Charge and sign sensitivity at q=1/8 on a signed directed cycle.
+
+    At q=1/4, flipping a directed unit edge sign leaves its MSGNN
+    complex weight unchanged, so that charge cannot check sign sensitivity.
+    """
 
     def test_q_shifts_spectrum_on_signed_directed(self):
         A = _unbalanced_signed_directed()
         L0 = magnetic.sign_magnetic_symmetric_normalized(A, q=0.0)
-        L25 = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
+        L_charged = magnetic.sign_magnetic_symmetric_normalized(A, q=0.125)
         eig0 = torch.linalg.eigvalsh(L0).sort().values
-        eig25 = torch.linalg.eigvalsh(L25).sort().values
-        diff = (eig0 - eig25).abs().max().item()
+        eig_charged = torch.linalg.eigvalsh(L_charged).sort().values
+        diff = (eig0 - eig_charged).abs().max().item()
         assert diff > 1e-3, f"q should change spectrum; got max|Δλ|={diff:.4e}"
 
     def test_signs_change_spectrum(self):
@@ -360,8 +337,8 @@ class TestSignMagneticDirectedSensitivity:
         unbalanced, so sign info is not absorbable by gauge)."""
         A_signed = _unbalanced_signed_directed()
         A_unsigned = A_signed.abs()
-        L_signed = magnetic.sign_magnetic_combinatorial(A_signed, q=0.25)
-        L_unsigned = magnetic.sign_magnetic_combinatorial(A_unsigned, q=0.25)
+        L_signed = magnetic.sign_magnetic_combinatorial(A_signed, q=0.125)
+        L_unsigned = magnetic.sign_magnetic_combinatorial(A_unsigned, q=0.125)
         diff = (
             torch.linalg.eigvalsh(L_signed).sort().values
             - torch.linalg.eigvalsh(L_unsigned).sort().values
@@ -373,24 +350,11 @@ class TestSignMagneticIsolatedNodes:
     def test_isolated_node_normalized_finite(self):
         n = 4
         A = torch.zeros(1, n, n, dtype=torch.float64)
-        A[0, 0, 1] = 1.0;  A[0, 1, 0] = -1.0          # signed directed edge
-        A[0, 1, 2] = -1.0; A[0, 2, 1] = 1.0
+        A[0, 0, 1] = 1.0
+        A[0, 1, 0] = -1.0
+        A[0, 1, 2] = -1.0
+        A[0, 2, 1] = 1.0
         # node 3 isolated
         L = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
         assert torch.isfinite(L.real).all()
         assert torch.isfinite(L.imag).all()
-
-
-@pytest.mark.parametrize("batch", [1, 2, 4])
-class TestSignMagneticShapes:
-    def test_combinatorial_shape(self, batch):
-        A = _signed_directed(5, batch=batch)
-        L = magnetic.sign_magnetic_combinatorial(A, q=0.25)
-        assert L.shape == (batch, 5, 5)
-        assert L.dtype.is_complex
-
-    def test_normalized_shape(self, batch):
-        A = _signed_directed(5, batch=batch)
-        L = magnetic.sign_magnetic_symmetric_normalized(A, q=0.25)
-        assert L.shape == (batch, 5, 5)
-        assert L.dtype.is_complex

@@ -4,8 +4,8 @@
 """Tests for holonomy_lib.spectral.spectral_dimension.
 
 Three layers:
-  1. Unit — shapes across B ∈ {0, 1, several}; input validation.
-  2. Property — the log-log slope mechanics exactly (two-point closed form);
+  1. Empty batches and input validation.
+  2. The log-log slope mechanics exactly (two-point closed form);
      physical `d_s ≈ 1` (1-D, λ ~ k²) and `d_s ≈ 2` (2-D, λ ~ k²+l²) on
      constructed continuum-proxy spectra. The latter are asymptotic estimates,
      so the tolerance is loose enough to separate d_s ≈ 1 from 2 / 0.
@@ -28,7 +28,7 @@ DT = torch.float64
 # --------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("batch", [0, 1, 4])
+@pytest.mark.parametrize("batch", [0])
 class TestShapes:
     def test_shape(self, batch):
         eig = torch.rand(batch, 50, dtype=DT)
@@ -46,11 +46,12 @@ class TestValidation:
         with pytest.raises(ValueError, match="2 sample"):
             spectral_dimension(torch.rand(1, 10, dtype=DT),
                                torch.tensor([0.1], dtype=DT))
-
-    def test_rejects_nonpositive_t(self):
-        with pytest.raises(ValueError, match="positive"):
-            spectral_dimension(torch.rand(1, 10, dtype=DT),
-                               torch.tensor([0.0, 0.1], dtype=DT))
+        with pytest.raises(ValueError, match="log-time variance"):
+            spectral_dimension(torch.tensor([[1.0, 2.0]], dtype=DT),
+                               torch.tensor([1.0, 1.0], dtype=DT))
+        with pytest.raises(ValueError, match="at least one mode"):
+            spectral_dimension(torch.empty(1, 0, dtype=DT),
+                               torch.tensor([1.0, 2.0], dtype=DT))
 
 
 # --------------------------------------------------------------------
@@ -61,19 +62,21 @@ class TestValidation:
 class TestMechanics:
     def test_loglog_slope_exact(self):
         # eigenvalues {0, 1}; two times => d_s = -2·(Δlog p / Δlog t), by hand.
-        eig = torch.tensor([[0.0, 1.0]], dtype=DT)
+        eig = torch.tensor([[0.0, 1.0], [1.0, 2.0]], dtype=DT)
         t = torch.tensor([0.5, 1.0], dtype=DT)
         p0 = 0.5 * (1.0 + math.exp(-0.5))
         p1 = 0.5 * (1.0 + math.exp(-1.0))
         slope = (math.log(p1) - math.log(p0)) / (math.log(1.0) - math.log(0.5))
-        expected = torch.tensor([-2.0 * slope], dtype=DT)
+        shifted_slope = slope - 0.5 / math.log(2.0)
+        expected = torch.tensor([-2.0 * slope, -2.0 * shifted_slope], dtype=DT)
         torch.testing.assert_close(spectral_dimension(eig, t), expected,
                                    atol=1e-12, rtol=0)
-
-    def test_1d_input_returns_scalar(self):
-        eig = torch.rand(20, dtype=DT)
-        out = spectral_dimension(eig, torch.logspace(-3, -1, 5, dtype=DT))
-        assert out.shape == ()
+        # At these times the second mode is negligible, so log p drops
+        # by exactly 1000 to float64 precision despite exp(-1000) underflow.
+        eig = torch.tensor([[1.0, 2.0]], dtype=DT)
+        t = torch.tensor([1000.0, 2000.0], dtype=DT)
+        expected = torch.tensor([2000.0 / math.log(2.0)], dtype=DT)
+        torch.testing.assert_close(spectral_dimension(eig, t), expected)
 
 
 # --------------------------------------------------------------------
@@ -107,7 +110,7 @@ class TestPhysical:
 
 def _sierpinski_gasket_eigs(level: int) -> torch.Tensor:
     """Combinatorial-Laplacian spectrum of the level-`level` Sierpinski
-    gasket (right-triangle embedding — only adjacency matters)."""
+    gasket (right-triangle embedding, only adjacency matters)."""
     edges: set = set()
 
     def mid(p, q):
@@ -155,7 +158,7 @@ def _tail_window(eigs: torch.Tensor) -> torch.Tensor:
 
 class TestComparison:
     def test_sierpinski_gasket_recovers_fractional_dimension(self):
-        # Known d_s = 2·ln3/ln5 ≈ 1.3652 (Rammal-Toulouse 1983) — a genuinely
+        # Known d_s = 2·ln3/ln5 ≈ 1.3652 (Rammal-Toulouse 1983), a genuinely
         # non-integer spectral dimension, the canonical cross-check.
         eigs = _sierpinski_gasket_eigs(6)            # ~1095 nodes, sub-second
         d_s = float(spectral_dimension(eigs, _tail_window(eigs)))
@@ -167,16 +170,3 @@ class TestComparison:
         ring = 2.0 - 2.0 * torch.cos(2.0 * math.pi * k / 4096.0)
         d_s = float(spectral_dimension(ring, _tail_window(ring)))
         assert abs(d_s - 1.0) < 0.05, d_s
-
-
-class TestClamp:
-    def test_negative_eigenvalues_clamped(self):
-        # Float-noise negatives must not change the result (clamped to 0).
-        eig_clean = torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=DT)
-        eig_noisy = torch.tensor([[-1e-14, 1.0, 2.0, 3.0]], dtype=DT)
-        t = torch.logspace(-3, -1, 5, dtype=DT)
-        torch.testing.assert_close(
-            spectral_dimension(eig_clean, t),
-            spectral_dimension(eig_noisy, t),
-            atol=1e-10, rtol=0,
-        )

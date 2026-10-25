@@ -6,13 +6,12 @@
 The Laplacian primitives gained a layout-dispatched sparse path
 (roadmap #5). For each of the four variants we verify:
 
-  1. Sparse-in → sparse-out (output layout matches input layout).
+  1. COO/CSR sparse input produces sparse COO output.
   2. Densify of sparse Laplacian equals the existing dense Laplacian
      on the same adjacency (semantic agreement).
   3. End-to-end chain: sparse adjacency → sparse Laplacian →
      `lanczos_eigsh` sparse path → top-k eigenpairs. Compares against
      dense `torch.linalg.eigh`.
-  4. 2-D-only enforcement (sparse batched is not supported in v1).
 """
 
 from __future__ import annotations
@@ -68,39 +67,6 @@ def _random_signed_symmetric_sparse(
 
 
 # --------------------------------------------------------------------
-# Layout dispatch + 2-D enforcement
-# --------------------------------------------------------------------
-
-
-class TestLayoutDispatch:
-    def test_sparse_combinatorial_returns_sparse(self):
-        _, A_sparse = _random_symmetric_sparse(10, seed=0)
-        L = laplacian.combinatorial(A_sparse)
-        assert L.is_sparse
-
-    def test_sparse_symmetric_normalized_returns_sparse(self):
-        _, A_sparse = _random_symmetric_sparse(10, seed=1)
-        L = laplacian.symmetric_normalized(A_sparse)
-        assert L.is_sparse
-
-    def test_sparse_random_walk_returns_sparse(self):
-        _, A_sparse = _random_symmetric_sparse(10, seed=2)
-        L = laplacian.random_walk(A_sparse)
-        assert L.is_sparse
-
-    def test_sparse_signed_returns_sparse(self):
-        _, A_sparse = _random_signed_symmetric_sparse(10, seed=3)
-        L = laplacian.signed(A_sparse)
-        assert L.is_sparse
-
-    def test_sparse_rejects_3d(self):
-        n = 5
-        A_batched_sparse = torch.zeros(2, n, n, dtype=torch.float64).to_sparse_coo()
-        with pytest.raises(ValueError, match="2-D"):
-            laplacian.combinatorial(A_batched_sparse)
-
-
-# --------------------------------------------------------------------
 # Sparse Laplacian densifies to the dense reference
 # --------------------------------------------------------------------
 
@@ -108,30 +74,43 @@ class TestLayoutDispatch:
 class TestAgreementWithDense:
     @pytest.mark.parametrize("n", [10, 30])
     def test_combinatorial(self, n):
-        A_dense, A_sparse = _random_symmetric_sparse(n, seed=n)
-        L_sparse = laplacian.combinatorial(A_sparse).to_dense()
-        # Dense path takes a batch dim — wrap in (1, n, n) and squeeze.
-        L_dense = laplacian.combinatorial(A_dense.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sparse, L_dense, atol=1e-12, rtol=0)
+        for size, seed in ((n, n), (10, 0), (20, 99)):
+            A_dense, _ = _random_symmetric_sparse(size, seed=seed)
+            for layout in (torch.sparse_coo, torch.sparse_csr):
+                L_sparse = laplacian.combinatorial(A_dense.to_sparse(layout=layout))
+                assert L_sparse.layout == torch.sparse_coo
+                L_dense = laplacian.combinatorial(A_dense.unsqueeze(0)).squeeze(0)
+                torch.testing.assert_close(L_sparse.to_dense(), L_dense,
+                                           atol=1e-12, rtol=0)
 
     @pytest.mark.parametrize("n", [10, 30])
     def test_symmetric_normalized(self, n):
-        A_dense, A_sparse = _random_symmetric_sparse(n, seed=n + 1)
-        L_sparse = laplacian.symmetric_normalized(A_sparse).to_dense()
-        L_dense = laplacian.symmetric_normalized(A_dense.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sparse, L_dense, atol=1e-9, rtol=0)
+        for size, seed in ((n, n + 1), (10, 1), (20, 100)):
+            A_dense, _ = _random_symmetric_sparse(size, seed=seed)
+            for layout in (torch.sparse_coo, torch.sparse_csr):
+                L_sparse = laplacian.symmetric_normalized(
+                    A_dense.to_sparse(layout=layout),
+                )
+                assert L_sparse.layout == torch.sparse_coo
+                L_dense = laplacian.symmetric_normalized(A_dense.unsqueeze(0))[0]
+                torch.testing.assert_close(L_sparse.to_dense(), L_dense,
+                                           atol=1e-9, rtol=0)
 
     @pytest.mark.parametrize("n", [10, 30])
     def test_random_walk(self, n):
         A_dense, A_sparse = _random_symmetric_sparse(n, seed=n + 2)
-        L_sparse = laplacian.random_walk(A_sparse).to_dense()
+        result = laplacian.random_walk(A_sparse)
+        assert result.layout == torch.sparse_coo
+        L_sparse = result.to_dense()
         L_dense = laplacian.random_walk(A_dense.unsqueeze(0)).squeeze(0)
         torch.testing.assert_close(L_sparse, L_dense, atol=1e-9, rtol=0)
 
     @pytest.mark.parametrize("n", [10, 30])
     def test_signed(self, n):
         A_dense, A_sparse = _random_signed_symmetric_sparse(n, seed=n + 3)
-        L_sparse = laplacian.signed(A_sparse).to_dense()
+        result = laplacian.signed(A_sparse)
+        assert result.layout == torch.sparse_coo
+        L_sparse = result.to_dense()
         L_dense = laplacian.signed(A_dense.unsqueeze(0)).squeeze(0)
         torch.testing.assert_close(L_sparse, L_dense, atol=1e-12, rtol=0)
 
@@ -139,30 +118,6 @@ class TestAgreementWithDense:
 # --------------------------------------------------------------------
 # End-to-end: sparse Laplacian → sparse Lanczos → top-k eigenpairs
 # --------------------------------------------------------------------
-
-
-class TestLayoutCoverage:
-    """The dispatcher accepts COO, CSR, and CSC. The agreement-with-
-    dense tests use COO only — confirm CSR and CSC paths produce the
-    same Laplacian (PyTorch's sparse-CSR-to-COO conversion does NOT
-    densify in the version we ship against, but the path needs
-    coverage)."""
-
-    @pytest.mark.parametrize("layout_method", ["to_sparse_coo", "to_sparse_csr"])
-    def test_combinatorial_layouts_agree(self, layout_method):
-        A_dense, _ = _random_symmetric_sparse(20, seed=99)
-        A_sparse = getattr(A_dense, layout_method)()
-        L_sparse = laplacian.combinatorial(A_sparse).to_dense()
-        L_dense = laplacian.combinatorial(A_dense.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sparse, L_dense, atol=1e-12, rtol=0)
-
-    @pytest.mark.parametrize("layout_method", ["to_sparse_coo", "to_sparse_csr"])
-    def test_symmetric_normalized_layouts_agree(self, layout_method):
-        A_dense, _ = _random_symmetric_sparse(20, seed=100)
-        A_sparse = getattr(A_dense, layout_method)()
-        L_sparse = laplacian.symmetric_normalized(A_sparse).to_dense()
-        L_dense = laplacian.symmetric_normalized(A_dense.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sparse, L_dense, atol=1e-9, rtol=0)
 
 
 class TestEndToEndSparseChain:

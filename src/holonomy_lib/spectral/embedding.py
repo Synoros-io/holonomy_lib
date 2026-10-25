@@ -13,23 +13,22 @@ This module provides a single primitive
 
 that returns the bottom-k eigenvalue/eigenvector pairs of the chosen
 Laplacian, with the eigenvectors sorted by eigenvalue ascending. We
-do **not** automatically drop the trivial null eigenvector — that
+do **not** automatically drop the trivial null eigenvector; that
 choice depends on the use case (it should be dropped for connected
 unsigned graphs but kept for signed Laplacians, where the null
 eigenvector encodes the balance partition; Kunegis 2010). The caller
 decides.
 
-For large graphs, `torch.linalg.eigh` on the dense Laplacian is
-O(n³). A Lanczos-based solver for sparse top-k eigenvalues is planned;
-see HANDOFF.md §4.
+This routine uses dense `torch.linalg.eigh`, with O(n³) cost. For sparse
+operators, use `holonomy_lib.algebra.lanczos_eigsh` or `eigsh_sparse`.
 
 References:
   Belkin, M., Niyogi, P. (2003). Laplacian eigenmaps for dimensionality
     reduction and data representation. Neural Computation 15(6):1373–1396.
   von Luxburg, U. (2007). A tutorial on spectral clustering. Statistics
-    and Computing 17(4):395–416 — discussion of which Laplacian to use.
+    and Computing 17(4):395–416, discussion of which Laplacian to use.
   Coifman, R. R., Lafon, S. (2006). Diffusion maps. Applied and
-    Computational Harmonic Analysis 21(1):5–30 — related embedding.
+    Computational Harmonic Analysis 21(1):5–30, related embedding.
 """
 
 from __future__ import annotations
@@ -62,24 +61,25 @@ def laplacian_eigenmaps(
         - "combinatorial" (unnormalized)
         - "random_walk" (non-symmetric; the returned eigenvectors are
           the L_rw eigenvectors, obtained by D^{−1/2}-scaling the
-          L_sym eigenvectors so they diagonalize L_rw on the right)
+          L_sym eigenvectors so they diagonalize L_rw on the right;
+          the scaling is identity on isolated-node coordinates)
         - "signed" (Kunegis 2010)
 
     Returns:
-      eigenvalues: (B, k) — sorted ascending.
-      eigenvectors: (B, n, k) — column j is the eigenvector for
+      eigenvalues: (B, k), sorted ascending.
+      eigenvectors: (B, n, k), column j is the eigenvector for
         eigenvalues[..., j].
 
     Notes:
       The trivial null eigenvector (eigenvalue ≈ 0 for connected
       unsigned graphs) is NOT automatically dropped. Drop it explicitly
       with `eigvecs[..., 1:]` when you want the embedding to exclude
-      it. For signed Laplacians, do NOT drop it — it encodes the
+      it. For signed Laplacians, do NOT drop it; it encodes the
       balance partition (Kunegis 2010, Thm 3.4).
 
     References:
-      Belkin-Niyogi (2003), §2 — Laplacian eigenmap.
-      von Luxburg (2007), §5 — practical considerations.
+      Belkin-Niyogi (2003), §2, Laplacian eigenmap.
+      von Luxburg (2007), §5, practical considerations.
     """
     if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
         raise ValueError(
@@ -107,7 +107,11 @@ def laplacian_eigenmaps(
         L_sym = _L.symmetric_normalized(A)
         eigvals, u = torch.linalg.eigh(L_sym)  # (B, n), (B, n, n)
         d = _L.degree(A, signed=False)
-        d_inv_sqrt = _L._safe_inv_sqrt(d)       # (B, n)
+        # L_rw and L_sym both have an isolated diagonal entry of one.
+        # Extending the similarity transform by identity preserves that
+        # eigenvector instead of annihilating it with a zero degree factor.
+        safe_degree = torch.where(d > 0, d, 1.0)
+        d_inv_sqrt = safe_degree.rsqrt()
         eigvecs = u * d_inv_sqrt.unsqueeze(dim=-1)  # broadcast over columns
     else:
         raise ValueError(
