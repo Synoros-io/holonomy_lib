@@ -332,7 +332,7 @@ $('controls').addEventListener('change',event=>{
   if(['graph','overlay','cloud','connections','primitive'].includes(input.name)) buildControls();
   if($('controls').reportValidity()) schedule();
 });
-document.querySelectorAll('[data-scene]').forEach(button=>button.addEventListener('click',()=>activate(button.dataset.scene)));
+document.querySelectorAll('[data-scene]').forEach(button=>button.addEventListener('click',()=>{ location.hash=button.dataset.scene; }));
 [$('device'),$('dtype')].forEach(input=>input.addEventListener('change',schedule));
 new ResizeObserver(()=>{if(config) render();}).observe($('canvas'));
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(config) render();});
@@ -347,5 +347,9 @@ try {
   state.curvature.points=config.curvature_points;
   state.topology.params={cloud:'circle',points_count:d.points_count,noise:d.noise,seed:d.seed};
   state.batching.params={primitive:'heat',size:d.size,repeats:d.repeats,seed:d.seed};
-  activate('graphs');
+  // The URL hash names the scene (#topology), so a scene can be linked to and
+  // back/forward move between scenes. Unknown hashes fall back to graphs.
+  const fromHash=()=>{ const name=location.hash.slice(1); return name in SCENES ? name : 'graphs'; };
+  addEventListener('hashchange',()=>{ if(fromHash()!==active) activate(fromHash()); });
+  activate(fromHash());
 } catch(reason) { error(reason.message); $('status-state').textContent='Connection failed'; }
