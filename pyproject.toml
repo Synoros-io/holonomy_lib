@@ -57,6 +57,12 @@ Homepage = "https://github.com/Synoros-io/holonomy_lib"
 Repository = "https://github.com/Synoros-io/holonomy_lib"
 Issues = "https://github.com/Synoros-io/holonomy_lib/issues"
 
+[project.scripts]
+holonomy-explorer = "holonomy_explorer.__main__:main"
+
+[tool.setuptools.package-data]
+holonomy_explorer = ["static/*"]
+
 [project.optional-dependencies]
 # Libraries the cross-check tests compare against. None of them are needed at
 # runtime; each comparison test skips itself when its library is missing.
