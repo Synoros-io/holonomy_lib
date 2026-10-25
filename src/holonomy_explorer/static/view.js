@@ -2,12 +2,45 @@ import {LABELS, placeLabels} from './layout.js';
 
 // Drawing constants are screen-space choices; mathematical data comes from Python.
 export const VIEW = Object.freeze({
-  padding: 38, nodeRadius: 6, graphNodeRadius: 5, hitRadius: 15, labelOffset: 12,
+  nodeRadius: 6, graphNodeRadius: 5, hitRadius: 15, labelOffset: 12,
   fontSize: 11, lineWidth: 1.5, edgeWidth: 0.9, gridWidth: 0.7, flowMs: 900,
   chartWidth: 540, chartHeight: 200, chartPadding: 38,
   barcodeRow: 7, barcodePadding: 24, chartInset: 14, diagramHeight: 180, figureExtent: 1.3,
   debounceMs: 180, transitionMs: 500, triangleOpacity: 0.035,
 });
+// Eight percent on each side reserves room for labels without changing aspect.
+const FIT_MARGIN = 0.08;
+// A unit-wide fallback gives empty and coincident clouds a usable picking area.
+const FIT_FALLBACK_SPAN = 1;
+// A short corner ruler uses the conventional 1, 2, 5 decimal series.
+const SCALE_BAR = Object.freeze({fraction: 0.16, inset: 16, tick: 4, gap: 8, lengths: [1, 2, 5], base: 10});
+
+export function fitTransform(points, width, height, extent = null) {
+  let bounds = extent;
+  if (!bounds) bounds = points.length ? [
+    Math.min(...points.map(p=>p[0])), Math.max(...points.map(p=>p[0])),
+    Math.min(...points.map(p=>p[1])), Math.max(...points.map(p=>p[1])),
+  ] : [-FIT_FALLBACK_SPAN/2,FIT_FALLBACK_SPAN/2,-FIT_FALLBACK_SPAN/2,FIT_FALLBACK_SPAN/2];
+  const [xmin,xmax,ymin,ymax] = bounds;
+  const dx=xmax-xmin, dy=ymax-ymin;
+  // A flat axis imposes no scale constraint. Coincident points need a finite
+  // span on both axes so that picking still has an invertible transform.
+  const spanX=dx || (dy ? 0 : FIT_FALLBACK_SPAN);
+  const spanY=dy || (dx ? 0 : FIT_FALLBACK_SPAN);
+  const scale=Math.min(width*(1-2*FIT_MARGIN)/spanX,height*(1-2*FIT_MARGIN)/spanY);
+  const cx=(xmin+xmax)/2, cy=(ymin+ymax)/2;
+  return {
+    scale,
+    map: ([x,y])=>[width/2+(x-cx)*scale,height/2-(y-cy)*scale],
+    inverse: ([x,y])=>[(x-width/2)/scale+cx,-(y-height/2)/scale+cy],
+  };
+}
+
+export function scaleBarLength(scale, width) {
+  const target=width*SCALE_BAR.fraction/scale;
+  const power=SCALE_BAR.base**Math.floor(Math.log10(target));
+  return SCALE_BAR.lengths.filter(length=>length*power<=target).at(-1)*power;
+}
 export const $ = (id) => document.getElementById(id);
 export const fmt = (value) => value == null ? '∞ / unavailable' :
   typeof value === 'number' ? (Number.isInteger(value) ? String(value) : Number(value.toPrecision(5)).toString()) : String(value);
@@ -46,25 +79,38 @@ export class CanvasView {
   constructor(canvas) { this.canvas = canvas; this.ctx = canvas.getContext('2d'); this.map = p => p; this.inverse = p => p; }
   begin(points, extent = null) {
     const {width, height} = this.canvas.getBoundingClientRect();
+    // Hidden canvases can receive resize notifications before their scene opens.
+    if (!width || !height) return;
     const dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.round(width * dpr); this.canvas.height = Math.round(height * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.ctx.clearRect(0, 0, width, height);
-    let xmin = -1, xmax = 1, ymin = -1, ymax = 1;
-    if (extent) [xmin, xmax, ymin, ymax] = extent;
-    else if (points.length) {
-      xmin = Math.min(...points.map(p => p[0])); xmax = Math.max(...points.map(p => p[0]));
-      ymin = Math.min(...points.map(p => p[1])); ymax = Math.max(...points.map(p => p[1]));
-    }
     // Spectral-only mode preserves coincident points. Relaxation, when selected,
     // happens separately and never changes the coordinates returned by Python.
-    const span = Math.max(xmax - xmin, ymax - ymin) || 1;
-    const scale = (Math.min(width, height) - 2 * VIEW.padding) / span;
-    const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
-    this.map = ([x,y]) => [width / 2 + (x-cx)*scale, height / 2 - (y-cy)*scale];
-    this.inverse = ([x,y]) => [(x-width/2)/scale+cx, -(y-height/2)/scale+cy];
+    Object.assign(this,fitTransform(points,width,height,extent));
     this.ctx.font = `${VIEW.fontSize}px system-ui, sans-serif`;
     this.width=width; this.height=height;
+  }
+  scaleBar() {
+    const length=scaleBarLength(this.scale,this.width), ctx=this.ctx;
+    const x=SCALE_BAR.inset, y=this.height-SCALE_BAR.inset;
+    const end=x+length*this.scale, label=`${fmt(length)} coordinate units`;
+    ctx.save();
+    ctx.fillStyle=color('surface');
+    ctx.fillRect(x-SCALE_BAR.tick,y-SCALE_BAR.gap-VIEW.fontSize-SCALE_BAR.tick,
+      Math.max(end-x,ctx.measureText(label).width)+2*SCALE_BAR.tick,VIEW.fontSize+SCALE_BAR.gap+2*SCALE_BAR.tick);
+    ctx.strokeStyle=color('ink'); ctx.fillStyle=color('ink'); ctx.lineWidth=VIEW.lineWidth;
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(end,y);
+    for (const at of [x,end]) { ctx.moveTo(at,y-SCALE_BAR.tick); ctx.lineTo(at,y+SCALE_BAR.tick); }
+    ctx.stroke(); ctx.fillText(label,x,y-SCALE_BAR.gap); ctx.restore();
+  }
+  edgeLength(a,b,length) {
+    const [ax,ay]=this.map(a), [bx,by]=this.map(b), ctx=this.ctx;
+    const text=`d = ${fmt(length)}`, width=ctx.measureText(text).width;
+    const x=(ax+bx-width)/2, y=(ay+by)/2;
+    ctx.save(); ctx.fillStyle=color('surface');
+    ctx.fillRect(x-LABELS.padding,y-VIEW.fontSize,width+2*LABELS.padding,VIEW.fontSize+2*LABELS.padding);
+    ctx.fillStyle=color('ink'); ctx.fillText(text,x,y); ctx.restore();
   }
   graphLabels(points, priority) {
     const positions = points.map(point=>this.map(point)), ctx=this.ctx;

@@ -279,7 +279,9 @@ function animateFlow(data,current) {
   }; requestAnimationFrame(frame);
 }
 function drawCurvature(data,current) {
-  const extent=Math.max(VIEW.figureExtent,...data.points.flat().map(Math.abs));
+  // The API supplies the ball or hemisphere radius; flat space uses the grid's
+  // coordinate radius. Out-of-domain points must not shrink the chart itself.
+  const extent=data.boundary_radius || Math.max(0,...data.grid.flat().map(point=>Math.hypot(...point))) || VIEW.figureExtent;
   view.begin(data.points,[-extent,extent,-extent,extent]);
   data.grid.forEach(curve=>view.path(curve,color('grid'),VIEW.gridWidth));
   if(data.boundary_radius) view.circle(data.boundary_radius);
@@ -301,9 +303,20 @@ function curvatureDetails(data) {
 function drawTopology(data,current) {
   view.begin(data.points,data.points.length?null:[-VIEW.figureExtent,VIEW.figureExtent,-VIEW.figureExtent,VIEW.figureExtent]);
   const epsilon=current.epsilon;
+  let labeledEdge=null;
   data.triangles.forEach((triangle,index)=>{ if(data.triangle_radii[index]<=epsilon) view.path(triangle.map(i=>data.points[i]),color('triangle'),VIEW.gridWidth,VIEW.triangleOpacity,true); });
-  data.edges.forEach(([a,b],index)=>{ if(data.edge_radii[index]<=epsilon) view.path([data.points[a],data.points[b]],color('edge')); });
+  data.edges.forEach(([a,b],index)=>{ if(data.edge_radii[index]<=epsilon) {
+    view.path([data.points[a],data.points[b]],color('edge'));
+    if(labeledEdge==null || data.edge_radii[index]>data.edge_radii[labeledEdge]) labeledEdge=index;
+  } });
+  // One visible edge supplies a distance reference without labeling a dense
+  // complex throughout. Its endpoints and the ruler share the point transform.
+  if(labeledEdge!=null) {
+    const [a,b]=data.edges[labeledEdge];
+    view.edgeLength(data.points[a],data.points[b],data.edge_radii[labeledEdge]);
+  }
   data.points.forEach((point,index)=>view.dot(point,color('node'),index));
+  view.scaleBar();
   legendText(`ε = ${fmt(epsilon)} · H₀: green · H₁: blue · filled triangles at diameter ≤ ε`);
 }
 function topologyDetails(data,current) {
