@@ -17,12 +17,11 @@ sheaf Laplacian is `δ^T δ`.
 Representations:
   - `GraphSheaf` stores uniform stalk dimensions in dense tensors.
     `HeterogeneousGraphSheaf` stores per-cell dimensions and ragged maps.
-  - Undirected graphs: edges are unordered, but our (u, v) tuple
-    convention encodes the orientation that defines `δ`'s sign
-    convention. Two sheaves with the same edge set but swapped (u, v)
-    orientations, while swapping their left and right maps, represent
-    the same underlying sheaf with reversed coboundary signs. The
-    Laplacian `L_F = δ^T δ` is identical since it is quadratic in δ.
+  - Undirected graphs: edges are unordered, but the (u, v) order in each
+    tuple sets the sign convention of `δ`. Flipping an edge to (v, u)
+    and swapping its left and right maps gives the same sheaf, with that
+    edge's block of `δ` negated. The Laplacian `L_F = δ^T δ` does not
+    change, since it is quadratic in `δ`.
 """
 
 from __future__ import annotations
@@ -112,17 +111,18 @@ class GraphSheaf:
                 f"F_left and F_right must share dtype; got "
                 f"{self.F_left.dtype} vs {self.F_right.dtype}"
             )
-        # Edge indices must lie in [0, n_nodes).
+        # Negative indices would wrap around silently in torch indexing, so
+        # both ends of the range are checked here.
         if (self.edges < 0).any() or (self.edges >= self.n_nodes).any():
             raise ValueError(
                 f"edges entries must be in [0, n_nodes={self.n_nodes})"
             )
-        # Self-loops (u == v) silently make the sheaf Laplacian
-        # differ from the standard combinatorial Laplacian, which the
-        # library-wide CONVENTIONS.md drops via `_graph_utils.
-        # drop_self_loops`. Sheaf v1 follows the same convention by
-        # rejecting them outright. Pre-process: `mask = u != v; edges
-        # = edges[mask]; F_left = F_left[mask]; F_right = F_right[mask]`.
+        # A self-loop adds a diagonal term (F_left - F_right)^T (F_left - F_right)
+        # to the sheaf Laplacian. The library drops self-loops from graphs
+        # (CONVENTIONS.md, via `_graph_utils.drop_self_loops`), so the sheaf
+        # code refuses them too. To proceed, drop them first:
+        # `mask = u != v; edges = edges[mask]; F_left = F_left[mask];
+        # F_right = F_right[mask]`.
         if (self.edges[:, 0] == self.edges[:, 1]).any():
             raise ValueError(
                 "self-loops (u == v in edges) are not supported in v1; "
@@ -165,16 +165,23 @@ class GraphSheaf:
         device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float64,
     ) -> GraphSheaf:
-        """Construct the *trivial* sheaf: identity restriction maps on
-        every edge, uniform stalk dimension on nodes and edges.
+        """Build the trivial sheaf: identity restriction maps on every edge.
 
-        With `stalk_dim = 1` this is the sheaf whose Laplacian equals
-        the standard combinatorial graph Laplacian; with `stalk_dim
-        = d > 1` its node-major ordering gives `L ⊗ I_d`. This is
-        permutation-similar to a block diagonal matrix of `d` copies of L.
+        With `stalk_dim = 1` this is the sheaf whose Laplacian equals the
+        standard combinatorial graph Laplacian. With `stalk_dim = d > 1`,
+        node-major ordering gives `L ⊗ I_d`, which is permutation-similar to
+        a block diagonal matrix of `d` copies of L.
 
-        The default device is the device of `edges`; an explicit `device`
-        moves both indices and maps there.
+        Args:
+          n_nodes: number of nodes.
+          edges: `(n_edges, 2)` int64 `(u, v)` pairs.
+          stalk_dim: stalk dimension `d` on every node and edge; must be > 0.
+          device: target device. Defaults to the device of `edges`, and an
+            explicit value moves both the indices and the maps there.
+          dtype: float dtype of the restriction maps.
+
+        Returns:
+          A `GraphSheaf` with `node_stalk_dim == edge_stalk_dim == stalk_dim`.
 
         References:
           Hansen-Ghrist (2019), §3.1, constant sheaves and graph Laplacians.
@@ -196,9 +203,8 @@ class GraphSheaf:
         eye = torch.eye(stalk_dim, dtype=dtype, device=device)
         F = eye.unsqueeze(dim=0).expand(n_e, stalk_dim, stalk_dim).contiguous()
         edges = edges.to(device=device, dtype=torch.int64)
-        # Independent clones for F_left and F_right: external mutation
-        # of one must not affect the other (the frozen-dataclass
-        # contract implies value semantics for callers).
+        # F_left and F_right get separate copies, so writing into one of them
+        # does not change the other.
         return GraphSheaf(
             n_nodes=n_nodes,
             edges=edges,
@@ -213,8 +219,9 @@ class GraphSheaf:
 class HeterogeneousGraphSheaf:
     """A cellular sheaf with PER-NODE (heterogeneous) stalk dimensions.
 
-    The v2 generalization of `GraphSheaf`: node `i` carries a `d_v[i]`-dim stalk
-    and edge `e` a `d_e[e]`-dim stalk, all free to differ. For edge `e = (u, v)`:
+    The generalization of `GraphSheaf` to per-node stalk dimensions: node `i`
+    carries a `d_v[i]`-dim stalk and edge `e` a `d_e[e]`-dim stalk, all free
+    to differ. For edge `e = (u, v)`:
 
       F_left[e]  : R^{d_v[u]} -> R^{d_e[e]}   shape (d_e[e], d_v[u])
       F_right[e] : R^{d_v[v]} -> R^{d_e[e]}   shape (d_e[e], d_v[v])
@@ -225,8 +232,8 @@ class HeterogeneousGraphSheaf:
     maps differ. The maps are stored as a tuple of tensors (ragged), since the
     dims vary, rather than one dense `(n_e, d_e, d_v)` block.
 
-    This is the structure needed when a node's stalk dimension IS a per-node
-    quantity (e.g. each concept's relational rank) rather than a single global K.
+    Use this when a node's stalk dimension is a quantity of its own, such as
+    each concept's relational rank, rather than one global K.
 
     Attributes:
       n_nodes:         number of nodes.
@@ -290,7 +297,10 @@ class HeterogeneousGraphSheaf:
             )
         if torch.unique(self.edges.sort(dim=-1).values, dim=0).shape[0] != n_e:
             raise ValueError("duplicate edges are not supported")
-        # Per-edge restriction-map shapes must match the incident stalk dims.
+        # Each F_left[e] must be (d_e[e], d_v[u]) and each F_right[e] must be
+        # (d_e[e], d_v[v]). The shapes change from edge to edge, so this is
+        # checked one edge at a time. The sizes and endpoints are pulled into
+        # Python lists once, so the loop never reads the device tensors.
         node_dims = self.node_stalk_dims.tolist()
         edge_dims = self.edge_stalk_dims.tolist()
         uv = self.edges.tolist()
@@ -308,6 +318,8 @@ class HeterogeneousGraphSheaf:
                     f"F_right[{e}] must be (d_e[e], d_v[v])={want_right}; got "
                     f"{tuple(self.F_right[e].shape)}"
                 )
+        # With no edges there are no maps to compare, so the device and dtype
+        # check only runs when at least one edge exists.
         if n_e > 0:
             dev, dt = self.F_left[0].device, self.F_left[0].dtype
             for t in (*self.F_left, *self.F_right):
@@ -327,6 +339,9 @@ class HeterogeneousGraphSheaf:
         """Length of the stacked node-stalk vector, `Σ_i d_v[i]`."""
         return int(self.node_stalk_dims.sum())
 
+    # With no edges there is no map to read the device or dtype from. The
+    # device falls back to the stalk-dim tensor, and the dtype to float64,
+    # the default that `trivial` uses.
     @property
     def device(self) -> torch.device:
         return (self.F_left[0].device if self.n_edges

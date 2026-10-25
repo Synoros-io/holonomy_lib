@@ -4,9 +4,10 @@
 """Discrete graph curvature and edge-weight Ricci flow.
 
 Available primitives:
-  ollivier_ricci_curvature: all-pairs entropic transport approximation.
+  ollivier_ricci_curvature: Ollivier-Ricci curvature on every node pair,
+    from entropic (Sinkhorn) transport.
   forman_ricci_simple: weighted graph Forman curvature with unit vertices.
-  forman_ricci_augmented: unit-weight graph and triangular-face curvature.
+  forman_ricci_augmented: unit-weight Forman curvature with triangle terms.
   discrete_ricci_flow: curvature-driven edge-weight updates.
   ricci_flow_with_surgery: flow with threshold-based edge removal.
 

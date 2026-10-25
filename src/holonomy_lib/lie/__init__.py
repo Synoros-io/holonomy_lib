@@ -7,8 +7,8 @@ The Lie group `SO(3)` is the group of orientation-preserving
 rotations of R³; its Lie algebra `so(3)` is the 3-dim space of
 skew-symmetric matrices (equivalently, angular-velocity vectors).
 This module ships the standard exp/log/random/compose primitives
-plus real spherical harmonics, which are the natural basis for any
-SO(3)-equivariant function on the unit sphere.
+plus real spherical harmonics, the standard basis for functions on the
+unit sphere that rotate in a known way under SO(3).
 
 Currently exposed:
   so3.axis_angle_to_matrix(axis, angle)  : Rodrigues formula.
@@ -21,10 +21,10 @@ Currently exposed:
   real_spherical_harmonics(directions, l_max)
                                           : closed-form Y_lm for
                                             l ≤ 4 evaluated at
-                                            (B, 3) unit direction
-                                            vectors.
+                                            (B, 3) direction vectors
+                                            (normalized internally).
 
-Planned (v0.2 follow-ups):
+Planned, not implemented yet:
   Wigner-D matrices (real basis) for higher-l rotation actions on
     spherical-harmonic features.
   Clebsch-Gordan coefficients for SO(3) tensor products (l₁ ⊗ l₂ → L).

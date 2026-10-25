@@ -5,6 +5,5 @@
 
 Subpackages: algebra, convex, discrete_geometry, experimental, hyperbolic,
 info_geometry, lie, manifolds, optimization, sheaf, simplicial, spectral,
-tensor_calculus,
-and topology.
+tensor_calculus, and topology.
 """

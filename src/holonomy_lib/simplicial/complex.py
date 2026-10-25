@@ -15,9 +15,9 @@ Layout:
   (beyond the valid count for that batch element) are filled with
   `-1` and masked off via `valid_mask[k]: (B, n_k_max) bool`.
 
-  This shape makes boundary operators naturally batched: a single
-  `(B, n_{k-1}_max, n_k_max)` matrix per dim, padding rows/cols
-  are zero (since the corresponding boundary is also masked).
+  This shape makes boundary operators naturally batched: one
+  `(B, n_{k-1}_max, n_k_max)` matrix per dim. Padding rows and columns
+  stay zero because only valid simplices write entries into it.
 
 References:
   Munkres, J. R. (1984). Elements of Algebraic Topology. Westview
@@ -88,11 +88,16 @@ class DenseSimplicialComplex:
         are zero.
 
         Args:
-          k: simplex dimension. Returns zeros for k=0 (vertices have
-            empty boundary in the chain complex).
+          k: simplex dimension. For k=0 the result is a `(B, 0, n_0_max)`
+            zero tensor, since vertices have an empty boundary in the chain
+            complex.
 
         References:
           Munkres, J. R. (1984). Elements of Algebraic Topology, §1.
+
+        Notes:
+          Assumes the complex is closed under faces. A face missing from
+          the (k-1) table raises ValueError from the lookup.
         """
         if k == 0:
             # ∂_0 maps to the (-1)-chain group; conventionally zero.
@@ -123,10 +128,11 @@ class DenseSimplicialComplex:
         D = torch.zeros(B, n_prev_max, n_k_max,
                          device=self.device, dtype=self.dtype)
 
-        # Face keys include the batch id: a face present in another complex
-        # cannot satisfy a missing face in this one. Keep padded row indices
-        # so noncontiguous valid masks still assemble into the right slots.
-        simplex_batch, simplex_col = torch.where(k_valid)
+        # Keys are (batch id, vertices), so a face in another batch member
+        # cannot stand in for a missing face here. lookup_rows indexes only
+        # the valid rows of the previous dimension, so prev_row maps that
+        # index back to the padded row position.
+        simplex_batch, simplex_col = torch.where(k_valid)  # padded columns
         prev_batch, prev_row = torch.where(prev_valid)
         faces, signs = enumerate_faces(k_simplices[k_valid])
         face_keys = torch.cat((
@@ -135,6 +141,9 @@ class DenseSimplicialComplex:
         prev_keys = torch.cat((prev_batch[:, None], prev_simplices[prev_valid]),
                               dim=-1)
         face_rows = prev_row[lookup_rows(prev_keys, face_keys)]
+        # One entry per (simplex, face) pair, flattened simplex-major and
+        # face-minor. repeat_interleave builds the index lists in that order,
+        # and repeat builds the signs in the same order.
         D[simplex_batch.repeat_interleave(k + 1), face_rows,
           simplex_col.repeat_interleave(k + 1)] = signs.to(self.dtype).repeat(
               simplex_col.shape[0],

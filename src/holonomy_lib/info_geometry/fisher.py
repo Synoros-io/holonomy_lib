@@ -13,11 +13,10 @@ It is the second-order Taylor coefficient of KL near the diagonal:
 
     KL(p_θ ‖ p_{θ + dθ}) = ½ dθᵀ F(θ) dθ + O(‖dθ‖³).
 
-Information geometry studies the geodesics of this metric; in
-optimization the natural gradient `F(θ)^{−1} ∇L` follows the
-steepest-descent direction with respect to the same metric, which is
-parameterization-invariant and a much better step for the loss
-landscapes that overparameterized models induce (Amari 1998).
+Information geometry studies the geodesics of this metric. In
+optimization, the natural gradient `F(θ)^{−1} ∇L` is the steepest-descent
+direction under this metric. The metric does not depend on how θ is
+parameterized, so the direction does not either (Amari 1998).
 
 Two closed-form Fisher matrices are exposed for the most common
 families; users with a custom likelihood can compute their own Fisher
@@ -35,9 +34,9 @@ either analytically or via `torch.autograd` over `log p`.
     straight lines for that fixed Σ.
 
   natural_gradient(grad, fisher_matrix)
-    Apply the Fisher inverse to a Euclidean gradient via a stable
-    linear solve (no explicit inverse). The output is the direction
-    that minimizes the loss most efficiently in the Fisher geometry.
+    Apply the Fisher inverse to a Euclidean gradient via a Cholesky
+    solve (no explicit inverse). The output is the steepest-descent
+    direction under the Fisher metric.
 
 References:
   Amari, S.-I. (1998). Natural gradient works efficiently in learning.
@@ -67,13 +66,12 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
     Taylor expansion: KL(p ‖ p + δ) ≈ ½ Σ_i δ_i² / p_i.
 
     Args:
-      p: (B, k) probability vectors on the open simplex. Entries must
+      p: (B, k) probability vectors on the open simplex. Entries should
         be positive. Metric coefficients diverge as p_i approaches zero,
         but the boundary is at finite Fisher distance. For example, the
         Bernoulli distance from p=1/2 to p=0 is pi/2.
-        We clamp entries from below by the numerical-floor convention
-        `1e-9` to keep the computation finite; pass cleaner inputs if
-        you need bit-stable results.
+        Entries below `1e-9` are clamped up to `1e-9` in the input dtype
+        (float16 is a special case, see the body).
 
     Returns:
       Fisher matrix: (B, k, k) diagonal SPD.
@@ -85,10 +83,12 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
     """
     if p.ndim < 1:
         raise ValueError(f"p must have at least 1 dim; got p.shape={tuple(p.shape)}")
-    # Library-wide numerical floor (`1e-9`) lives in the audit catalog
-    # as `numerical_floor_convention`. We never let 1/p go to infinity
-    # silently; caller's job to either keep p in the interior, or to
-    # interpret the clamped output (a large but finite Fisher).
+    # The clamp is what keeps 1/p finite at the boundary. The floor is the
+    # library-wide convention `numerical_floor_convention` in
+    # notes/magic_numbers.md, not a per-call knob. Keeping p in the interior
+    # is the caller's job; a clamped entry gives a large but finite value.
+    # float16 cannot represent 1e-9 (it rounds to 0), so the clamp does
+    # nothing there and 1/p is inf at p = 0.
     p_safe = p.clamp(min=1e-9)
     inv_p = torch.reciprocal(p_safe)
     return torch.diag_embed(inv_p)
@@ -106,8 +106,8 @@ def fisher_information_gaussian_mean(Sigma: torch.Tensor) -> torch.Tensor:
     `sqrt((μ_1 − μ_2)ᵀ Σ^{−1} (μ_1 − μ_2))`, i.e. the Mahalanobis
     distance for the given Σ.
 
-    Computed via Cholesky-based inverse rather than `linalg.inv` for
-    numerical stability on near-singular Σ.
+    Computed from a Cholesky factor with `cholesky_inverse`, not
+    `linalg.inv`. A matrix that is not SPD makes `cholesky` raise.
 
     Args:
       Sigma: (B, d, d) SPD covariance matrices.
@@ -123,9 +123,9 @@ def fisher_information_gaussian_mean(Sigma: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"Sigma must be (..., d, d); got Sigma.shape={tuple(Sigma.shape)}"
         )
-    # Cholesky-based inverse: stable on the SPD cone, faster than the
-    # general LU inverse, and matches the convention used in
-    # `kl_divergence_gaussian` for consistency.
+    # Σ is SPD, so factor it once and invert from the factor. This skips
+    # the pivoting an LU inverse does, and kl_divergence_gaussian uses the
+    # same factorization.
     L = torch.linalg.cholesky(Sigma)
     return torch.cholesky_inverse(L)
 
@@ -138,13 +138,15 @@ def natural_gradient(
 
     The natural gradient (Amari 1998) is the steepest-descent direction
     on a statistical manifold under the Fisher metric. Unlike the
-    Euclidean gradient, it is invariant under reparameterization, which
-    eliminates the parameterization-dependent ill-conditioning that
-    standard gradients suffer from on overparameterized models.
+    Euclidean gradient, the direction does not change under a smooth
+    reparameterization of θ, since the metric is the same geometric
+    object in every coordinate system. That removes one source of
+    parameterization-dependent behavior. It does not make an
+    ill-conditioned F any better conditioned.
 
-    Implementation: solve `F · d = grad` rather than `inv(F) @ grad`,
-    so the linear system inherits whatever conditioning F has without
-    the extra rounding from an explicit inverse.
+    Implementation: solve `F · d = grad` through a Cholesky factor of F,
+    rather than forming `inv(F) @ grad`. The solve inherits whatever
+    conditioning F has, without the extra rounding from an explicit inverse.
 
     Args:
       grad: (B, d) Euclidean gradient at θ.

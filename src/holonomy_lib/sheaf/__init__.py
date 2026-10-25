@@ -19,8 +19,8 @@ identity (i.e., the *trivial sheaf*), `L_F` reduces to the standard
 combinatorial graph Laplacian. With higher-dimensional stalks and
 non-trivial restriction maps it captures structure that a scalar
 Laplacian cannot; orientation sheaves, signed cellular sheaves,
-connection Laplacians, and the spectral domain that drives Neural
-Sheaf Diffusion (Bodnar et al. 2022).
+connection Laplacians, and the Laplacians used by Neural Sheaf
+Diffusion (Bodnar et al. 2022).
 
 Currently exposed:
   GraphSheaf                 ; dataclass holding edges + stalks + maps

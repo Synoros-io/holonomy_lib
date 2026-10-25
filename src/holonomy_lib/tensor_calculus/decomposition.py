@@ -81,12 +81,12 @@ def mode_product(
     # Move the contracted axis of T to the last position, then reshape
     # so that the contracted axis is the inner dim of a 2-D matmul.
     T_perm = T.movedim(axis, -1)              # (B, ..., n_axis)
-    # Flatten the middle (non-batch non-contracted) dims:
+    # Collapse the untouched modes into one K-sized axis.
     other_modes = math.prod(T_perm.shape[1:-1])
     T_flat = T_perm.reshape(B, other_modes, n_axis)
     # Multiply: (B, K, n_axis) @ (B, n_axis, j) → (B, K, j)
     out_flat = torch.bmm(T_flat, A.mT)        # uses A.mT = (B, n_axis, j)
-    # Restore the middle dims:
+    # Undo the collapse. The untouched modes are back in their original order.
     middle = list(T_perm.shape[1:-1])
     out_perm = out_flat.reshape(B, *middle, j)
     # Move the new (size-j) axis from last back to position `axis`:
@@ -177,6 +177,8 @@ def hosvd(
     for k, r_k in enumerate(ranks):
         n_k = T.shape[k + 1]
         other_modes = math.prod(T.shape[1:k + 1] + T.shape[k + 2:])
+        # The mode-k unfolding of each member is (n_k, other_modes), so its
+        # rank cannot exceed the smaller of the two.
         max_rank = min(n_k, other_modes)
         if r_k <= 0 or r_k > max_rank:
             raise ValueError(
@@ -196,8 +198,9 @@ def hosvd(
 
     # Step 2: core G = T ×_1 U_1ᵀ ×_2 U_2ᵀ × ... ×_d U_dᵀ.
     # Our `mode_product(T, A, axis)` contracts T's axis with A's last dim.
-    # We want to project: T's axis_k of size n_k → r_k. Pass A = factors[k-1].mT
-    # so A has shape (B, r_k, n_k) and the result has r_k at axis_k.
+    # We want to project axis k from size n_k down to r_k. Pass A =
+    # factors[k-1].mT so A has shape (B, r_k, n_k) and the result has r_k at
+    # axis k.
     core = T
     for k in range(1, d + 1):
         core = mode_product(core, factors[k - 1].mT, axis=k)

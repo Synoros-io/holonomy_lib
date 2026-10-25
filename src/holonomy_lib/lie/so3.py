@@ -16,9 +16,9 @@ the closed-form Rodrigues formula:
     exp([ω]_×) = I + (sin θ / θ) [ω]_× + ((1 − cos θ) / θ²) [ω]_×²,
     θ = ‖ω‖.
 
-Its inverse (the Lie log) is the matrix log on SO(3), well-defined
-locally smooth below angle π. At π the axis has an unavoidable sign
-ambiguity; see `so3_log` for the selected representative.
+Its inverse, the Lie log, is smooth on rotations with angle below π.
+At π the axis has a sign ambiguity; see `so3_log` for the
+representative it returns.
 
 References:
   Hall (2015), §3.1: SO(3) and the Rodrigues formula.
@@ -45,13 +45,16 @@ SO3_DIM: int = 3
 QUATERNION_DIM: int = 4
 
 # The near-pi crossover was calibrated in float64 against Rodrigues round
-# trips; the dtype floor below widens it for lower precision inputs.
+# trips. so3_log uses the larger of this and sqrt(eps) for the input dtype,
+# so float32 (sqrt(eps) about 3.5e-4) gets a wider near-pi band.
 # Cataloged as SO3_LOG_NEAR_PI_RAD; this is an angle in radians.
 SO3_LOG_NEAR_PI_RAD: float = 1e-7
 
-# arcsin(s) / s = 1 + s² / 3! + O(s⁴), where s = sin(theta).
-# The small-angle neighborhood is set from dtype epsilon so the omitted
-# term stays below roundoff, rather than introducing an angular tolerance.
+# For cos(theta) > 0, theta = arcsin(s) with s = sin(theta), so
+# theta / sin(theta) = arcsin(s) / s = 1 + s² / 3! + O(s⁴).
+# The small-angle neighborhood comes from dtype epsilon: with s² below
+# sqrt(eps), the dropped s⁴ term is of order eps, which is roundoff. No
+# separate angle tolerance is needed.
 SO3_LOG_SERIES_SECOND_ORDER: float = 1.0 / math.factorial(SO3_DIM)
 
 # Taylor coefficients of sin(theta)/theta and (1-cos(theta))/theta².
@@ -91,6 +94,8 @@ def axis_angle_to_matrix(
             f"axis batch shape {tuple(axis.shape[:-1])} must match "
             f"angle shape {tuple(angle.shape)}"
         )
+    # A zero axis would divide by zero. The clamp keeps the division finite,
+    # and a zero axis then gives the identity.
     floor = torch.finfo(axis.dtype).tiny
     norm = torch.linalg.norm(axis, dim=-1, keepdim=True).clamp(min=floor)
     axis_unit = axis / norm                                # (..., 3)
@@ -127,8 +132,8 @@ def matrix_to_axis_angle(R: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         )
     omega = so3_log(R)
     angle = torch.linalg.vector_norm(omega, dim=-1)
-    # An axis has no meaning at identity. Only this axis-angle API makes
-    # the canonical choice; the smooth Lie logarithm keeps the skew vector.
+    # The axis is undefined at the identity, where the rotation vector is
+    # zero. Only this axis-angle API has to pick one, so it uses (1, 0, 0).
     nonzero = angle > 0
     divisor = torch.where(nonzero, angle, torch.ones_like(angle))
     axis = omega / divisor.unsqueeze(-1)
@@ -140,8 +145,9 @@ def matrix_to_axis_angle(R: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def so3_exp(omega: torch.Tensor) -> torch.Tensor:
     """Matrix exponential on so(3): ω ∈ R³ ↦ R ∈ SO(3).
 
-    Evaluates Rodrigues' formula with analytic Taylor coefficients near
-    zero, including the skew-generator derivative at zero angular velocity.
+    Evaluates Rodrigues' formula. Near zero it uses Taylor polynomials for
+    the two coefficients, so the result and its gradient stay finite at
+    omega = 0.
 
     Args:
       omega: `(..., 3)` Lie algebra elements.
@@ -160,8 +166,10 @@ def so3_exp(omega: torch.Tensor) -> torch.Tensor:
         )
     theta_squared = omega.square().sum(dim=-1)
     small = theta_squared <= math.sqrt(torch.finfo(omega.dtype).eps)
-    # Mask before sqrt and division so inactive branches have finite
-    # derivatives too. The polynomial uses theta² directly at the origin.
+    # torch.where computes both branches everywhere, and a NaN or inf in the
+    # unused one would still turn into a NaN gradient. So the sqrt and the
+    # division get 1 wherever the small branch is active, and the polynomial
+    # sees 0 wherever it is not.
     safe_squared = torch.where(small, torch.ones_like(theta_squared), theta_squared)
     theta = torch.sqrt(safe_squared)
     series_squared = torch.where(small, theta_squared, torch.zeros_like(theta_squared))
@@ -188,10 +196,12 @@ def so3_exp(omega: torch.Tensor) -> torch.Tensor:
 def so3_log(R: torch.Tensor) -> torch.Tensor:
     """Principal rotation vector of an SO(3) matrix, with norm in [0, π].
 
-    Away from π, the skew part gives sin(theta) times the rotation axis.
-    A series for theta / sin(theta) preserves its direction at small angles.
-    Near π the symmetric part determines the axis; its sign at exactly π
-    is intrinsically ambiguous, so the logarithm is not smooth there.
+    Away from π, the skew part is sin(theta) times the rotation axis, so
+    the rotation vector is that part scaled by theta / sin(theta). Near
+    zero that quotient is replaced by its series 1 + sin²(theta) / 6.
+    Near π the sine is too small to carry the axis, so the symmetric part
+    determines it instead. The sign at exactly π is intrinsically
+    ambiguous, so the logarithm is not smooth there.
 
     Args:
       R: `(..., 3, 3)` rotation matrices.
@@ -213,11 +223,15 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
     cos_angle = ((R.diagonal(dim1=-2, dim2=-1).sum(dim=-1) - 1.0) * 0.5)
     angle = torch.atan2(sin_angle, cos_angle)
     small = (cos_angle > 0) & (sin_squared < math.sqrt(torch.finfo(R.dtype).eps))
+    # The skew part only carries the axis when sin(theta) is not tiny, so
+    # this threshold switches to the symmetric part close to π.
     near_pi = angle > math.pi - max(
         SO3_LOG_NEAR_PI_RAD, math.sqrt(torch.finfo(R.dtype).eps),
     )
-    # Neither inactive quotient divides by a vanishing sine. This matters
-    # in backward too: where masks a value, not an undefined derivative.
+    # The angle / sine quotient is computed everywhere, so its sine is swapped
+    # for 1 in the small and near-π branches, where that quotient is not
+    # used. This matters in backward too: torch.where sends zero gradient
+    # into the unused branch, and zero times an infinite derivative is NaN.
     safe_sine = torch.where(small | near_pi, torch.ones_like(sin_angle), sin_angle)
     scale = torch.where(
         small, 1.0 + SO3_LOG_SERIES_SECOND_ORDER * sin_squared, angle / safe_sine,
@@ -228,6 +242,10 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
     # diagonal selects a row with a nonzero axis component even at π.
     eye = torch.eye(SO3_DIM, dtype=R.dtype, device=R.device)
     symmetric = 0.5 * (R + R.mT) - cos_angle[..., None, None] * eye
+    # Away from π this part's axis is not used. At the identity, though,
+    # Sym(R) - cos(theta) I is exactly zero, so its row would be a 0 / 0
+    # normalization. Swap in the identity wherever this is not used. A NaN
+    # in an unused branch would still poison the gradient.
     symmetric = torch.where(near_pi[..., None, None], symmetric, eye)
     pivot = symmetric.diagonal(dim1=-2, dim2=-1).argmax(dim=-1)
     row = symmetric.gather(
@@ -240,8 +258,9 @@ def so3_log(R: torch.Tensor) -> torch.Tensor:
 
 
 def compose(R1: torch.Tensor, R2: torch.Tensor) -> torch.Tensor:
-    """SO(3) group product: `R1 · R2`. Just `matmul`, exposed for API
-    consistency with the rest of the module.
+    """SO(3) group product `R1 · R2`, a plain matmul.
+
+    It lives in this module so the group operations are together.
 
     Args:
       R1, R2: broadcastable `(..., 3, 3)` rotation matrices.
@@ -343,12 +362,12 @@ def _quaternion_to_matrix(q: torch.Tensor) -> torch.Tensor:
 
     Standard formula; works for arbitrary batch shape ending in 4.
     """
-    # Quaternion unpacking: (w, x, y, z). The literal 3 is the index
-    # of the last quaternion component (QUATERNION_DIM - 1); the
-    # algorithm requires accessing every component by name.
+    # Components are read by index, in the (w, x, y, z) layout. The last
+    # index is written as QUATERNION_DIM - 1 so it is tied to the constant.
+    # The others are plain 0, 1, 2.
     last = QUATERNION_DIM - 1
     w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., last]
-    # Off-diagonal pairs reuse the same products: factor for clarity.
+    # Each product shows up in more than one entry, so compute it once.
     wx, wy, wz = w * x, w * y, w * z
     xx, yy, zz = x * x, y * y, z * z
     xy, xz, yz = x * y, x * z, y * z

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Bregman + KL divergences, batched-first, GPU-native.
+"""Bregman and KL divergences, batched over leading dimensions on any device.
 
 A Bregman divergence is the asymmetric "distance" induced by a strictly
 convex generator F : Ω ⊂ ℝᵈ → ℝ:
@@ -28,8 +28,9 @@ This module provides:
 
   kl_divergence_categorical(p, q)
       KL(p ‖ q) for discrete distributions on the simplex, with the
-      0·log 0 = 0 convention. Equivalent to `bregman_divergence` with
-      `potential = (x · log x − x).sum()`, but cheaper.
+      0·log 0 = 0 convention. On the simplex this equals `bregman_divergence`
+      with `potential = (x · log x − x).sum()`, and it is cheaper. The
+      Bregman form also adds Σq − Σp, which vanishes only when both sum to one.
 
       Autograd note: `xlogy` preserves zero-mass terms and returns
       `+inf` when `p_i > 0` and `q_i = 0` (support mismatch).
@@ -98,9 +99,11 @@ def bregman_divergence(
             f"p and q must have matching last dim; got p.shape[-1]="
             f"{p.shape[-1]} vs q.shape[-1]={q.shape[-1]}"
         )
+    # Only the gradient at q enters the formula, so the potential's gradient
+    # at p is discarded.
     F_p, _ = potential(p)
     F_q, grad_F_q = potential(q)
-    # ⟨∇F(q), p − q⟩, contracted over the feature dim.
+    # ⟨∇F(q), p − q⟩, summed over the feature dim so it has the batch shape.
     inner = (grad_F_q * (p - q)).sum(dim=-1)
     return F_p - F_q - inner
 
@@ -135,8 +138,10 @@ def kl_divergence_categorical(
             f"p and q must have matching last dim; got {p.shape[-1]} vs "
             f"{q.shape[-1]}"
         )
-    # Separate xlogy terms keep positive probabilities intact, even
-    # below the numerical floor, and give zero when p_i is zero.
+    # p log(p / q) is split into two xlogy terms. xlogy(p, x) is 0 wherever
+    # p is 0, so zero-mass bins drop out without a 0 * log 0 nan. No clamp
+    # is applied, so tiny positive p keep their exact p log p. A bin with
+    # p_i > 0 and q_i = 0 gives +inf, as the module note says.
     return (torch.special.xlogy(p, p) - torch.special.xlogy(p, q)).sum(dim=-1)
 
 
@@ -158,7 +163,9 @@ def kl_divergence_gaussian(
     factorization for both the trace term `tr(Σ_q⁻¹ Σ_p)` and the
     Mahalanobis term `(μ_q − μ_p)ᵀ Σ_q⁻¹ (μ_q − μ_p)`. `log det Σ_q`
     comes for free from the Cholesky diagonal. For `Σ_p` we just need
-    `log det Σ_p`, also via Cholesky.
+    `log det Σ_p`, also via Cholesky. A covariance that is not SPD makes
+    `torch.linalg.cholesky` raise, so bad input fails instead of returning
+    a number.
 
     Args:
       mu_p, mu_q: (..., d) means.
@@ -190,7 +197,8 @@ def kl_divergence_gaussian(
         )
 
     L_q = torch.linalg.cholesky(Sigma_q)
-    # Σ_q⁻¹ Σ_p via two triangular solves (cholesky_solve).
+    # Σ_q⁻¹ Σ_p through the Cholesky factor of Σ_q: two triangular solves,
+    # so no explicit inverse of Σ_q is formed.
     Sigma_q_inv_Sigma_p = torch.cholesky_solve(Sigma_p, L_q)
     trace_term = torch.diagonal(
         Sigma_q_inv_Sigma_p, dim1=-2, dim2=-1,

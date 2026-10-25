@@ -6,22 +6,20 @@ for l ≤ 4.
 
 Real spherical harmonics are the orthonormal basis for square-
 integrable functions on `S² ⊂ R³` that diagonalizes the Laplace-
-Beltrami operator on the sphere. Each `Y_lm` is a homogeneous-degree-l
-polynomial in `(x, y, z)` restricted to `‖r‖ = 1`; there are `2l + 1`
+Beltrami operator on the sphere. On the sphere, each `Y_lm` agrees with
+a homogeneous polynomial of degree l in `(x, y, z)`. There are `2l + 1`
 of them at each `l`, indexed by `m ∈ {−l, …, l}`. The total at
 truncation `l_max` is `(l_max + 1)²` components.
 
-In equivariant deep learning these are the natural basis for
-SO(3)-equivariant features on the sphere (or any function of a
-direction vector). They are the steerable filters of e3nn and of
-SE(3)-Transformer; their tensor products via Clebsch-Gordan
-coefficients give the building blocks of SO(3)-equivariant
-networks.
+In equivariant deep learning these serve as the spherical features that
+rotate in a known way under SO(3). e3nn and SE(3)-Transformer use them
+as steerable filters, and Clebsch-Gordan coefficients are what combine
+different degrees into equivariant products.
 
-This module returns the orthonormal Condon-Shortley-free convention
-(positive prefactors, no `(−1)^m` phase). Inputs are direction
-vectors `(..., 3)`; the function normalizes to unit norm internally
-so callers can pass unnormalized vectors.
+The basis is orthonormal over the sphere and uses the Condon-Shortley-free
+convention: every prefactor is positive, with no `(−1)^m` phase. Inputs
+are direction vectors `(..., 3)`; the function normalizes to unit norm
+internally, so callers can pass unnormalized vectors.
 
 References:
   Wikipedia, "Real spherical harmonics": the explicit formulas
@@ -62,9 +60,9 @@ def real_spherical_harmonics(
     Args:
       directions: `(..., 3)` direction vectors. Need not be unit; the
         function normalizes internally.
-      l_max: highest degree to compute. Must be in `[0, 4]` for v1;
-        higher degrees require a recurrence relation that is not
-        implemented yet.
+      l_max: highest degree to compute. Must be in `[0, 4]`. Higher
+        degrees need the associated-Legendre recurrence, which is not
+        implemented.
 
     Returns:
       `(..., (l_max + 1)²)` real spherical harmonic values.
@@ -85,6 +83,9 @@ def real_spherical_harmonics(
             f"(not implemented)."
         )
 
+    # The clamp keeps a zero direction from dividing by zero. It then stays
+    # the zero vector, and the polynomials evaluated there are not meaningful
+    # SH values.
     floor = torch.finfo(directions.dtype).tiny
     norm = torch.linalg.norm(directions, dim=-1, keepdim=True).clamp(min=floor)
     unit = directions / norm
@@ -93,10 +94,13 @@ def real_spherical_harmonics(
     components: list[torch.Tensor] = []
 
     # ----- l = 0 -----
-    # Y_{0,0} = 0.5 · sqrt(1/π)
+    # Y_{0,0} = 0.5 · sqrt(1/π). full_like keeps the batch shape, dtype and
+    # device of x, so the constant stacks with the other components.
     y00 = torch.full_like(x, 0.5 * math.sqrt(1.0 / math.pi))
     components.append(y00)
 
+    # Each block below adds one degree. Returning early for a smaller l_max
+    # means the higher blocks never run.
     if l_max < 1:
         return torch.stack(components, dim=-1)
 

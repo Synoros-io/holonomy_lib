@@ -64,23 +64,25 @@ SINKHORN_N_ITER_DEFAULT: int = 65536
 # the observed curvature error below 1e-2; it does not bound entropic bias.
 SINKHORN_TOL_DEFAULT: float = 1e-4
 
-# Schmitzer (2019), Algorithm 3, allows a geometric epsilon schedule. Halving
-# after each stage meets the default marginal tolerance avoids carrying a
-# small mass deficit into a colder problem. A stricter caller tolerance is
-# reserved for target epsilon; oversolving warmup stages can exhaust a budget
-# before reaching the problem the caller actually requested.
+# Schmitzer (2019), Algorithm 3, allows a geometric epsilon schedule. We halve
+# epsilon only once a stage meets the stage tolerance (the caller's tol, or
+# SINKHORN_TOL_DEFAULT if the caller's is tighter). That way a small mass
+# deficit is not carried into a colder problem. A stricter caller tolerance is
+# held back for the target epsilon, since oversolving the warmup stages can use
+# up the budget before we reach the problem the caller asked for.
 SINKHORN_EPSILON_DECAY: float = 0.5
 
-# Schmitzer (2019), section 5, uses tau=100 for absorption. Track its log
-# to decide when to rebuild a normalized kernel from the dual potentials.
+# Schmitzer (2019), section 5, uses tau=100 for absorption. We compare the
+# accumulated log scaling against log(tau) to decide when to rebuild a
+# normalized kernel from the dual potentials.
 SINKHORN_ABSORPTION_THRESHOLD: float = 100.0
 
-# Sync cadence for Sinkhorn convergence checks. The `.item()` call
-# on the marginal-error tensor forces a host sync on GPU; doing it every iter
-# adds tens of µs per iter to wait for the kernel queue. Checking
-# every 8 iters keeps the asymptotic work the same (within 8 iters
-# of true convergence) while cutting host sync count by 8×.
-# **Scale of validity**: dimensionless cadence — does not need
+# Sync cadence for Sinkhorn convergence checks. The `.item()` call on the
+# marginal-error tensor forces a host sync on GPU, and doing it every iteration
+# adds tens of µs per iteration waiting on the kernel queue. Checking every 8
+# iterations overshoots true convergence by at most 8 sweeps while cutting the
+# host sync count by 8×.
+# **Scale of validity**: a dimensionless cadence, so it does not need
 # re-derivation across input sizes or precisions. Cataloged as
 # `sinkhorn_sync_every_default`.
 SINKHORN_SYNC_EVERY_DEFAULT: int = 8
@@ -91,16 +93,17 @@ SINKHORN_SYNC_EVERY_DEFAULT: int = 8
 # member; sparse graphs use less. Cataloged as `sinkhorn_tile_default`.
 SINKHORN_TILE_DEFAULT: int = 256
 
-# Default surgery period for `ricci_flow_with_surgery` — perform surgery
+# Default surgery period for `ricci_flow_with_surgery`: surgery runs once
 # every N Ricci-flow steps. Ni-Lin-Luo-Gao (2019) §3.2 use values in
 # [10, 15] for community detection; we default to 10 as the more
 # aggressive choice. Catalog: `ricci_flow_surgery_period_default`.
 RICCI_FLOW_SURGERY_PERIOD_DEFAULT: int = 10
 
-# Default surgery threshold — edges whose weight grows past this value
-# are removed as "neckpinches forming". Sia-Jonckheere-Bogdan (2019)
-# and Ni et al. (2019) both use thresholds around 2-3× initial weight.
-# Conservative default at 3.0 lets only clearly-stretched edges go.
+# Default surgery threshold, as a multiple of the initial mean edge weight.
+# Edges whose weight grows past this multiple are removed as forming
+# neckpinches. Sia-Jonckheere-Bogdan (2019) and Ni et al. (2019) both use
+# thresholds around 2-3× initial weight. The conservative end, 3.0, lets
+# only clearly stretched edges go.
 # Catalog: `ricci_flow_surgery_threshold_default`.
 RICCI_FLOW_SURGERY_THRESHOLD_DEFAULT: float = 3.0
 
@@ -138,7 +141,8 @@ def ollivier_ricci_curvature(
     Notes:
       A warning reports the achieved marginal error if the iteration
       budget is exhausted without meeting tol. The returned approximation
-      can then be infeasible. Exact zeros in the walk support stay zero.
+      can then be infeasible. Zero-probability entries (self when alpha is 0)
+      carry no transport mass.
       Padded supports contain at most s=max_degree+1 entries. Symmetry
       permits solving each unordered pair once. Transport costs
       O(B*n**2*s**2*n_iter), with O(B*tile_size*s**2) temporary storage;
@@ -195,11 +199,12 @@ def discrete_ricci_flow(
     Args:
       A: (B, n, n) symmetric weighted adjacency. Non-negative weights.
       n_steps: number of flow iterations.
-      dt: step size. Smaller → more numerically stable, slower convergence.
+      dt: step size. Each step multiplies an edge by (1 - dt * kappa).
       alpha: laziness parameter, as in `ollivier_ricci_curvature`.
-      normalize: if True, rescale edge weights after each step so the
-        Frobenius norm of A stays constant. Prevents global scaling
-        from running away, isolating the *structural* effect of the flow.
+      normalize: if True, rescale edge weights after each step so their
+        Frobenius norm stays at its initial value. Without this, global
+        scaling can drift, and normalizing isolates the structural effect
+        of the flow.
       reg, n_sinkhorn_iters, sinkhorn_tol, sinkhorn_tile_size,
         sinkhorn_sync_every: forwarded to the curvature computation.
         The sync cadence controls how often marginal checks reach the host.
@@ -229,26 +234,33 @@ def discrete_ricci_flow(
         initial_norm = torch.linalg.matrix_norm(W, dim=(-2, -1), keepdim=True)
 
     for _ in range(n_steps):
-        # Compute curvature on current edge weights
+        # Only the existing edges get updated, so only their transports are
+        # solved. Non-edge entries of kappa come back as placeholders that
+        # the edge mask below throws away.
         kappa = _curvature(
             W, alpha, reg, n_sinkhorn_iters, sinkhorn_tol,
             sinkhorn_tile_size, sinkhorn_sync_every, pair_mask=W > 0,
         )
-        # Update: w *= (1 - dt * kappa). Mask to existing edges only;
-        # non-edges (W == 0) stay zero — surgery is separate.
+        # w *= (1 - dt * kappa) on existing edges only. Non-edges are exactly
+        # zero (weights are non-negative), so they stay zero and the flow never
+        # creates an edge. An edge whose weight reaches zero stays gone.
         edge_mask = (W > 0).to(W.dtype)
         update = (1.0 - dt * kappa) * edge_mask
-        W = W * update + W * (1.0 - edge_mask)  # leave non-edges alone
-        # Clamp negative weights to zero (edge would have flipped sign)
+        W = W * update + W * (1.0 - edge_mask)
+        # kappa <= 1 always (W_1 is non-negative), so the multiplier
+        # 1 - dt * kappa can only go negative when dt > 1. A negative length has
+        # no meaning, so the clamp sets that edge to zero.
         W = W.clamp(min=0)
-        # Maintain symmetry (curvature is symmetric, but float drift)
+        # Curvature is symmetric in exact arithmetic; averaging with the
+        # transpose stops float drift from making the graph directed.
         W = 0.5 * (W + W.mT)
         if normalize:
             current_norm = torch.linalg.matrix_norm(
                 W, dim=(-2, -1), keepdim=True,
             )
-            # A positive norm keeps its own scale, however small. If the
-            # step removes every edge, zero weights must remain zero.
+            # If the step removed every edge, the norm is zero and the division
+            # would give NaN. Dividing by one keeps the all-zero graph at zero.
+            # Any positive norm, however small, is used as it is.
             current_norm = torch.where(
                 current_norm == 0, torch.ones_like(current_norm), current_norm,
             )
@@ -295,8 +307,9 @@ def ricci_flow_with_surgery(
       Other args: as in `discrete_ricci_flow`.
 
     Returns:
-      (B, n, n) adjacency after flow + surgery. Disconnected components
-      indicate detected communities.
+      (B, n, n) adjacency after flow and surgery. Components that surgery
+      disconnects are the candidate communities; nothing here checks that
+      they are.
 
     References:
       Sia, J., Jonckheere, E., Bogdan, P. (2019). Ollivier-Ricci
@@ -318,7 +331,9 @@ def ricci_flow_with_surgery(
             f"surgery_threshold must be finite and > 0, got {surgery_threshold}"
         )
 
-    # Initial mean edge weight — the scale against which we threshold.
+    # Initial mean edge weight is the fixed scale we threshold against. Both
+    # (i, j) and (j, i) are counted, which gives the same mean on a symmetric
+    # graph. The clamp keeps an edgeless graph from dividing by zero.
     edge_mask_init = (W > 0).to(W.dtype)
     n_edges = edge_mask_init.sum(dim=(-2, -1), keepdim=True).clamp(min=1.0)
     initial_mean = (W * edge_mask_init).sum(
@@ -332,7 +347,7 @@ def ricci_flow_with_surgery(
         )
 
     for step in range(n_steps):
-        # One Ricci-flow step
+        # Same flow step as discrete_ricci_flow; see the comments there.
         kappa = _curvature(
             W, alpha, reg, n_sinkhorn_iters, sinkhorn_tol,
             sinkhorn_tile_size, sinkhorn_sync_every, pair_mask=W > 0,
@@ -351,9 +366,10 @@ def ricci_flow_with_surgery(
             )
             W = W * (initial_norm / current_norm)
 
-        # Surgery: remove edges that have stretched past the cutoff.
-        # `step + 1` because we want surgery after the FIRST flow step
-        # for surgery_period = 1 (i.e. surgery every step).
+        # Surgery: remove edges that have stretched past the cutoff. `step + 1`
+        # counts flow steps from one, so surgery runs after step number
+        # surgery_period, 2 * surgery_period, and so on. With surgery_period = 1
+        # it runs after every step, the first one included.
         if (step + 1) % surgery_period == 0:
             keep = W <= cutoff
             W = W * keep.to(W.dtype)
@@ -377,14 +393,19 @@ def _curvature(
     sync_every: int,
     pair_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute curvature on selected pairs; callers mask unused outputs.
+    """Compute Ollivier-Ricci curvature, solving transport only where asked.
 
-    Public curvature needs every pair. Flow only uses existing edges, so it
-    supplies their mask and avoids transports that cannot affect its update.
+    Takes the public arguments plus an optional (..., n, n) boolean pair_mask
+    and returns the (..., n, n) curvature. Public curvature needs every pair,
+    so it passes no mask. Flow only uses existing edges, so it passes W > 0
+    and skips transports that cannot affect its update. A reachable pair
+    outside the mask gets W1 = 0 and so kappa = 1, a placeholder the caller
+    must mask out.
     """
     A = _validate_curvature_inputs(
         A, alpha, reg, n_iter, tol, tile_size, sync_every,
     )
+    # An empty batch or a zero-node graph has nothing to solve.
     if A.numel() == 0:
         return A.clone()
 
@@ -396,11 +417,13 @@ def _curvature(
 
     # 2. Lazy-random-walk distributions μ_x for each node x.
     #    μ_x(y) = (1−α) · (A[x,y] / Σ_z A[x,z])   for y in N(x)
-    #    μ_x(x) = α (+ 0 if x is isolated, in which case μ_x = δ_x)
-    mu = _lazy_walk_distributions(A, alpha)  # (B, n, n) — μ_x is row x
+    #    μ_x(x) = α, or 1 if x is isolated (then μ_x = δ_x)
+    mu = _lazy_walk_distributions(A, alpha)  # (B, n, n), μ_x is row x
 
-    # 3. Sinkhorn-based W_1 between μ_x and μ_y for every pair (x, y).
-    #    All pairs of rows of `mu` — the cost matrix is d_G.
+    # 3. Sinkhorn-based W_1 between μ_x and μ_y for each pair (x, y) that
+    #    `reachable` (and `pair_mask`, if given) selects. The solver works on
+    #    each node's walk support and reads the costs between supports from d_G
+    #    (see _batched_sinkhorn_w1).
     W1 = _batched_sinkhorn_w1(
         mu, d_G, reg=reg, n_iter=n_iter, tol=tol, tile_size=tile_size,
         sync_every=sync_every,
@@ -408,10 +431,12 @@ def _curvature(
     )  # (B, n, n)
 
     # 4. Curvature κ(x, y) = 1 - W_1 / d_G.
-    # Diagonal: d_G is 0 there; set κ to 1 by convention (vacuous).
+    # d_G is 0 on the diagonal and holds a 0 placeholder between components.
+    # Dividing by 1 there keeps the arithmetic finite; both cases are
+    # overwritten below, the diagonal with 1 by convention and cross-component
+    # pairs with 0.
     safe_dG = torch.where(d_G > 0, d_G, torch.ones_like(d_G))
     kappa = 1.0 - W1 / safe_dG
-    # Diagonal entries: 1 by convention.
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand(*batch, n, n)
     kappa = torch.where(eye > 0, torch.ones_like(kappa), kappa)
     return torch.where(reachable, kappa, torch.zeros_like(kappa))
@@ -427,7 +452,12 @@ def _validate_curvature_inputs(
     tile_size: int,
     sync_every: int,
 ) -> torch.Tensor:
-    """Validate shared inputs and return adjacency with its loops removed."""
+    """Check the curvature arguments and return A with its self-loops removed.
+
+    Raises ValueError on a bad shape, dtype, negative or non-finite length,
+    or out-of-range parameter. An asymmetric A only warns, since the caller
+    may have a near-symmetric input; curvature here assumes undirected graphs.
+    """
     if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
         raise ValueError(f"A must be (..., n, n); got A.shape={tuple(A.shape)}")
     if not A.is_floating_point():
@@ -466,7 +496,11 @@ def _validate_flow_inputs(
     tile_size: int,
     sync_every: int,
 ) -> torch.Tensor:
-    """Share flow validation, including zero-step calls."""
+    """Check the flow arguments and return A with its self-loops removed.
+
+    Runs the curvature checks too, so a zero-step call still rejects bad
+    input instead of passing it straight back.
+    """
     A = _validate_curvature_inputs(A, alpha, reg, n_iter, tol, tile_size, sync_every)
     if not isinstance(n_steps, int) or n_steps < 0:
         raise ValueError(f"n_steps must be a non-negative integer, got {n_steps}")
@@ -476,23 +510,24 @@ def _validate_flow_inputs(
 
 
 def _shortest_path_distances(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return Floyd-Warshall distances and the original reachability mask.
+    """Return Floyd-Warshall distances and a reachability mask.
 
-    The vertex recurrence is sequential, with all batches and endpoint
-    pairs handled by tensor operations. Unreachable distances receive a
-    zero placeholder for transport arithmetic; callers retain the mask.
-    Exact-zero probability support excludes those costs in all transport
-    problems within an undirected component.
+    Input: A, (..., n, n) non-negative adjacency; its diagonal is ignored.
+    Output: (distances, reachable). Unreachable distances are set to zero, so
+    the mask is the only record of which pairs are unreachable. The vertex
+    recurrence is sequential, with batches and endpoint pairs handled by
+    tensor operations. Assumes an undirected graph, so reachability is
+    symmetric.
     """
     *batch, n, _ = A.shape
-    # Build initial distance matrix: A[i,j] where i≠j and A[i,j]>0, else inf.
+    # Starting distances: the edge length A[i,j] where there is an edge, inf
+    # where there is none, and 0 on the diagonal.
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand(*batch, n, n)
     off_diag = (eye == 0)
     no_edge = off_diag & (A == 0)
     # Infinity distinguishes missing paths while the recurrence runs.
     inf_sentinel = torch.full_like(A, float("inf"))
     D = torch.where(no_edge, inf_sentinel, A.clone())
-    # Force diagonal to 0
     D = torch.where(eye > 0, torch.zeros_like(D), D)
 
     # Floyd-Warshall: for k in 0..n-1: D[i,j] = min(D[i,j], D[i,k] + D[k,j]).
@@ -502,10 +537,10 @@ def _shortest_path_distances(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
         via_k = D[..., :, k : k + 1] + D[..., k : k + 1, :]
         D = torch.minimum(D, via_k)
 
-    # Cross-component outputs are masked by the public function. For
-    # every within-component solve, exact zero marginal support already
-    # excludes these costs. A zero placeholder avoids sentinel/reg
-    # overflow in low-precision dtypes without changing those solves.
+    # Unreachable entries become zero, so no inf is left for the transport
+    # arithmetic to multiply by a zero plan entry. Only supported entries of
+    # reachable pairs carry real costs; padded slots are masked in
+    # _sinkhorn_cost.
     finite_mask = torch.isfinite(D)
     return torch.where(finite_mask, D, torch.zeros_like(D)), finite_mask
 
@@ -513,9 +548,12 @@ def _shortest_path_distances(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 def _lazy_walk_distributions(A: torch.Tensor, alpha: float) -> torch.Tensor:
     """Lazy-random-walk distributions for every node.
 
-    Row x of the output is μ_x, where
-      μ_x(x) = α   (plus 1−α concentrated on x if x is isolated)
-      μ_x(y) = (1−α) · A[x,y] / Σ_z A[x,z]   for y ≠ x with A[x,z]>0.
+    Takes a (..., n, n) non-negative adjacency with its diagonal already
+    zeroed. Row x of the output is μ_x, where
+      μ_x(x) = α   (or 1 if x is isolated, so μ_x = δ_x)
+      μ_x(y) = (1−α) · A[x,y] / Σ_z A[x,z]   for y ≠ x with A[x,y]>0.
+    The same weights are edge lengths and walk weights, so a longer edge also
+    gets more walk probability.
 
     Returns:
       (..., n, n) tensor; row x is μ_x as a probability vector.
@@ -524,17 +562,18 @@ def _lazy_walk_distributions(A: torch.Tensor, alpha: float) -> torch.Tensor:
     row_sums = A.sum(dim=-1, keepdim=True)  # (..., n, 1)
     is_isolated = row_sums.squeeze(dim=-1) <= 0  # (..., n)
 
-    # Avoid div-by-zero: use a safe denominator
+    # Isolated rows have a zero sum. Dividing them by 1 leaves a zero row,
+    # which the isolated-node branch below replaces anyway.
     safe_row_sums = torch.where(
         row_sums > 0, row_sums, torch.ones_like(row_sums),
     )
-    walk = A / safe_row_sums  # (..., n, n) — rows are normalized
+    walk = A / safe_row_sums  # (..., n, n), rows are normalized
 
-    # Lazy mixture: (1−α) * walk + α * δ_x (identity rows)
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand_as(A)
     mu = (1.0 - alpha) * walk + alpha * eye
 
-    # Isolated nodes default to δ_x (mass on themselves)
+    # An isolated node has nowhere to walk, so all its mass stays on itself.
+    # Without this its row would only carry alpha and not sum to one.
     delta_rows = eye
     isolated_mask = is_isolated.unsqueeze(dim=-1).expand_as(mu)
     return torch.where(isolated_mask, delta_rows, mu)
@@ -552,29 +591,40 @@ def _batched_sinkhorn_w1(
 ) -> torch.Tensor:
     """Gather support costs and solve unordered pairs in memory-bounded tiles.
 
-    Input measures are normalized rows on an undirected graph. The returned
-    costs are symmetric, with zero placeholders on the diagonal and between
-    components. Padding carries exactly zero mass, including in log space.
+    Takes the (..., n, n) walk distributions (row x is μ_x), the (..., n, n)
+    shortest-path cost, and the boolean pairs to solve. Returns the
+    (..., n, n) transport costs. Assumes the measures are normalized rows on
+    an undirected graph, so W1 is symmetric and each unordered pair is solved
+    once. The diagonal, unselected pairs, and cross-component pairs hold zero
+    placeholders. Padding carries exactly zero mass, including in log space.
+    Warns once if any solved pair missed the marginal tolerance.
     """
     *batch, n, _ = mu.shape
     support = (mu > 0) | torch.eye(n, device=mu.device, dtype=torch.bool)
-    # One shape sync bounds storage by the largest neighborhood, rather than
-    # by n. Self is retained even when alpha=0, with exactly zero probability.
+    # Pad every node's support to the widest neighborhood. That width comes
+    # from one shape sync, and it bounds storage by the max degree rather than
+    # by n. Self stays in the support even when alpha=0, with zero probability.
+    # topk sorts by value, so the 1s (support) come first and the 0s (padding,
+    # where mu is zero) come last. A tile can then slice the first tile_width
+    # columns.
     node_width = support.sum(dim=-1)
     width = int(node_width.amax().item())
     indices = support.to(torch.int).topk(width, dim=-1).indices
     mu = mu.gather(-1, indices)
     sink_w1 = cost.new_zeros(*batch, n, n)
+    # Strict upper triangle: each unordered pair once, diagonal excluded.
     src_indices, tgt_indices = torch.triu_indices(n, n, offset=1, device=mu.device)
     if src_indices.numel() == 0:
         return sink_w1
+    # Keep a pair if any batch member needs it; members that do not are
+    # masked again inside the solve by checked_pairs.
     selected = reachable[..., src_indices, tgt_indices].reshape(
         -1, src_indices.numel(),
     ).any(dim=0)
     src_indices, tgt_indices = src_indices[selected], tgt_indices[selected]
-    # Group large neighborhoods together instead of padding every tile to
-    # the graph's largest degree. Sorting is over tensor indices, not nodes
-    # or batch members in Python; one shape sync sizes each tile's storage.
+    # Sort pairs by their widest support, so each tile pads only to its own
+    # widest pair rather than to the graph's largest degree. A pair's width is
+    # the max over the batch, so every batch member uses the same pair order.
     pair_width = torch.maximum(
         node_width[..., src_indices], node_width[..., tgt_indices],
     ).reshape(math.prod(batch), -1).amax(dim=0)
@@ -586,7 +636,12 @@ def _batched_sinkhorn_w1(
     for start in range(0, src_indices.numel(), tile_size):
         src_idx = src_indices[start:start + tile_size]
         tgt_idx = tgt_indices[start:start + tile_size]
+        # Pairs are sorted widest first, so the first pair's width covers the
+        # whole tile.
         tile_width = int(pair_width[start].item())
+        # Flat index i * n + j into the (n, n) cost matrix, for every pair of
+        # support entries: i from the source node's support, j from the target
+        # node's support.
         cost_indices = (
             indices[..., src_idx, :tile_width, None] * n
             + indices[..., tgt_idx, None, :tile_width]
@@ -622,29 +677,43 @@ def _sinkhorn_cost(
     tol: float,
     sync_every: int,
 ) -> tuple[torch.Tensor, float]:
-    """Return support-restricted costs and the worst unmet marginal tolerance.
+    """Solve one tile of entropic transports and return their costs.
+
+    Takes (..., P, s) source and target masses on padded supports, the
+    (..., P, s, s) support costs, and a (..., P) mask of pairs to solve.
+    Returns the (..., P) transport costs (zero for unchecked pairs) and the
+    largest marginal error among pairs that did not meet tol, or 0.0 if all
+    of them did.
 
     Schmitzer (2019), Algorithms 2 and 3: alternate matrix scaling with
     log-domain absorption, and carry dimensional potentials between epsilon
-    stages. Each stage starts with a log-domain sweep using the original
+    stages. Each rebuild starts with a log-domain sweep using the original
     costs, so an underflowed kernel entry can become positive again.
     """
     output_shape = src.shape[:-1]
     width = src.shape[-1]
+    # Flatten the batch into one list of problems. `active` holds the flat
+    # indices of the pairs to solve; the rest keep a zero cost.
     values = src.new_zeros(checked_pairs.numel())
     active = torch.arange(values.numel(), device=src.device)[checked_pairs.flatten()]
     src = src.reshape(-1, width)[active]
     tgt = tgt.reshape(-1, width)[active]
     cost = cost.reshape(-1, width, width)[active]
+    # Nothing to solve in this tile.
     if active.numel() == 0:
         return values.reshape(output_shape), 0.0
+    # Support is where the mass is positive. Padding and zero-probability
+    # entries fall outside it.
     src_support, tgt_support = src > 0, tgt > 0
+    # Log masses, with -inf on zero-mass entries. The inner where swaps those
+    # zeros for 1 before the log, so log(0) is never evaluated.
     log_src = torch.where(src_support, torch.where(src_support, src, 1.0).log(),
                           -torch.inf)
     log_tgt = torch.where(tgt_support, torch.where(tgt_support, tgt, 1.0).log(),
                           -torch.inf)
     # Padded indices can name unrelated vertices. Their costs must not affect
     # the schedule, or batching graphs of different degrees changes the solve.
+    # Each pair's warmup starts at its own largest support cost, floored at reg.
     active_cost = torch.where(
         src_support.unsqueeze(-1) & tgt_support.unsqueeze(-2), cost, 0.0,
     )
@@ -658,16 +727,25 @@ def _sinkhorn_cost(
     # reconstruction. This triggers absorption before either factor can
     # drift by more than the threshold, even if later updates cancel.
     absorbed_change = torch.zeros_like(active, dtype=src.dtype)
+    # Smallest positive normal float. A row or column sum at or below it counts
+    # as underflow. Dividing by it would blow up, so the division is clamped and
+    # the pair is marked unstable.
     tiny = torch.finfo(src.dtype).tiny
+    # Tolerance for moving a pair to the next epsilon. It is the caller's tol,
+    # but never tighter than SINKHORN_TOL_DEFAULT.
     stage_tol = max(tol, SINKHORN_TOL_DEFAULT)
     marginal_error = float("inf")
 
     for it in range(0, n_iter, sync_every):
         steps = min(sync_every, n_iter - it)
-        # Even an exhausted warmup budget must return a plan at requested reg.
+        # On the last block every pair moves to the requested reg, so the plan
+        # returned is at reg even if warmup used up the budget.
         if it + steps == n_iter:
             rebuild = rebuild | (epsilon.squeeze(-1) != reg)
             epsilon = torch.full_like(epsilon, reg)
+        # Rebuild the kernel from the carried potential g at the
+        # current epsilon. One log-domain row sweep then column sweep, and the
+        # kernel becomes that sweep's plan, so its columns match tgt exactly.
         rebuild_idx = torch.nonzero(rebuild).flatten()
         if rebuild_idx.numel() > 0:
             eps = epsilon[rebuild_idx]
@@ -688,18 +766,23 @@ def _sinkhorn_cost(
                 log_u.unsqueeze(-1) + log_kernel + log_v.unsqueeze(-2)
             ).exp()
             kernel = kernel.index_copy(0, rebuild_idx, rebuilt)
+        # A rebuilt kernel carries its own scaling, so the count starts over.
         absorbed_change = torch.where(rebuild, 0.0, absorbed_change)
 
-        # Column normalization bounds kernel entries by one. Cheap matrix
-        # scaling runs between log sweeps; the latter recover any numerical
-        # support lost to underflow. Rejected divisions are kept finite, but
-        # their clamped values are never accepted as transport solutions.
+        # Between rebuilds the kernel is only rescaled. Each block multiplies it
+        # by new row and column factors u and v, and the scaled plan becomes the
+        # next kernel. Scaling cannot bring back an entry that underflowed to
+        # zero, so a row or column sum at or below tiny marks the pair unstable,
+        # and the next log-domain rebuild recomputes the kernel from the costs.
+        # Divisions by such sums are clamped to stay finite.
         u, v = torch.ones_like(src), torch.ones_like(tgt)
         stable = torch.ones_like(active, dtype=torch.bool)
         for step in range(steps):
             row_sum = (kernel @ v.unsqueeze(-1)).squeeze(-1)
             stable = stable & ((row_sum > tiny) | ~src_support).all(-1)
             u = src / row_sum.clamp_min(tiny)
+            # A rebuilt kernel already had this block's first sweep done in
+            # log space, so its first u and v stay at one.
             if step == 0:
                 u = torch.where(rebuild.unsqueeze(-1), 1.0, u)
             col_sum = (kernel.mT @ u.unsqueeze(-1)).squeeze(-1)
@@ -707,25 +790,36 @@ def _sinkhorn_cost(
             v = tgt / col_sum.clamp_min(tiny)
             if step == 0:
                 v = torch.where(rebuild.unsqueeze(-1), 1.0, v)
+        # Absorb the block's scaling. v goes into g in potential units; u is
+        # not stored, since the next rebuild recomputes it from g. A pair
+        # whose scaling went unstable keeps its old kernel and g, and is
+        # rebuilt in log space at the next block.
         stable = stable & ((u > 0) | ~src_support).all(-1)
         stable = stable & ((v > 0) | ~tgt_support).all(-1)
+        # Zero-mass entries have u or v equal to 0. Their log is taken as 0, so
+        # they add no scaling to the absorbed total.
         log_u = torch.where(u > 0, u, 1.0).log()
         log_v = torch.where(v > 0, v, 1.0).log()
         g = g + epsilon * torch.where(stable.unsqueeze(-1), log_v, 0.0)
+        # An unstable pair falls back to its kernel, not to a plan built from
+        # clamped divisions.
         plan = kernel * u.unsqueeze(-1) * v.unsqueeze(-2)
         plan = torch.where(stable.unsqueeze(-1).unsqueeze(-1), plan, kernel)
         absorbed_change = absorbed_change + torch.maximum(
             log_u.abs().amax(-1), log_v.abs().amax(-1),
         )
 
-        # Check the plan whose cost is returned, on both marginals and only
-        # at target epsilon. Freeze accepted costs so a slower pair elsewhere
-        # in the tile cannot change an already converged answer.
+        # Check each pair's plan against both marginals. The cost written below
+        # comes from that same plan. A pair finishes only at target reg, and
+        # finished pairs are dropped at the end of the block, so a slower pair
+        # in the tile cannot change their answer.
         row_error = (plan.sum(-1) - src).abs().amax(-1)
         col_error = (plan.sum(-2) - tgt).abs().amax(-1)
         error = torch.maximum(row_error, col_error)
         error = torch.where(torch.isfinite(error), error, torch.inf)
         values = values.index_copy(0, active, (plan * cost).sum((-2, -1)))
+        # A pair is finished only at target epsilon. One still in warmup
+        # counts as an infinite error, so the loop cannot stop early on it.
         finished = (error <= tol) & (epsilon.squeeze(-1) == reg)
         done_error = torch.where(finished, 0.0, error)
         done_error = torch.where(
@@ -734,6 +828,9 @@ def _sinkhorn_cost(
         marginal_error = done_error.amax().item()
         if marginal_error <= tol:
             break
+        # Pairs that met the stage tolerance move to the next, colder
+        # epsilon. A changed epsilon, an unstable block, or too much
+        # accumulated scaling all force a log-domain rebuild next block.
         ready = (error <= stage_tol).unsqueeze(-1)
         next_epsilon = torch.where(
             ready, (epsilon * SINKHORN_EPSILON_DECAY).clamp_min(reg), epsilon,
@@ -744,8 +841,9 @@ def _sinkhorn_cost(
         )
         epsilon = next_epsilon
         kernel = plan
-        # Compact at the same sync boundary as the convergence check. Hard
-        # pairs keep their full budget without recomputing accepted solutions.
+        # Drop finished pairs at the same sync boundary as the convergence
+        # check, so the hard pairs keep iterating without re-solving the
+        # accepted ones.
         keep = ~finished
         active = active[keep]
         src, tgt, cost = src[keep], tgt[keep], cost[keep]

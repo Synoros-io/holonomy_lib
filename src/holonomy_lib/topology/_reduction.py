@@ -34,7 +34,12 @@ from holonomy_lib.topology._filtration import Filtration
 
 
 def _boundary_columns(filtration: Filtration) -> torch.Tensor:
-    """Return padded face indices in filtration order, with -1 for padding."""
+    """Build the padded boundary matrix of a filtration, with -1 for unused slots.
+
+    Takes a filtration whose complex is closed under taking faces. Returns an
+    `(n_total, max_dim + 1)` int64 tensor. Row j holds the filtration ids of the
+    faces of the simplex at filtration position j, and vertex rows are all -1.
+    """
     complex = filtration.complex
     n_total = filtration.birth_times.numel()
     device = filtration.birth_times.device
@@ -43,7 +48,9 @@ def _boundary_columns(filtration: Filtration) -> torch.Tensor:
     )
     filtration_ids = torch.arange(n_total, device=device)
     inverse_by_dim: dict[int, torch.Tensor] = {}
-    # Dimension progression is structural; each join covers all simplices.
+    # Map each simplex's row within its dimension to its position in the
+    # filtration. Faces are found by row, so this inverse turns them into
+    # filtration ids.
     for dim, simplices in complex.simplices_by_dim.items():
         selected = filtration.sorted_dims == dim
         inverse = torch.empty(simplices.shape[0], dtype=torch.int64, device=device)
@@ -52,6 +59,9 @@ def _boundary_columns(filtration: Filtration) -> torch.Tensor:
     for dim, simplices in complex.simplices_by_dim.items():
         if dim == 0 or simplices.shape[0] == 0:
             continue
+        # Each simplex has dim+1 faces. enumerate_faces lists them as vertex
+        # tuples, and lookup_rows finds each one's row in the dimension below.
+        # The reshape gives every simplex its own row of face rows.
         faces, _ = enumerate_faces(simplices)
         face_ids = lookup_rows(
             complex.simplices_by_dim[dim - 1], faces.reshape(-1, dim),
@@ -63,10 +73,13 @@ def _boundary_columns(filtration: Filtration) -> torch.Tensor:
 def _host_records(
     filtration: Filtration, columns: torch.Tensor | None,
 ) -> tuple[list[int], list[float], list[list[int]]]:
-    """Transfer metadata and optional columns once, preserving their dtypes.
+    """Copy dims, birth times, and optional boundary columns to host lists.
 
-    Byte packing avoids converting integer indices through a floating dtype.
-    The subsequent views and list conversions all operate on host memory.
+    Takes a filtration and the padded boundary matrix or None. Returns three
+    lists: the dim of each simplex, its birth time, and the columns as nested
+    lists of filtration ids (empty when `columns` is None). Everything goes
+    over in one device-to-host copy as raw bytes, so int64 indices never pass
+    through a float dtype.
     """
     dims = filtration.sorted_dims.contiguous()
     births = filtration.birth_times.contiguous()
@@ -78,8 +91,10 @@ def _host_records(
     births_end = dims_end + births.numel() * births.element_size()
     host_dims = host[:dims_end].view(dims.dtype).tolist()
     host_births = host[dims_end:births_end].view(births.dtype).tolist()
-    # Float metadata can leave the byte offset unaligned for int64. A host
-    # clone resets that offset without another device transfer.
+    # Float births can leave the columns at a byte offset that is not a
+    # multiple of 8, and an int64 view needs that alignment. Cloning the slice
+    # gives it a fresh host buffer that starts at offset 0. This is a host
+    # copy, not another device transfer.
     host_columns = (
         host[births_end:].clone().view(columns.dtype).reshape(columns.shape).tolist()
         if columns is not None else []
@@ -100,8 +115,9 @@ def reduce_filtration(
         attempt because the next column operation depends on that pivot.
 
     Returns:
-      A dictionary of finite and essential `(birth, death)` pairs. Essential
-      bars have infinite death; zero-length bars are omitted.
+      A dictionary keyed by homology dimension, holding the finite and
+      essential `(birth, death)` pairs. Essential bars have infinite death;
+      zero-length bars are omitted.
 
     References:
       Edelsbrunner, Letscher, Zomorodian (2002). Topological persistence
@@ -110,23 +126,30 @@ def reduce_filtration(
     if backend not in ("python", "torch"):
         raise ValueError(f"backend must be 'python' or 'torch'; got {backend!r}")
     boundary = _boundary_columns(filtration)
+    # The python backend needs the boundary on the host as sets. The torch
+    # backend keeps it on the device, so only dims and births are copied.
     dims, births, host_columns = _host_records(
         filtration, boundary if backend == "python" else None,
     )
     if backend == "torch":
         pairs, pivots, empty = _reduce_torch(boundary, dims)
     else:
+        # One set of filtration ids per column. A dim-0 simplex has no
+        # boundary, so its column starts out empty.
         columns = [set(row[:dim + 1]) if dim else set()
                    for row, dim in zip(host_columns, dims, strict=True)]
         pairs, pivots, empty = _reduce_python(columns)
 
+    # Each pair joins a birth simplex to the simplex that kills it. A bar whose
+    # death is not after its birth has zero length and is dropped.
     pairs_by_dim: dict[int, list[tuple[float, float]]] = {}
     for birth_id, death_id in pairs:
         birth, death = births[birth_id], births[death_id]
         if birth < death:
             pairs_by_dim.setdefault(dims[birth_id], []).append((birth, death))
 
-    # A zero column births a class, but that class may have died later.
+    # A zero column creates a class at its own index. If some column later has
+    # that index as its low, the class died there. The rest never die.
     essential = torch.tensor(empty, dtype=torch.bool)
     essential[list(pivots)] = False
     for index in essential.nonzero().flatten().tolist():
@@ -137,11 +160,22 @@ def reduce_filtration(
 def _reduce_python(
     columns: list[set[int]],
 ) -> tuple[list[tuple[int, int]], dict[int, int], list[bool]]:
-    """Reduce host columns in order; pivots depend on earlier columns."""
+    """Reduce the boundary columns left to right over Z/2.
+
+    Takes one set of filtration ids per simplex, in filtration order. Returns
+    the (low, index) pairs, a map from each low to the column that owns it,
+    and a flag per column that is True when the reduced column is zero.
+    Assumes the columns are in filtration order, since each column's pivot
+    depends only on the columns before it.
+    """
     pivot_map: dict[int, int] = {}
     pairs: list[tuple[int, int]] = []
     for index, column in enumerate(columns):
         while column:
+            # The low is the largest filtration id left in the column, which is
+            # the latest-born face. If an earlier column already owns that low,
+            # add that column in over Z/2 to cancel the face, then look again.
+            # Otherwise this column claims the low and is done.
             low = max(column)
             if low in pivot_map:
                 column ^= columns[pivot_map[low]]
@@ -155,13 +189,22 @@ def _reduce_python(
 def _reduce_torch(
     boundary: torch.Tensor, dims: list[int],
 ) -> tuple[list[tuple[int, int]], dict[int, int], list[bool]]:
-    """Reduce device columns, synchronizing once per dependent pivot attempt."""
+    """Reduce the boundary columns on the device; same output as the python path.
+
+    Takes the padded boundary matrix and the dim of each simplex. Returns the
+    same triple as `_reduce_python`. Each pass through the loop reads the pivot
+    back with `.item()`, so every pivot attempt costs one device sync.
+    """
+    # Keep only the real faces of each row. Vertex rows have none, and the -1
+    # padding is cut off.
     columns = [row[:dim + 1] if dim else row[:0]
                for row, dim in zip(boundary.unbind(), dims, strict=True)]
     pivot_map: dict[int, int] = {}
     pairs: list[tuple[int, int]] = []
     for index, column in enumerate(columns):
         while column.numel():
+            # .item() copies the pivot to the host because the branch below
+            # depends on its value. This is the one sync per attempt.
             low = int(column.max().item())
             if low in pivot_map:
                 column = _xor_columns(column, columns[pivot_map[low]])
@@ -174,6 +217,11 @@ def _reduce_torch(
 
 
 def _xor_columns(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Return Z/2 symmetric difference; each input must be duplicate-free."""
+    """Return the Z/2 sum of two boundary columns as a sorted index tensor.
+
+    Takes two 1-D index tensors. Returns the entries that appear in exactly one
+    input, sorted ascending. Assumes no repeats within either input, since a
+    repeat would be counted as a second occurrence and cancel wrongly.
+    """
     unique, counts = torch.unique(torch.cat((a, b)), return_counts=True)
     return unique[counts % 2 == 1]

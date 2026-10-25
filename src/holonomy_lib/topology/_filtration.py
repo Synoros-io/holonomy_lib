@@ -58,7 +58,7 @@ def build_filtration(
     distances: torch.Tensor,
     complex: SparseSimplicialComplex,
 ) -> Filtration:
-    """Compute filtration values + sort order for a VR complex.
+    """Compute the birth time and sort order of every simplex in a VR complex.
 
     Args:
       distances: `(n, n)` pairwise distance matrix for the same vertex
@@ -74,8 +74,8 @@ def build_filtration(
       Edelsbrunner, Harer (2010). Computational Topology: An Introduction.
         AMS, Chapter VI.2, filtrations.
     """
-    # Concatenate (dim, original_idx, birth_time) records across all
-    # dims, then sort lexicographically.
+    # Gather one record per simplex across all dimensions into flat arrays,
+    # so the sort below can order the whole complex at once.
     all_birth: list[torch.Tensor] = []
     all_dim: list[torch.Tensor] = []
     all_idx: list[torch.Tensor] = []
@@ -86,14 +86,14 @@ def build_filtration(
         if n_k == 0:
             continue
         if k == 0:
-            # 0-simplices (vertices) are born at time 0.
+            # A vertex's birth would be d(i, i) from the general formula below.
+            # That is 0 for any distance matrix, so the gather is skipped.
             births = torch.zeros(n_k, dtype=distances.dtype,
                                   device=distances.device)
         else:
-            # Birth = max pairwise distance among the simplex's
-            # vertices. For each row (simplex), gather the (k+1) × (k+1)
-            # submatrix of `distances` and take its max.
-            # Vectorized via advanced indexing:
+            # Birth is the largest distance among the simplex's vertices, which
+            # is the max over its (k+1) x (k+1) submatrix of `distances`. Advanced
+            # indexing builds all those submatrices at once:
             #   pairs[s, i, j] = distances[ simplices[s, i], simplices[s, j] ]
             v_i = simplices.unsqueeze(-1)                     # (n_k, k+1, 1)
             v_j = simplices.unsqueeze(-2)                     # (n_k, 1, k+1)
@@ -106,6 +106,8 @@ def build_filtration(
         all_idx.append(torch.arange(n_k, dtype=torch.int64,
                                       device=distances.device))
 
+    # No simplices at all. Return empty tensors in the same dtypes as the
+    # non-empty case, so callers never see a different type here.
     if not all_birth:
         empty = torch.zeros(0, dtype=distances.dtype, device=distances.device)
         empty_i = torch.zeros(0, dtype=torch.int64, device=distances.device)
@@ -118,9 +120,10 @@ def build_filtration(
     dims = torch.cat(all_dim)
     indices = torch.cat(all_idx)
 
-    # Sort by (birth_time, dim, original_idx). We use a stable sort
-    # cascade: sort by the least-significant key first, then by more
-    # significant keys, using PyTorch's stable sort.
+    # Sort by (birth_time, dim, row). A stable sort keeps the existing order
+    # among ties, so we sort by the least significant key first. The last pass
+    # sorts by birth time, and simplices with equal birth keep the (dim, row)
+    # order that the passes before it left.
     order = torch.argsort(indices, stable=True)
     dims_sorted = dims[order]
     times_sorted = birth_times[order]

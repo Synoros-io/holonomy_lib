@@ -34,16 +34,16 @@ import torch
 from holonomy_lib.sheaf.graph_sheaf import GraphSheaf, HeterogeneousGraphSheaf
 
 # Dense-coboundary allocation guard: refuse to allocate beyond this
-# many bytes for the staging tensor + δ. 2 GiB picks a generous
-# threshold for a research-grade primitive on commodity hardware; the
-# sparse path (`sheaf_coboundary_sparse`) covers larger graphs.
-# **Scale of validity**: byte budget for the v1 dense implementation.
-# Cataloged as `sheaf_dense_bytes_cap`.
+# many bytes for the staging tensor + δ. 2 GiB is a chosen threshold for
+# machines with 24 to 32 GB of host RAM; the sparse path
+# (`sheaf_coboundary_sparse`) covers larger graphs.
+# **Scale of validity**: byte budget for the dense implementation.
+# Cataloged as `SHEAF_DENSE_BYTES_CAP`.
 SHEAF_DENSE_BYTES_CAP: int = 2 * 2**30
 
 # Extra bottom modes requested beyond `k` in `sheaf_bottom_spectrum` so
 # the kernel (global sections, λ≈0) can be dropped and still leave `k`
-# NONZERO modes. The sheaf kernel of a (near-)connected corpus is small;
+# nonzero modes. The sheaf kernel of a (near-)connected corpus is small;
 # 16 covers it, and the solve raises with instructions when a sheaf has
 # more global sections than the headroom. Value from synoros-substrate
 # `sheaf_scale.py` (validated 2026-06-06). **Scale of validity**:
@@ -52,8 +52,10 @@ SHEAF_DENSE_BYTES_CAP: int = 2 * 2**30
 # `SHEAF_KERNEL_HEADROOM` in `notes/magic_numbers.md`.
 SHEAF_KERNEL_HEADROOM: int = 16
 
-# LOBPCG expands the Ritz block with residual and previous-direction blocks
-# (Knyazev 2001). torch.lobpcg requires room for all three blocks.
+# LOBPCG searches over three blocks (Knyazev 2001): the current Ritz block,
+# the residuals, and the previous search directions. The 1 is the Ritz
+# block and the 2 is the residual and previous-direction pair. torch.lobpcg
+# needs room for all three.
 _LOBPCG_SUBSPACE_BLOCKS: int = 1 + 2
 
 
@@ -114,6 +116,12 @@ def _coboundary_coo(
     voff = torch.cumsum(dv, dim=0) - dv              # exclusive col offsets
 
     def _side(node_idx: torch.Tensor, size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Row and column COO indices for one side (left or right) of all edges.
+
+        Input: `node_idx` is the node on this side of each edge, `size` is the
+        total number of values on this side. Output: `(rows, cols)`, one entry
+        per value. Assumes the values are laid out edge by edge, row-major.
+        """
         # Block e is (d_e[e], d_v[node]) laid out row-major in the flattened
         # values; recover (row-in-block, col-in-block) from the flat position.
         w = dv[node_idx]                             # (n_e,) block widths
@@ -122,6 +130,8 @@ def _coboundary_coo(
         eid = torch.repeat_interleave(
             torch.arange(n_e, device=device), m,
         )                                            # (nnz_side,)
+        # p is the position inside edge eid's block. Blocks are row-major with
+        # width w, so p // w is the row in the block and p % w is the column.
         p = torch.arange(size, device=device) - starts[eid]
         w_el = w[eid]
         rows = eoff[eid] + p // w_el
@@ -194,12 +204,11 @@ def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tenso
     d_v = sheaf.node_stalk_dim
     device, dtype = sheaf.device, sheaf.dtype
 
-    # Dense δ size guard: the staging tensor `block` is `(n_e, d_e,
-    # n_v · d_v)` and `delta` is `(n_e · d_e, n_v · d_v)`. For graphs
-    # with thousands of nodes × edges × non-trivial stalk dims, the
-    # raw dense allocation crosses many GB silently. Pre-flight check
-    # against a configurable byte cap and tell the user explicitly
-    # that they're past the dense regime.
+    # Dense δ size guard. The staging tensor `block` is `(n_e, d_e, n_v · d_v)`
+    # and `delta` is `(n_e · d_e, n_v · d_v)`, the same size, so the factor 2
+    # counts both. Graphs with many nodes and edges, or large stalk dims, reach
+    # many GB without warning, so the size is checked against
+    # SHEAF_DENSE_BYTES_CAP before anything is allocated.
     bytes_per_elem = torch.empty((), dtype=dtype).element_size()
     dense_bytes = 2 * n_e * d_e * n_v * d_v * bytes_per_elem
     if dense_bytes > SHEAF_DENSE_BYTES_CAP:
@@ -220,22 +229,23 @@ def sheaf_coboundary(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tenso
     block = torch.zeros(n_e, d_e, n_v * d_v, device=device, dtype=dtype)
     u_idx = sheaf.edges[:, 0]                                     # (n_e,)
     v_idx = sheaf.edges[:, 1]                                     # (n_e,)
-    # For each edge e, place F_left[e] into columns [u·d_v : (u+1)·d_v].
-    # Use advanced indexing with an explicit column-range tensor.
+    # For each edge e, F_left[e] goes into the columns of node u, which are
+    # [u·d_v : (u+1)·d_v]. u_cols and v_cols hold the column index of each
+    # node-stalk coordinate for every edge.
     col_off = torch.arange(d_v, device=device)
     u_cols = u_idx.unsqueeze(dim=-1) * d_v + col_off              # (n_e, d_v)
     v_cols = v_idx.unsqueeze(dim=-1) * d_v + col_off              # (n_e, d_v)
-    # Broadcast assignment: block[e, :, u_cols[e, k]] = +F_left[e, :, k].
-    # scatter is cleanest with the (n_e, d_e, d_v) source.
+    # scatter_ writes block[e, :, u_cols[e, k]] = F_left[e, :, k]. The index is
+    # expanded over the d_e rows so it matches the (n_e, d_e, d_v) source.
     block.scatter_(
         dim=-1,
         index=u_cols.unsqueeze(dim=-2).expand(n_e, d_e, d_v),
         src=sheaf.F_left,
     )
-    # `scatter_` overwrites; for v_cols we want to subtract F_right.
-    # Pull current values at v_cols (which are 0, since we haven't
-    # touched those entries — but defensively use `scatter_add` with
-    # -F_right against zeros to compose with any prior content).
+    # scatter_ only wrote the u-columns. The v-columns are still zero for this
+    # edge because self-loops are rejected (u != v), so adding -F_right here
+    # is the same as writing it. The add also gives F_left - F_right if u == v,
+    # where both blocks land in the same columns.
     block.scatter_add_(
         dim=-1,
         index=v_cols.unsqueeze(dim=-2).expand(n_e, d_e, d_v),
@@ -266,11 +276,10 @@ def sheaf_laplacian(sheaf: GraphSheaf | HeterogeneousGraphSheaf) -> torch.Tensor
       Bodnar et al. (2022), eq. 6.
     """
     delta = sheaf_coboundary(sheaf)
-    # `δ^T @ δ` is the canonical form; matmul of (n_v·d_v, n_e·d_e) by
-    # its transpose. Symmetrize against any drift introduced by the
-    # blocked BLAS path (rounding can leave |L − L^T|_∞ ~ 1e-15 even
-    # though mathematically `δ^T δ` is exactly symmetric — symmetrize
-    # so callers can chain straight into `torch.linalg.eigh`).
+    # δ^T δ is the Gram matrix of the columns of δ, so it is
+    # (n_v·d_v, n_v·d_v). Rounding in the matmul can leave a tiny asymmetry
+    # even though the exact product is symmetric. Symmetrizing lets callers
+    # pass the result straight to `torch.linalg.eigh`.
     L = delta.mT @ delta
     return 0.5 * (L + L.mT)
 
@@ -420,9 +429,13 @@ def sheaf_bottom_spectrum(
             "maps or use torch.linalg.eigh(sheaf_laplacian(sheaf))"
         )
     k_req = min(k + kernel_headroom, n) if drop_kernel else k
+    # Machine-epsilon floor for the matrix-scale tolerance, scaled by n. A
+    # LOBPCG run raises it below.
     relative_tol = n * torch.finfo(sheaf.dtype).eps
-    # A zero sheaf has no positive modes. Avoid a singular sparse
-    # factorization and keep the output allocation at n * k_req.
+    # A zero Laplacian has no positive modes, so the solver is skipped: it
+    # would have to factor a singular matrix. The identity columns only give
+    # the residual check something of the right shape. Every mode is zero,
+    # so the cutoff rejects all of them.
     if L._nnz() == 0 or not torch.any(L.values()):
         vals = L.values().new_zeros(k_req)
         kernel_scale = vals.new_zeros(())
@@ -441,6 +454,9 @@ def sheaf_bottom_spectrum(
             0, L.indices()[0], L.values().abs(),
         )
         kernel_scale = row_magnitudes.max()
+        # This repeats the "auto" choice in eigsh_sparse: off the CPU, or past
+        # SPARSE_SA_ITER_SOLVER_N nodes, the solver is LOBPCG and the tolerance
+        # gets the LOBPCG floor.
         uses_lobpcg = solver in ("lobpcg", "torch_lobpcg") or (
             solver == "auto" and (
                 L.device.type != "cpu" or n > SPARSE_SA_ITER_SOLVER_N
@@ -452,9 +468,11 @@ def sheaf_bottom_spectrum(
     if not drop_kernel:
         return vals[:k], vecs[:, :k], _node_offsets(sheaf)
 
-    # Partial bottom spectra do not contain the largest mode, so their
-    # maximum cannot set a matrix-scale rank tolerance. The sparse row
-    # norm bounds the spectral norm without another eigensolve.
+    # On the sparse path the computed values are only the bottom modes, so
+    # their maximum says nothing about the top of the spectrum. For symmetric
+    # L the largest absolute row sum bounds the spectral norm, so that bound
+    # sets the scale without another eigensolve. The dense path has the full
+    # spectrum and used its own maximum above.
     residual_bounds = torch.linalg.vector_norm(
         torch.sparse.mm(L, vecs) - vecs * vals, dim=0,
     ) / torch.linalg.vector_norm(vecs, dim=0)

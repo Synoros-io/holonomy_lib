@@ -174,14 +174,19 @@ def betti_numbers(
 
 
 # ============================================================
-# Internal — dispatched paths
+# Internal: dispatched paths
 # ============================================================
 
 
 def _hodge_dense(
     complex: DenseSimplicialComplex, k: int,
 ) -> torch.Tensor:
-    """L_k = ∂_{k+1} ∂_{k+1}^T + ∂_k^T ∂_k on the dense path."""
+    """Hodge Laplacian L_k on a dense complex, batched over members.
+
+    Takes a `DenseSimplicialComplex` and k with k <= complex.max_dim. Returns a
+    `(B, n_k_max, n_k_max)` tensor in the complex dtype. Padded simplex rows
+    and columns are zero.
+    """
     if k > complex.max_dim:
         raise ValueError(
             f"k={k} exceeds complex.max_dim={complex.max_dim}"
@@ -195,12 +200,14 @@ def _hodge_dense(
     L = torch.zeros(B, n_k_max, n_k_max,
                      device=complex.device, dtype=complex.dtype)
 
-    # ∂_k^T ∂_k term — zero for k=0 (no (-1)-simplices).
+    # The ∂_k^T ∂_k term. It is skipped for k = 0, since there are no
+    # (-1)-simplices.
     if k > 0:
         d_k = complex.boundary(k)                    # (B, n_{k-1}, n_k)
         L = L + torch.matmul(d_k.mT, d_k)
 
-    # ∂_{k+1} ∂_{k+1}^T term — zero if (k+1)-simplices don't exist.
+    # The ∂_{k+1} ∂_{k+1}^T term. It is skipped when the complex has no
+    # (k+1)-simplex table.
     if (k + 1) in complex.simplices_by_dim:
         d_kp1 = complex.boundary(k + 1)              # (B, n_k, n_{k+1})
         L = L + torch.matmul(d_kp1, d_kp1.mT)
@@ -212,15 +219,15 @@ def _hodge_sparse(
     complex: SparseSimplicialComplex, k: int,
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:
-    """L_k on the sparse path; returns dense (n_k, n_k).
+    """Hodge Laplacian L_k on a sparse complex, returned as a dense (n_k, n_k).
 
-    Boundaries and their products stay sparse until the final product
-    is materialized, because the public return contract is dense.
+    Takes a `SparseSimplicialComplex` and k with k <= complex.max_dim. Each
+    boundary product is computed sparsely and densified once, then added into
+    the dense L_k, because the public return contract is dense.
 
-    `SparseSimplicialComplex` doesn't carry a float dtype attribute,
-    so we accept one explicitly (default `torch.float64`). Boundary
-    operators are constructed at this dtype to keep the L_k matmul
-    type-consistent.
+    `SparseSimplicialComplex` has no float dtype attribute, so the dtype is
+    passed in (default `torch.float64`). Both boundary operators are built at
+    this dtype so the matmul sees matching types.
     """
     if k > complex.max_dim:
         raise ValueError(

@@ -55,6 +55,7 @@ class SparseSimplicialComplex:
         return max(self.simplices_by_dim) if self.simplices_by_dim else -1
 
     def n_simplices(self, k: int) -> int:
+        """Number of k-simplices. Returns 0 when there is no table for dimension k."""
         if k not in self.simplices_by_dim:
             return 0
         return self.simplices_by_dim[k].shape[0]
@@ -74,9 +75,15 @@ class SparseSimplicialComplex:
 
         References:
           Munkres, J. R. (1984). Elements of Algebraic Topology, §1.
+
+        Notes:
+          Assumes the complex is closed under faces. A face missing from
+          the (k-1) table raises ValueError from the lookup.
         """
         if k == 0:
             n_0 = self.n_simplices(0)
+            # No row indices and every column pointer is 0, so each of the
+            # n_0 columns is empty.
             return torch.sparse_csc_tensor(
                 ccol_indices=torch.zeros(n_0 + 1, dtype=torch.int64,
                                           device=self.device),
@@ -101,8 +108,9 @@ class SparseSimplicialComplex:
         cols = torch.arange(n_k, device=self.device).repeat_interleave(k + 1)
         vals = signs.to(dtype).repeat(n_k)
 
-        # COO → CSC. PyTorch's sparse_coo_tensor builder is the
-        # simplest path; we coalesce + cast to CSC.
+        # Build the entries as COO, which takes (row, column) pairs directly.
+        # coalesce sorts them by row then column, and to_sparse_csc then
+        # compresses the column indices into the CSC layout.
         coo = torch.sparse_coo_tensor(
             indices=torch.stack([rows, cols]),
             values=vals,
@@ -124,6 +132,7 @@ class SparseSimplicialComplex:
         valid_masks: dict[int, torch.Tensor] = {}
         for k, table in self.simplices_by_dim.items():
             dense_simplices[k] = table.unsqueeze(0)         # (1, n_k, k+1)
+            # A single complex has no padding, so every row is a real simplex.
             valid_masks[k] = torch.ones(
                 1, table.shape[0], dtype=torch.bool, device=self.device,
             )

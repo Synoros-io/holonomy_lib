@@ -1,28 +1,28 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Forman-Ricci curvature on graphs, batched-first, GPU-native.
+"""Forman-Ricci curvature on batched graphs.
 
 Forman (2003) defined a combinatorial Ricci curvature for general CW
 complexes that specializes to a very simple per-edge formula on graphs.
 Unlike Ollivier-Ricci (`ricci.ollivier_ricci_curvature`), no optimal-
 transport solve is needed: each edge's curvature is a closed-form
-function of the local degrees and (optionally) the triangles incident
-to it. The cost is therefore O(B · |E|) for the simple form or
-O(B · |E| · max_deg²) for the triangle-aware form, dramatically cheaper
-than Sinkhorn-based Ollivier.
+function of the local degrees and, for the augmented form, the
+triangles on that edge. Both forms are cheaper than a Sinkhorn solve
+per edge.
 
 Forman-Ricci is less geometrically faithful than Ollivier on weighted
 metric measure spaces, but it tracks the same qualitative bottleneck
 structure: edges bridging two clusters get negative curvature, edges
-embedded in dense sub-communities get positive curvature. For large
-networks where Ollivier is infeasible, Forman-Ricci is the standard
-substitute (Sreejith et al. 2016).
+embedded in dense sub-communities get positive curvature. For networks
+too large for Ollivier, Forman-Ricci is a common substitute (Sreejith
+et al. 2016).
 
-Cost note: the implementations here are O(B · n²) for the simple
-form and O(B · n³) for the augmented form (the triangle-count
-matmul). A future sparse path would be O(B · |E| · max_deg²) for
-the augmented form; the dense path is fine up to n ~ 10⁴.
+Cost note: the implementations here are dense. The simple form is
+O(B · n²) and the augmented form is O(B · n³), the cost of the
+triangle-count matmul A @ A. A sparse edge-list path would scale with
+|E| instead of n², but it is not implemented. Memory is O(B · n²) for
+the dense tensors.
 
 Two forms are exposed:
 
@@ -100,12 +100,12 @@ def forman_ricci_simple(A: torch.Tensor) -> torch.Tensor:
     Returns:
       κ_F: (B, n, n) curvature tensor. κ_F[..., u, v] is the Forman-
         Ricci curvature of edge (u, v) when A[..., u, v] > 0, and 0
-        otherwise. The diagonal is set to 0 by convention (Forman is
-        defined per edge, not per node-self-loop).
+        otherwise. The diagonal is set to 0 by convention, since Forman
+        curvature is defined per edge and a self-loop is not an edge here.
 
     Notes:
-      Cost is O(B · n²) for the per-pair sums; for sparse graphs an
-      edge-list variant (planned) would be O(B · |E|).
+      Cost is O(B · n²). An edge-list variant would cost O(B · |E|) on
+      sparse graphs, but it is not implemented.
 
     References:
       Sreejith et al. (2016), eq. 1.
@@ -115,55 +115,49 @@ def forman_ricci_simple(A: torch.Tensor) -> torch.Tensor:
     A = drop_self_loops(A)
     *batch, n, _ = A.shape
 
-    # Mask of which positions are edges. We avoid `A > 0` host syncs by
-    # working in tensor form throughout. Non-edges contribute zero to
-    # the sums by construction.
+    # Edge positions as a 0/1 tensor. Staying in tensor form keeps Python
+    # from branching on tensor values, which would force a device-to-host
+    # sync. Non-edges contribute zero to every sum below.
     edge_mask = (A != 0).to(A.dtype)  # (B, n, n)
 
-    # w_u = node weight = 1 (Sreejith et al. convention). When the
-    # library grows weighted-node Forman we'd pass w as an argument; for
-    # now the constant is folded in at the value level.
+    # Node weights are fixed at 1 (Sreejith et al. 2016). Weighted nodes
+    # would need these passed in; for now they are constants.
     w_u = FORMAN_NODE_WEIGHT_DEFAULT
     w_v = FORMAN_NODE_WEIGHT_DEFAULT
 
-    # Safe edge weights — replace zeros with ones in the denominator
-    # paths so we never divide by zero. The edge_mask multiplier zeroes
-    # the contribution at non-edges.
+    # Replace non-edge zeros with ones before any division. rsqrt(0) is inf,
+    # and inf times the zero mask is NaN. The mask zeroes the non-edge
+    # entries of kappa afterward.
     safe_we = torch.where(edge_mask > 0, A, torch.ones_like(A))
 
-    # First two diagonal-term contributions per edge: w_u/w_e + w_v/w_e
-    # = (w_u + w_v) / w_e.
+    # The two diagonal terms of the formula, w_u / w_e + w_v / w_e.
     diagonal_term = (w_u + w_v) / safe_we  # (B, n, n)
 
-    # Sum-over-neighbors term: for each edge (u, v), we need
-    #   Σ_{u' ≠ v, A[u, u']>0} w_u / √(w_e · A[u, u'])
-    # Build a "1/√A" tensor with zeros at non-edges; the row-sum minus
-    # the diagonal (i.e., minus the edge (u, v) itself) gives the
-    # Σ_{u' ≠ v} term.
+    # Neighbor sums. The u-side term for edge (u, v) is
+    # w_u / √w_e · Σ_{u' ≠ v} 1/√A[u, u'], so one row sum of inv_sqrt_A
+    # gives every neighbor sum. Non-edges are zero in inv_sqrt_A, and the
+    # (u, v) entry itself is subtracted out below.
     inv_sqrt_A = torch.where(
         edge_mask > 0, torch.rsqrt(safe_we), torch.zeros_like(A),
     )  # (B, n, n)
 
-    # For each edge (u, v):
-    #   row_sum_u  = Σ_{u'} 1/√A[u, u']   over all neighbors u' of u
-    #   contribution from u-side (excluding (u, v) itself) =
-    #     (row_sum_u - 1/√A[u, v]) · w_u / √A[u, v]
-    #   = w_u · (row_sum_u - inv_sqrt_A[u, v]) · inv_sqrt_A[u, v]
-    # Equivalently using broadcasting:
+    # row_sum is (B, n, 1) and holds each node's neighbor sum; col_sum is
+    # (B, 1, n) and holds the same sums laid out by column. Broadcast, they
+    # give position (u, v) both u's sum and v's sum. Subtracting
+    # inv_sqrt_A[u, v] removes the edge from its own sums.
     row_sum = inv_sqrt_A.sum(dim=-1, keepdim=True)         # (B, n, 1)
     col_sum = inv_sqrt_A.sum(dim=-2, keepdim=True)         # (B, 1, n)
-    # row_sum broadcast over columns gives, at position (u, v), the
-    # sum over u's neighbors of 1/√A[u, ·]; subtract the (u, v) entry
-    # to exclude the edge itself.
     u_neighbor_sum = row_sum - inv_sqrt_A                  # (B, n, n)
     v_neighbor_sum = col_sum - inv_sqrt_A                  # (B, n, n)
     u_side = w_u * inv_sqrt_A * u_neighbor_sum             # (B, n, n)
     v_side = w_v * inv_sqrt_A * v_neighbor_sum             # (B, n, n)
 
-    # Assemble curvature; non-edges multiplied by edge_mask → 0.
+    # Non-edges come out as zero through the edge_mask factor.
     kappa = safe_we * (diagonal_term - u_side - v_side) * edge_mask
 
-    # Force diagonal to zero (Forman per-edge; no self-loop contribution).
+    # The diagonal is already zero, since edge_mask is zero there after
+    # drop_self_loops. The explicit where keeps that true without relying
+    # on the mask.
     eye = torch.eye(n, device=A.device, dtype=A.dtype).expand_as(A)
     kappa = torch.where(eye > 0, torch.zeros_like(kappa), kappa)
     return kappa
@@ -190,6 +184,7 @@ def forman_ricci_augmented(A: torch.Tensor) -> torch.Tensor:
 
     Raises:
       ValueError: if any off-diagonal weight is neither zero nor one.
+        The shape, dtype, and sign checks in `_validate_adjacency` also raise.
 
     References:
       Samal, A., et al. (2018). Comparative analysis of two discretizations
@@ -204,8 +199,10 @@ def forman_ricci_augmented(A: torch.Tensor) -> torch.Tensor:
             "weighted curvature needs an explicit face-weight convention "
             "(Samal et al. 2018, equations 9–10)."
         )
-    # With sorted-out self-loops, A @ A counts common neighbors. Mask
-    # nonedges because an unfilled pair has no edge curvature.
+    # After drop_self_loops, (A @ A)[u, v] counts the nodes adjacent to both
+    # u and v, which is the number of triangles on edge (u, v) when A is
+    # binary. Multiplying by A keeps only real edges, since non-edges get no
+    # curvature.
     triangle_count = (A @ A) * A
     return forman_ricci_simple(A) + FORMAN_TRIANGLE_CONTRIBUTION * triangle_count
 
@@ -216,6 +213,13 @@ def forman_ricci_augmented(A: torch.Tensor) -> torch.Tensor:
 
 
 def _validate_adjacency(A: torch.Tensor) -> None:
+    """Check that A is a real (..., n, n) tensor of non-negative edge weights.
+
+    Input: A, with its diagonal ignored.
+    Output: None. Raises ValueError on a bad shape, a non-floating dtype,
+    or a nonfinite or negative off-diagonal entry. Warns, without raising,
+    when A is not symmetric within a small absolute tolerance.
+    """
     if A.ndim < 2 or A.shape[-1] != A.shape[-2]:
         raise ValueError(
             f"A must be (..., n, n); got A.shape={tuple(A.shape)}"
