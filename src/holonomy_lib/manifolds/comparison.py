@@ -50,10 +50,11 @@ import torch
 
 from holonomy_lib._quadrature import gauss_legendre_nodes
 
-# Existing quadrature default, cataloged in notes/magic_numbers.md.
-# For flat integer N the degree-(N-1) polynomial is integrated exactly when
-# N <= 2 * nodes. Fractional N can have endpoint singular derivatives and
-# requires a convergence check at the caller's desired accuracy.
+# Gauss-Legendre node count for the ball-volume integral, cataloged in
+# notes/magic_numbers.md. For flat integer N the degree-(N-1) polynomial is
+# integrated exactly when N <= 2 * nodes. Fractional N can have endpoint
+# singular derivatives and requires a convergence check at the caller's
+# desired accuracy.
 COMPARISON_BALL_VOLUME_QUADRATURE_NODES: int = 64
 
 
@@ -95,6 +96,8 @@ def _validate(kappa: torch.Tensor, N: torch.Tensor, r: torch.Tensor) -> None:
         raise ValueError("r must be finite")
     positive = kappa > 0
     if positive.any():
+        # The clamp only keeps pi / sqrt_k finite for kappa <= 0, and the
+        # positive mask discards those entries anyway.
         tiny = torch.finfo(kappa.dtype).tiny
         sqrt_k = torch.sqrt(kappa.clamp(min=tiny))
         if (positive & (r > math.pi / sqrt_k)).any():
@@ -111,17 +114,20 @@ SN_QUADRATIC = 1.0 / 120.0
 
 def _sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """sn_κ(t)/t, with its analytic signed-κ expansion at zero."""
-    # Scaling before the second multiplication preserves κ=0 at radii
-    # whose square overflows, and tiny curvatures with moderate κt².
+    # Multiply κ by t before the second t. Ordering it as (κt)t instead of
+    # κ(tt) keeps κ = 0 at exactly 0 when t² overflows, since 0 * inf is NaN.
     q = (kappa * t) * t
     small = torch.isfinite(q) & (q.abs() <= torch.finfo(t.dtype).eps**0.5)
     # Mask before multiplying in the differentiable series path as well:
     # a zero upstream gradient times an overflowing κt would otherwise be NaN.
     series_q = (torch.where(small, kappa, torch.zeros_like(kappa)) * t) * t
-    # The curvature supplies the branch even if κt² overflows. Taking its
-    # square root first also lets the angle remain representable in that case.
+    # The sign of κ picks the branch. Each angle is built as √|κ| · |t| rather
+    # than from κt², so it can stay representable when κt² overflows.
     positive = (kappa > 0) & ~small
     negative = (kappa < 0) & ~small
+    # Both branches are computed for every entry, so entries outside a branch
+    # get 1 in place of κ or t. That keeps the unused branch finite, which
+    # matters for the gradient through torch.where.
     spherical_arg = (
         torch.sqrt(torch.where(positive, kappa, torch.ones_like(kappa)))
         * torch.where(positive, t.abs(), torch.ones_like(t))
@@ -137,7 +143,11 @@ def _sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 
 
 def _log_sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    """Log of the positive model sine ratio at interior quadrature nodes."""
+    """Log of sn_κ(t)/t at interior quadrature nodes, where the ratio is positive.
+
+    Assumes `t > 0`, and for `κ > 0` also `t < π/√κ`, so that the sine is
+    positive. Callers pass Gauss-Legendre nodes mapped into `(0, r)`.
+    """
     q = (kappa * t) * t
     small = torch.isfinite(q) & (q.abs() <= torch.finfo(t.dtype).eps**0.5)
     hyperbolic = (kappa < 0) & ~small
@@ -152,6 +162,8 @@ def _log_sn_ratio(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         angle + torch.log(-torch.expm1(-2.0 * angle))
         - math.log(2.0) - torch.log(angle)
     )
+    # Hyperbolic entries are swapped to κ = 0 here, so this call never
+    # evaluates sinh at a large argument. Their answer comes from hyperbolic_log.
     other_log = torch.log(_sn_ratio(
         torch.where(hyperbolic, torch.zeros_like(kappa), kappa), t,
     ))
@@ -180,8 +192,15 @@ def sn_kappa(kappa: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 
 
 def _model_sn(kappa: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
-    """Nonnegative model sine on the validated closed radial interval."""
+    """Nonnegative model sine `sn_κ(r)`, with the sphere's antipode set to 0.
+
+    Takes broadcastable `kappa` and `r`, with `r` already checked to lie in
+    `[0, π/√κ]` where `κ > 0`. Returns the common shape, never negative.
+    """
     sqrt_positive = torch.sqrt(torch.where(kappa > 0, kappa, torch.ones_like(kappa)))
+    # sin(π) is about 1e-16 in floating point rather than 0, so the antipode
+    # r = π/√κ is set to exactly 0 by hand. clamp_min(0) absorbs a
+    # rounding-level negative value just past it.
     endpoint = (kappa > 0) & (r == math.pi / sqrt_positive)
     return torch.where(endpoint, torch.zeros_like(r), sn_kappa(kappa, r)).clamp_min(0)
 
@@ -245,18 +264,28 @@ def model_ball_volume(
 
     # Keep every factor in log space: r^N and the curvature-dependent
     # integrand can each overflow or underflow while their product is finite.
-    # The exact origin uses its analytic first derivative, including N=1.
+    # Entries with r = 0 get r = 1 and κ = 0 before any log is taken, so the
+    # masked values stay finite. Their real answer is set at the return.
     nonzero = r > 0
     safe_r = torch.where(nonzero, r, torch.ones_like(r))
     safe_kappa = torch.where(nonzero, kappa, torch.zeros_like(kappa))
+    # Gauss-Legendre nodes live on [-1, 1]. Map them to [0, 1] so t = r·u
+    # runs over [0, r].
     unit_nodes = 0.5 * (nodes + 1.0)
     t = safe_r.unsqueeze(-1) * unit_nodes
     log_ratio = torch.log(unit_nodes) + _log_sn_ratio(safe_kappa.unsqueeze(-1), t)
+    # The quadrature sums (w/2)(u·ratio)^(N-1) over [0, 1]. The -log 2 is that
+    # 1/2, since the weights sum to 2 on [-1, 1]. The r^(N-1) in sn^(N-1) and
+    # the r from dt = r du are both carried by the N log(r) term below.
     log_integral = torch.logsumexp(
         torch.log(weights) + (N.unsqueeze(-1) - 1.0) * log_ratio, dim=-1,
     ) - math.log(2.0)
+    # log of ω_{N-1}, kept in log space so it adds to the other terms.
     log_area = math.log(2.0) + (N / 2.0) * math.log(math.pi) - torch.lgamma(N / 2.0)
     volume = torch.exp(log_area + N * torch.log(safe_r) + log_integral)
+    # The value at r = 0 is 0 for every N, but the gradient is not: dV/dr at
+    # the origin is 2 when N = 1 and 0 otherwise. This branch carries that
+    # derivative for autograd, since safe_r cuts the gradient at r = 0.
     origin = torch.where(N == 1.0, 2.0 * r, torch.zeros_like(r))
     return torch.where(nonzero, volume, origin)
 
@@ -269,12 +298,11 @@ def model_anisotropic_flux(
 
         flux = Π_i sn_{κ_i}(r),
 
-    the product of the per-direction generalized sines. This is the anisotropic
-    generalization of the isotropic geodesic-sphere factor `sn_κ(r)^{N-1}`; which
-    it recovers when all `kappas` are equal (the same factor repeated); but here
-    each principal direction contributes its OWN `sn_{κ_i}(r)`. Use as a
-    curvature-matched flux for a force-decay driven by a per-direction curvature
-    TENSOR, where a single scalar κ would collapse the directional structure.
+    the product of one generalized sine per principal direction. It is the
+    anisotropic analogue of the isotropic sphere factor `sn_κ(r)^{N-1}`. With all
+    `K` curvatures equal to `κ` and `K = N - 1`, the two are the same. Each
+    direction keeps its own `sn_{κ_i}(r)`, so the flux can follow a
+    per-direction curvature tensor, which a single scalar κ would collapse.
 
     Args:
       kappas: `(B, K)` principal sectional curvatures (any sign), `K` directions.
@@ -288,6 +316,8 @@ def model_anisotropic_flux(
       anisotropic frame).
     """
     kappas = torch.as_tensor(kappas)
+    # Integer curvatures fall back to float64 so the sine ratios are computed
+    # in floating point.
     dtype = kappas.dtype if kappas.is_floating_point() else torch.float64
     kappas = kappas.to(dtype)
     r = torch.as_tensor(r, dtype=dtype, device=kappas.device)

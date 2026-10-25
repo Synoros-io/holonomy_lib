@@ -18,10 +18,10 @@ so geodesic distance is Pythagorean:
     d²((x_1, …, x_k), (y_1, …, y_k)) = Σ_i w_i · d_i²(x_i, y_i).
 
 Each manifold operation (exp, log, projection, retraction, …)
-delegates to the corresponding submanifold method per slice, so a
-mixed-curvature embedding `concept_c = (x_E, x_H, x_S)` with one
-Euclidean, one hyperbolic, and one spherical component just works
-through the existing `holonomy_lib.hyperbolic.*` primitives.
+delegates to the corresponding submanifold method, slice by slice.
+A point `(x_E, x_H, x_S)` with one Euclidean, one hyperbolic, and one
+spherical component therefore works by calling the submanifold classes
+(`KappaStereographicManifold`, `LorentzManifold`) on each slice.
 
 References:
   Skopek, O., Ganea, O.-E., Bécigneul, G. (2019). Mixed-curvature
@@ -47,9 +47,11 @@ class ProductManifold:
     Args:
       manifolds: ordered list of submanifolds. Each must expose
         `.dim`, `.ambient_dim`, `random_point`, `origin`,
-        `is_on_manifold`, `distance`, `exp`, `log`, `inner`, `norm`,
-        `projection`, `retraction`. Heterogeneous mixes are fine ,
-        e.g. `[KappaStereographicManifold(κ=-1, n=4), LorentzManifold(n=4)]`.
+        `is_on_manifold`, `distance`, `exp`, `log`, `inner`,
+        `projection`, `retraction`, `egrad_to_rgrad`. `exp_0` and `log_0`
+        are needed only by the tangent-at-origin methods. Heterogeneous
+        mixes are fine, e.g.
+        `[KappaStereographicManifold(kappa=-1.0, n=4), LorentzManifold(n=4)]`.
       weights: optional per-submanifold positive finite scalars `w_i` on
         the squared-distance contribution. Default uniform (`w_i = 1`).
         Use `weights` to up-weight one geometry relative to others in
@@ -97,16 +99,18 @@ class ProductManifold:
         self.device = torch.device(device)
         self.dtype = dtype
 
-        # Precompute ambient-slice boundaries: offsets[i] is the
-        # starting flat-index of submanifold i.
+        # Each submanifold owns a contiguous block of the flat tensor. The
+        # running sum of block sizes gives where each block starts, and pairing
+        # adjacent entries gives (start, end) for every slice.
         self._ambient_dims = [m.ambient_dim for m in self.manifolds]
         offsets = [0]
         for d in self._ambient_dims:
             offsets.append(offsets[-1] + d)
         self._ambient_slices = list(zip(offsets[:-1], offsets[1:], strict=True))
 
-        # Intrinsic-slice boundaries (for exp_0 / log_0 which use
-        # the intrinsic dim).
+        # Same bookkeeping for intrinsic coordinates, which exp_0 and log_0
+        # use. They are shorter than the ambient points for components that
+        # embed, like Lorentz (n intrinsic, n + 1 ambient).
         self._intrinsic_dims = [m.dim for m in self.manifolds]
         i_offsets = [0]
         for d in self._intrinsic_dims:
@@ -128,7 +132,11 @@ class ProductManifold:
     # ----------------------------------------------------------------
 
     def _split_ambient(self, x: torch.Tensor) -> list[torch.Tensor]:
-        """Split a flat ambient tensor into per-submanifold slices."""
+        """Split a flat ambient tensor into one view per submanifold.
+
+        Input: `x` of shape `(..., ambient_dim)`. Output: list of views in
+        submanifold order. Raises ValueError on the wrong shape.
+        """
         if x.ndim < 2 or x.shape[-1] != self.ambient_dim:
             raise ValueError(
                 f"x must have shape (..., {self.ambient_dim}); got {tuple(x.shape)}"
@@ -136,7 +144,11 @@ class ProductManifold:
         return [x[..., s:e] for s, e in self._ambient_slices]
 
     def _split_intrinsic(self, v: torch.Tensor) -> list[torch.Tensor]:
-        """Split a flat intrinsic tangent into per-submanifold slices."""
+        """Split a flat intrinsic tangent into one view per submanifold.
+
+        Input: `v` of shape `(..., dim)`. Output: list of views in submanifold
+        order. Raises ValueError on the wrong shape.
+        """
         if v.ndim < 2 or v.shape[-1] != self.dim:
             raise ValueError(
                 f"v must have shape (..., {self.dim}); got {tuple(v.shape)}"
@@ -144,7 +156,9 @@ class ProductManifold:
         return [v[..., s:e] for s, e in self._intrinsic_slices]
 
     def _join(self, pieces: list[torch.Tensor]) -> torch.Tensor:
-        """Concatenate per-submanifold tensors back into flat form."""
+        """Concatenate per-submanifold tensors back into flat form along the last
+        axis. The pieces must share their leading (batch) dims.
+        """
         return torch.cat(pieces, dim=-1)
 
     def component(self, x: torch.Tensor, index: int) -> torch.Tensor:
@@ -177,9 +191,10 @@ class ProductManifold:
         batch_size: int = 1,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample by drawing independently on each submanifold and
-        concatenating. Each submanifold's `random_point` decides its
-        own distribution (uniform / Gaussian tangent / etc.).
+        """Sample each submanifold and concatenate the results. Each
+        submanifold's `random_point` decides its own distribution (uniform,
+        Gaussian tangent, ...). One `generator` is passed to all of them in
+        order, so a single seed fixes the whole draw.
 
         References:
           Lee (2018), Introduction to Riemannian Manifolds, product metrics.
@@ -249,6 +264,8 @@ class ProductManifold:
         """
         points = self._split_ambient(point)
         gradients = self._split_ambient(egrad)
+        # The weighted metric on component i is w_i · g_i, whose inverse is
+        # g_i^{-1} / w_i. Dividing each slice by its weight gives the gradient.
         return self._join([
             m.egrad_to_rgrad(p, g) / weight
             for m, p, g, weight in zip(
@@ -301,6 +318,8 @@ class ProductManifold:
         """
         x_parts = self._split_ambient(x)
         y_parts = self._split_ambient(y)
+        # Scaling each distance by sqrt(w_i) makes its square w_i * d_i^2, so
+        # the vector norm over components is the weighted Pythagorean sum.
         distances = [
             math.sqrt(weight) * m.distance(x_i, y_i)
             for m, x_i, y_i, weight in zip(
@@ -344,9 +363,8 @@ class ProductManifold:
     def retraction(
         self, x: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
-        """Per-component retraction. For submanifolds where
-        retraction = exp (Hadamard etc.), this collapses to the
-        per-component exp.
+        """Per-component retraction. A component whose retraction is its
+        exponential map gets exp here.
 
         References:
           Lee (2018), Introduction to Riemannian Manifolds, product metrics.
@@ -368,10 +386,9 @@ class ProductManifold:
         product manifold via per-submanifold `exp_0`. Result is the
         flat ambient form `(B, Σ ambient_dim_i)`.
 
-        Submanifolds without `exp_0` raise AttributeError; that's
-        expected; the typical use of ProductManifold has all
-        submanifolds supporting the tangent-at-origin embedding
-        (Euclidean / hyperbolic / κ-stereographic all do).
+        A submanifold without `exp_0` raises AttributeError, which is the
+        intended failure. Typical products (Euclidean, hyperbolic,
+        κ-stereographic) all provide it.
 
         References:
           Lee (2018), Introduction to Riemannian Manifolds, product metrics.

@@ -3,13 +3,14 @@
 
 """Riemannian steepest descent (RSGD).
 
-For a Riemannian manifold M with `projection` (ambient → tangent) and
-`retraction` (move along tangent → new point), Riemannian SGD takes
-the ambient gradient `g`, projects it to the tangent space at the
-current point, scales by `-lr`, and retracts back onto M.
+For a Riemannian manifold M with `egrad_to_rgrad` (ambient gradient to
+Riemannian gradient, metric included) and `retraction` (move along a
+tangent vector to a new point), Riemannian SGD takes the ambient
+gradient `g` at the current point, converts it with the metric, scales
+by `-lr`, and retracts back onto M.
 
-  ξ = projection(point, -lr · g)
-  point' = retraction(point, ξ)
+  ξ = egrad_to_rgrad(point, g)
+  point' = retraction(point, -lr · ξ)
 
 References:
   Absil, P.-A., Mahony, R., Sepulchre, R. (2008). Optimization
@@ -46,7 +47,8 @@ def riemannian_sgd_step(
         a single `torch.Tensor`; for `FixedRankManifold` this is the
         `(B, m, n)` ambient gradient per Vandereycken (2013)'s
         embedded-tangent representation.
-      lr: learning rate (positive scalar).
+      lr: learning rate, a positive scalar. Not checked here;
+        `RiemannianSGD` rejects lr <= 0.
 
     Returns:
       new_point: the manifold-constrained next iterate.
@@ -58,18 +60,25 @@ def riemannian_sgd_step(
       Bonnabel, S. (2013). Stochastic gradient descent on Riemannian
         manifolds. IEEE TAC 58(9):2217-2229, §III.
     """
-    # A tangent projection alone only converts gradients for an embedded
-    # Euclidean metric. The manifold must account for its metric first.
+    # A plain tangent projection is the right conversion only when the metric
+    # is the embedded Euclidean one, as for FixedRankManifold. SPD's
+    # affine-invariant metric needs S sym(G) S, so each manifold does its own
+    # conversion through egrad_to_rgrad. The step then scales that tangent by
+    # -lr and retracts it back onto the manifold.
     tangent = manifold.egrad_to_rgrad(point, ambient_grad)
     return manifold.retraction(point, -lr * tangent)
 
 
 class RiemannianSGD(RiemannianOptimizer):
-    """Stateful wrapper around `riemannian_sgd_step`.
+    """Optimizer that holds a manifold and a learning rate.
+
+    Each `step` call forwards to `riemannian_sgd_step`. The object keeps no
+    moment buffers or step count, so nothing carries over between steps.
 
     Args:
       manifold: the underlying manifold object (see `riemannian_sgd_step`).
-      lr: learning rate. Default `1e-2` (the library's existing default).
+      lr: learning rate, must be > 0 (ValueError otherwise). The default
+        `1e-2` is a starting point, not a tuned value; tune it per problem.
 
     Example:
       >>> from holonomy_lib.manifolds import SPDManifold
@@ -89,6 +98,12 @@ class RiemannianSGD(RiemannianOptimizer):
 
     def step(self, point: Any, ambient_grad: Any) -> Any:
         """Convert the ambient gradient and retract one descent step.
+
+        Args:
+          point: current point on the manifold.
+          ambient_grad: ambient-space gradient of the objective at `point`.
+        Returns:
+          new_point: the point after the step.
 
         References:
           Bonnabel (2013), Stochastic Gradient Descent on Riemannian

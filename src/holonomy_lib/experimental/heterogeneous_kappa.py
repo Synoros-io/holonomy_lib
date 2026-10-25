@@ -33,15 +33,15 @@ from holonomy_lib.manifolds.stereographic import (
 
 
 # Built-in combiners. Each takes two κ tensors of the same shape and
-# returns a single pair-effective κ. The arithmetic mean is the
-# simplest defensible default — preserves linearity, has a
-# well-defined limit at κ_a = κ_b (recovers the standard formula),
-# and degrades gracefully when κ_a and κ_b have opposite signs
-# (effective κ can pass through 0, dispatching to the Euclidean
-# limit via the dynamic-sign-dispatch helpers).
+# returns a single pair-effective κ.
 #
-# The harmonic mean preserves equal curvatures of either sign but is singular
-# when their sum vanishes.
+# The arithmetic mean is the default. It is linear in each κ, and when
+# κ_a = κ_b it returns that κ, so the pair formula reduces to the standard
+# one. With opposite signs the effective κ can pass through 0, where the
+# sign dispatch in `_kappa_scale` switches to the Euclidean series.
+#
+# The harmonic mean also returns the shared κ when κ_a = κ_b, for either
+# sign. It is singular when the two sum to zero, and the call raises then.
 def _combiner_arithmetic_mean(
     kappa_a: torch.Tensor, kappa_b: torch.Tensor,
 ) -> torch.Tensor:
@@ -86,11 +86,10 @@ class HeterogeneousKappaManifold:
       device, dtype: tensor placement / precision for `random_point`
         / `origin`.
 
-    All methods that involve curvature take an explicit κ tensor (or
-    pair of κ tensors). The class does NOT store κ; that's the
-    user's responsibility. This keeps the manifold a pure math
-    primitive and lets the user attach any parameterization on top
-    (smooth field, per-point residual, gated mixture, …).
+    Every method that involves curvature takes an explicit κ tensor (or a
+    pair of them). The class stores no κ. The caller owns it, which keeps
+    the manifold a pure math primitive that any parameterization (smooth
+    field, per-point residual, gated mixture) can sit on top of.
 
     Example:
       >>> mfd = HeterogeneousKappaManifold(n=4)
@@ -137,20 +136,21 @@ class HeterogeneousKappaManifold:
 
 
     # ----------------------------------------------------------------
-    # κ-trig helpers — per-point κ, dynamic sign dispatch
+    # κ-trig helpers: per-point κ, dynamic sign dispatch
     # ----------------------------------------------------------------
     #
     # Each helper takes alpha (a tangent-like scalar per point) and
     # kappa (per-point curvature, same shape as alpha). Computes the
     # branch-aware κ-trig using torch.where on sign(κ). Works
-    # uniformly for κ ∈ R, no static branch lock — same dynamic
+    # uniformly for κ ∈ R, no static branch lock. Same dynamic
     # dispatch as the sign-flip-during-training case in
     # `KappaStereographicManifold`.
 
     def _tan_kappa_c(
         self, alpha: torch.Tensor, kappa: torch.Tensor,
     ) -> torch.Tensor:
-        """`tan_κ(√|κ|·α) / (√|κ|·α)`, smooth across κ ∈ R."""
+        """`tan(√κ·α) / (√κ·α)` for κ > 0, `tanh(√|κ|·α) / (√|κ|·α)` for κ < 0,
+        and the series at zero. Smooth across κ ∈ R."""
         return _kappa_scale(alpha, kappa)
 
     def _atan_kappa_c(
@@ -164,9 +164,9 @@ class HeterogeneousKappaManifold:
     # ----------------------------------------------------------------
 
     def origin(self, batch_size: int = 1) -> torch.Tensor:
-        """Origin `(0, …, 0) ∈ R^n`. The origin is the SAME point on
-        every curvature's κ-stereographic; curvature varies what
-        directions look like, not where the origin is.
+        """Origin `(0, …, 0) ∈ R^n`. It is the same point in every curvature's
+        κ-stereographic chart. Curvature changes how directions behave, not
+        where the origin sits.
 
         References:
           Bachmann, Bécigneul, Ganea (2020), Constant Curvature Graph
@@ -223,10 +223,15 @@ class HeterogeneousKappaManifold:
             device=draw_device, dtype=self.dtype,
         ).to(self.device)
         kappa = kappa.to(device=v.device, dtype=v.dtype)
+        # For κ > 0 the sampled tangent norm is capped at 1/8 of the model
+        # sphere's diameter π/√κ, a quarter of the tan pole radius π/(2√κ).
+        # The where() keeps the root finite for κ ≤ 0, where the cap is unused.
         positive_root = torch.sqrt(
             torch.where(kappa > 0, kappa, torch.ones_like(kappa))
         )
         cap = SPHERICAL_SAMPLE_RADIUS_FRACTION * math.pi / positive_root
+        # Draws past the cap are pulled back to it, and only where κ > 0.
+        # safe_norm keeps the division finite for a zero draw.
         norm = torch.linalg.vector_norm(v, dim=-1)
         safe_norm = torch.where(norm > 0, norm, torch.ones_like(norm))
         scale = torch.where((kappa > 0) & (norm > cap), cap / safe_norm,
@@ -240,6 +245,13 @@ class HeterogeneousKappaManifold:
         """Check finite coordinates and -κ||x||² < 1 - atol for κ < 0.
 
         Nonnegative curvature admits every finite stereographic coordinate.
+
+        Args:
+          x: `(..., n)` coordinates.
+          kappa: `(...)` per-point curvature, matching the batch shape of `x`.
+          atol: margin kept inside the open ball for κ < 0.
+        Returns:
+          Boolean `(...)` mask, true where the point is finite and in the chart.
 
         References:
           Bachmann et al. (2020), §2, homogeneous chart domains.
@@ -262,8 +274,9 @@ class HeterogeneousKappaManifold:
           v: `(B, n)` Euclidean tangents at the origin (one per point).
           kappa: `(B,)` per-point curvatures.
         Returns:
-          `(B, n)` embedded points, each at its own curvature. Large
-          hyperbolic tangents saturate inside the representable ball.
+          `(B, n)` embedded points, each at its own curvature. For κ < 0,
+          large tangents saturate tanh, and `_project_ball` clips them just
+          inside the ball of radius about 1/√|κ|.
           Spherical exp/log are inverses only for ||v|| < π/(2√κ).
 
         References:
@@ -279,6 +292,8 @@ class HeterogeneousKappaManifold:
                 f"kappa shape {tuple(kappa.shape)} must match v.shape[:-1] = "
                 f"{tuple(v.shape[:-1])}"
             )
+        # The scale tan(√κ|v|)/(√κ|v|) multiplies v, so the image sits on v's
+        # ray at distance tan(√κ|v|)/√κ (tanh/√|κ| when κ < 0).
         v_norm = torch.linalg.vector_norm(v, dim=-1)
         scaling = self._tan_kappa_c(v_norm, kappa)
         return _project_ball(scaling.unsqueeze(-1) * v, kappa)
@@ -335,6 +350,9 @@ class HeterogeneousKappaManifold:
                 "endpoint coordinates and curvatures must have matching shapes"
             )
         kappa_pair = self.combiner(kappa_x, kappa_y)
+        # Both endpoints are checked under the pair curvature, since that is the
+        # chart the distance is computed in. atol=0 means no margin: the strict
+        # inequality rejects points on the boundary itself.
         if not (self.is_on_manifold(x, kappa_pair, atol=0.0)
                 & self.is_on_manifold(y, kappa_pair, atol=0.0)).all():
             raise ValueError(

@@ -6,8 +6,9 @@
 Currently implemented:
   RiemannianSGD(manifold, lr)  : steepest descent on a manifold.
 
-The optimizer wraps the existing `FixedRankManifold` / `SPDManifold`
-`egrad_to_rgrad` + `retraction` API. The flow is:
+The optimizer only calls `egrad_to_rgrad` and `retraction` on its manifold,
+so it works with any manifold that has both (`FixedRankManifold`,
+`SPDManifold`, `ProductManifold`). The flow is:
 
   1. Caller computes the ambient gradient `g` of the objective.
   2. `optimizer.step(point, g)` converts `g` using the metric at
@@ -21,9 +22,8 @@ training loops.
 Why no Adam (or RMSProp, AdamW, ...): adaptive step-size schemes are
 user-side ergonomics, not part of the math of optimization on a
 manifold. SGD uses metric gradient conversion followed by retraction.
-Users who want Adam-style
-adaptive rates can compute their adaptive step in ambient space and
-pass the rescaled gradient into `step()`.
+Users who want Adam-style rates can compute their adaptive step in
+ambient space and pass the rescaled gradient into `step()`.
 
 Planned:
   - `torch.optim.Optimizer` integration via a `ManifoldParameter`

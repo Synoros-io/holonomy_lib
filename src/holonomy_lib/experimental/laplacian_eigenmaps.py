@@ -39,9 +39,10 @@ import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
 
-# Preserve the existing finite work budget for this experimental optimizer.
+# Step cap for the sequential RSGD loop. It bounds the cost of a call and is
+# not a convergence test.
 EIGENMAPS_MAX_STEPS_DEFAULT = 200
-# Existing exploratory step size, with no claim of universal convergence.
+# Exploratory step size. Nothing here shows it converges for every geometry.
 EIGENMAPS_LR_DEFAULT = 0.05
 
 
@@ -59,8 +60,9 @@ def hyperbolic_laplacian_eigenmaps(
 
     via Riemannian SGD.
 
-    Status: experimental. This attraction-only objective collapses each
-    connected component; it does not compute constrained spectral eigenmaps.
+    Status: experimental. This attraction-only objective is minimized by
+    collapsing each connected component to a point. It does not compute
+    constrained spectral eigenmaps.
 
     Args:
       adjacency: `(B, N, N)` symmetric non-negative graph adjacency
@@ -97,8 +99,8 @@ def hyperbolic_laplacian_eigenmaps(
       Per-step cost is `O(B · N² · D)` from the pairwise `log` call
       (`D = ambient_dim`). Acceptable for `N ≤ a few hundred`; larger
       graphs should chunk along the `N²` dimension or use a sparse
-      adjacency-based loss (not implemented here, Stage 2 scope is
-      the dense case).
+      adjacency-based loss. Neither is implemented here: only the dense
+      case is handled.
 
       The result is **not** rotation-canonicalized (the optimal
       embedding is determined only up to isometries of the manifold);
@@ -162,11 +164,11 @@ def hyperbolic_laplacian_eigenmaps(
             emb_j.reshape(B * N * N, D),
         ).reshape(B, N, N, D)
 
-        # Gradient on each node i: −2 Σ_j A_{ij} · log_{Y_i}(Y_j), normalized
-        # by deg(i) so the per-step magnitude is the *average* log-direction
-        # toward neighbors (degree-invariant). Log maps are tangent vectors,
-        # so this is already a Riemannian gradient: it must not go through
-        # the optimizer's Euclidean-to-Riemannian conversion.
+        # Step direction for node i: −2 Σ_j A_{ij} · log_{Y_i}(Y_j), divided by
+        # deg(i). The division makes it the *average* log-direction toward the
+        # neighbors, so its size does not grow with degree. The log maps already
+        # return tangent vectors at Y_i, so the step is taken in the tangent
+        # space directly, with no Euclidean-to-Riemannian rescaling.
         riemannian_grad = -2.0 * (
             adjacency.unsqueeze(-1) * log_ij
         ).sum(dim=2) / degree_safe   # (B, N, D)

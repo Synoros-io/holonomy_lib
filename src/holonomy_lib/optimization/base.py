@@ -4,7 +4,8 @@
 """Base class for Riemannian optimizers.
 
 Subclasses implement `step(point, ambient_grad) -> new_point`. The base
-class holds the manifold reference and per-instance hyperparameters.
+class holds only the manifold reference. Hyperparameters and any per-step
+state belong to the subclass.
 
 The "manifold" parameter must expose `egrad_to_rgrad(point, ambient)` and
 `retraction(point, tangent)` methods with the same signatures as
@@ -21,8 +22,9 @@ from typing import Any
 class RiemannianOptimizer(ABC):
     """Abstract base for Riemannian optimizers.
 
-    A subclass owns:
-      - the manifold (provides gradient conversion + retraction),
+    An optimizer instance holds:
+      - the manifold (stored by `__init__`; provides gradient conversion and
+        retraction),
       - hyperparameters (learning rate, momentum coefficients, etc.),
       - per-instance state (moment buffers, step count) if stateful.
 
@@ -30,12 +32,11 @@ class RiemannianOptimizer(ABC):
     new point on the manifold. Caller is responsible for storing the
     new point and reading its gradient on the next iteration.
 
-    Why this shape: the existing `FixedRankManifold`/`SPDManifold`
-    methods return new points rather than mutating in-place, so the
-    optimizer follows the same convention. Future v2 work can wrap a
-    `torch.optim.Optimizer` around this for compatibility with
-    `loss.backward()` flows; for v1 the explicit point-in / point-out
-    contract is the simpler primitive.
+    Why this shape: the `FixedRankManifold` and `SPDManifold` methods
+    return new points rather than mutating in place, so the optimizer
+    follows the same convention. Wrapping a `torch.optim.Optimizer` around
+    this, for `loss.backward()` flows, is possible later. The explicit
+    point-in / point-out contract is the simpler primitive to build on.
     """
 
     def __init__(self, manifold: Any) -> None:

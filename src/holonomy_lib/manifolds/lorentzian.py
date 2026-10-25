@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Lorentzian (pseudo-Riemannian, signature (1, n-1)) manifold ,
+"""Lorentzian (pseudo-Riemannian, signature (1, n-1)) manifold,
 flat Minkowski spacetime `R^{1, n-1}`.
 
 Distinct from `LorentzManifold` (which is the *unit hyperboloid*, a
-Riemannian submanifold sitting inside this space). `LorentzianManifold`
+Riemannian submanifold of a Minkowski space one dimension larger). `LorentzianManifold`
 **is** the ambient Minkowski space:
 
   - The manifold itself is `R^n` (no constraint surface).
-  - The metric is `g(u, v) = ⟨u, v⟩_M = -u_0·v_0 + Σ_{i ≥ 1} u_i·v_i` ,
+  - The metric is `g(u, v) = ⟨u, v⟩_M = -u_0·v_0 + Σ_{i ≥ 1} u_i·v_i`,
     **indefinite signature (1, n-1)**: one timelike direction, `n - 1`
     spacelike directions.
   - Tangent space at any point is the full `R^n`; tangent vectors carry
@@ -39,7 +39,7 @@ API summary (compared to a Riemannian manifold):
       0 = spacelike, 1 = future-timelike, -1 = past-timelike,
       2 = future-null, -2 = past-null.
   - `proper_time(x, y)`: `sqrt(-interval_sq)` for timelike pairs only;
-    raises (or returns NaN element-wise) for non-timelike.
+    returns NaN element-wise for non-timelike pairs.
   - `proper_distance(x, y)`: `sqrt(interval_sq)` for spacelike pairs
     only.
   - `exp`, `log`, `retraction`: the trivial flat-space forms.
@@ -72,7 +72,7 @@ class LorentzianManifold:
       >>> x = mfd.random_point(batch_size=3)
       >>> x.shape
       torch.Size([3, 4])
-      >>> # Future-timelike pair (light cone of x_0)
+      >>> # Future-timelike pair: y lies inside the future light cone of x
       >>> y = x + torch.tensor([2.0, 0.5, 0.0, 0.0])
       >>> mfd.causal_type(x, y).tolist()              # 1 = future-timelike
       [1, 1, 1]
@@ -152,8 +152,8 @@ class LorentzianManifold:
         classes; so `manifold_aware_inner`, `ProductManifold.inner`
         and similar manifold-generic primitives don't crash when
         passed a `LorentzianManifold`. Callers that compute Riemannian
-        norms via `sqrt(inner(...))` should be aware that the result
-        is imaginary on timelike inputs; prefer `proper_time` /
+        norms via `sqrt(inner(...))` should be aware that the square
+        root is not real on timelike inputs; prefer `proper_time` /
         `proper_distance` for type-appropriate magnitudes.
 
         Args:
@@ -218,11 +218,12 @@ class LorentzianManifold:
           - `FUTURE_NULL` (= 2): null/lightlike with `(y - x)_0 > 0`
           - `PAST_NULL` (= -2): null/lightlike with `(y - x)_0 <= 0`
 
-        Coincident events have no time orientation; this API assigns them
-        PAST_NULL, also used for tolerance-null pairs with zero time difference.
+        Coincident events have no time orientation. Null pairs with
+        `dt <= 0`, including coincident events, get PAST_NULL.
 
-        The `null_atol` tolerance pulls "exactly null" inwards from
-        the |interval_sq| < null_atol band. Reuses the library's
+        A pair is null when |interval_sq| <= null_atol and timelike when
+        interval_sq < -null_atol. Everything else is spacelike, so the two
+        bands never overlap. The default tolerance is the library's
         `numerical_floor_convention`.
 
         References:
@@ -239,11 +240,15 @@ class LorentzianManifold:
         diff = y - x
         i_sq = self.norm_sq(diff)
         dt = diff[..., 0]
-        # Classify by sign of interval_sq and direction in time
+        # Null is a band around zero, |interval_sq| <= null_atol. Timelike
+        # needs interval_sq below the negative edge of that band, so the two
+        # masks never overlap. A coincident pair has dt = 0, so it is not
+        # "future" and falls into the past branch.
         is_null = i_sq.abs() <= null_atol
-        is_timelike = (i_sq < -null_atol)  # negative beyond floor
+        is_timelike = i_sq < -null_atol
         is_future = dt > 0
-        # Start with SPACELIKE everywhere
+        # Everything starts as SPACELIKE. The four masks below are disjoint,
+        # so the order of the where calls does not change the result.
         out = torch.zeros(diff.shape[:-1], dtype=torch.int64,
                            device=diff.device)
         out = torch.where(
@@ -284,13 +289,13 @@ class LorentzianManifold:
           MTW (1973) §1.4 (proper time, "wristwatch time").
         """
         i_sq = self.interval_sq(x, y)
-        # Timelike ⇔ i_sq < 0. Mask out non-timelike to NaN to make
-        # type-error obvious to callers rather than silently returning
-        # a meaningless value (e.g. for spacelike, sqrt of positive ≠
-        # proper time but proper distance — different physics).
+        # Timelike means interval_sq < 0. Anything else becomes NaN, so a caller
+        # that passes a spacelike pair sees NaN and not a number that looks like
+        # a proper time. For spacelike pairs the same square root is a proper
+        # distance, which is different physics.
         is_timelike = i_sq < 0
-        # Compute √(-i_sq) on the safe (timelike) values; substitute
-        # NaN elsewhere via where-mask.
+        # The sqrt only sees the timelike entries. Elsewhere `safe` holds 1, so
+        # sqrt never gets a negative input, and the NaN fill is applied after.
         safe = torch.where(is_timelike, -i_sq, torch.ones_like(i_sq))
         tau = torch.where(
             is_timelike,
@@ -332,8 +337,7 @@ class LorentzianManifold:
     # added later as subclasses or sibling manifolds.
     #
     # Shape convention follows physics literature:
-    #   g_μν          (n, n)    metric tensor with one upper one lower
-    #                            index irrelevant; we store as (n, n)
+    #   g_μν          (n, n)    metric tensor, stored as a plain matrix
     #   Γ^σ_μν        (n, n, n) Christoffel symbol of the 2nd kind,
     #                            with the upper index σ first
     #   R^σ_ρμν       (n, n, n, n) Riemann curvature tensor
@@ -355,6 +359,7 @@ class LorentzianManifold:
           O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, flat metric
           and its Levi-Civita connection.
         """
+        # Diagonal of the metric. Index 0 is time, so it gets the minus sign.
         eta = torch.ones(self.n, device=x.device, dtype=x.dtype)
         eta[0] = -1.0
         # Broadcast diagonal to (..., n, n)
@@ -460,6 +465,8 @@ class LorentzianManifold:
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
+        # A torch.Generator belongs to one device, so the draw runs on the
+        # generator's device and is moved to the manifold's device afterward.
         return torch.randn(
             batch_size,
             self.n,
@@ -502,6 +509,8 @@ class LorentzianManifold:
         References:
           O'Neill (1983), Semi-Riemannian Geometry, Ch. 3, metric duality.
         """
+        # The metric diag(-1, 1, ..., 1) is its own inverse, so raising the
+        # index flips the sign of the time component.
         return torch.cat((-egrad[..., :1], egrad[..., 1:]), dim=-1)
 
     def exp(
@@ -539,7 +548,7 @@ class LorentzianManifold:
         return self.exp(x, v)
 
     # ----------------------------------------------------------------
-    # is_on_manifold — trivially True (flat space has no constraint)
+    # is_on_manifold: trivially True, since flat space has no constraint
     # ----------------------------------------------------------------
 
     def is_on_manifold(

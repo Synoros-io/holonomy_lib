@@ -30,10 +30,9 @@ All seven core operations admit closed forms:
     PT_{x→y}(v) = v − ⟨log_x(y), v⟩_x / d_k(x,y)² · (log_x(y) + log_y(x))
     retraction  = exp_x   (geodesic; second-order)
 
-Points are stored as `(B, n+1)` ambient tensors; the leading batch
-dimension is required for every operation. Tangent vectors are
-stored in the same ambient form, with the understanding that they
-satisfy ⟨x, v⟩_M = 0 at the corresponding base point.
+Points are stored as `(B, n+1)` ambient tensors, batch first. Tangent
+vectors use the same ambient form and satisfy ⟨x, v⟩_M = 0 at their
+base point.
 
 The manifold dimension reported by `.dim` is the **intrinsic** `n`,
 not the ambient `n+1`.
@@ -59,21 +58,20 @@ import torch
 
 
 def _safe_sqrt(x: torch.Tensor) -> torch.Tensor:
-    """sqrt(x) with autograd-safe handling at x = 0.
+    """sqrt(x), returning 0 with zero gradient where x ≤ 0.
 
-    The classic PyTorch trap: `sqrt(clamp(x, min=0))` produces NaN in
-    backward at the boundary (`clamp`'s gradient is 0 there, `sqrt`'s
-    is ∞, product is `0·∞ = NaN`). This helper computes sqrt only on a
-    where-substituted input and masks the output back, so the masked
-    branch never touches the singular operation:
+    The derivative of sqrt is infinite at 0, and a squared norm can come
+    out slightly negative from float drift. This helper takes the sqrt only
+    of a where-substituted input that is always positive, then masks the
+    result back:
 
       - forward: `sqrt(x)` for `x > 0`, `0` for `x ≤ 0`
       - backward: `1/(2·sqrt(x))` for `x > 0`, `0` for `x ≤ 0`
         (the 0-subgradient choice at the boundary; the analytic
         derivative is undefined there).
 
-    Used pervasively in `norm`, `distance`, `log_0` etc. wherever the
-    inner quantity vanishes at a natural limit (x = y, v = 0, etc.).
+    Used by `LorentzManifold.norm` and by `ProductManifold`
+    (`manifolds/product.py`).
     """
     is_positive = x > 0
     x_safe = torch.where(is_positive, x, torch.ones_like(x))
@@ -81,13 +79,12 @@ def _safe_sqrt(x: torch.Tensor) -> torch.Tensor:
 
 
 def _safe_sinhc(alpha: torch.Tensor) -> torch.Tensor:
-    """sinh(α)/α with autograd-safe handling at α = 0.
+    """sinh(α)/α, with the limit 1 at α = 0.
 
-    Without care, `sinh(α)/α_safe` (where α_safe = where(α > 0, α, 1))
-    produces NaN in backward because the FORMULA branch still
-    references the raw α (which may be 0), and the gradient flow
-    couples through both `where`s. Using `sinh(α_safe)/α_safe`
-    confines unsafe values to the masked-out branch:
+    The formula is 0/0 at α = 0. A `where` keeps that NaN out of the forward
+    value, but it does not stop a NaN in the unselected branch from reaching
+    the backward pass. Evaluating `sinh(α_safe)/α_safe`, with α_safe = 1
+    wherever α = 0, keeps both branches finite:
 
       - forward: `sinh(α)/α` for `α > 0`, `1` for `α = 0`
       - backward: `(α·cosh α − sinh α)/α²` for `α > 0`, `0` for α = 0
@@ -164,8 +161,8 @@ class LorentzManifold:
     def ambient_dim(self) -> int:
         """Ambient dimension `n + 1`. The Lorentz model embeds H^n_k in
         Minkowski R^{n+1}. Used by manifold-generic primitives in
-        `holonomy_lib.hyperbolic`; `KappaStereographicManifold`
-        overrides this to `n` (no extra dimension).
+        `holonomy_lib.hyperbolic`. `KappaStereographicManifold` needs no
+        extra coordinate, so its `ambient_dim` is `n`.
         """
         return self.n + 1
 
@@ -193,8 +190,8 @@ class LorentzManifold:
           Nickel and Kiela (2018), Learning Continuous Hierarchies in the
           Lorentz Model of Hyperbolic Geometry, §3.
         """
-        # x_0 · y_0 with the Minkowski sign flip; remaining components
-        # contribute Euclidean dot product.
+        # The time coordinate x_0 enters with a minus sign. The spatial
+        # coordinates 1: give the ordinary Euclidean dot product.
         return (x[..., 1:] * y[..., 1:]).sum(dim=-1) - x[..., 0] * y[..., 0]
 
     def is_on_manifold(
@@ -207,9 +204,9 @@ class LorentzManifold:
         Args:
           x: (B, n+1) ambient candidate points.
           atol: absolute tolerance for the constraint. Default 1e-9 is
-            the library's `numerical_floor_convention`; exp/log re-project
-            onto the hyperboloid so the post-call constraint holds to
-            machine precision and 1e-9 is comfortably above any drift.
+            the library's `numerical_floor_convention`. `exp` re-projects
+            onto the hyperboloid, so its output meets the constraint to
+            machine precision, and 1e-9 sits well above that drift.
         Returns:
           (B,) boolean tensor.
 
@@ -245,7 +242,7 @@ class LorentzManifold:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
         out = torch.zeros(batch_size, self.n + 1,
                           device=self.device, dtype=self.dtype)
-        # x_0 = 1/√|k| ⇒ ⟨x, x⟩_M = -1/|k| = 1/k for k<0. ✓
+        # x_0 = 1/√|k| gives ⟨x, x⟩_M = −1/|k| = 1/k, so the origin is on the sheet.
         out[..., 0] = self._inv_sqrt_abs_k
         return out
 
@@ -258,7 +255,7 @@ class LorentzManifold:
 
         Construction: draw a Euclidean tangent at the origin from
         `N(0, I_n)`, embed it as an ambient tangent `(0, v_spatial)`,
-        then apply `exp_origin`. The resulting distribution has full
+        then apply `exp_0`. The resulting distribution has full
         support on the upper sheet of the hyperboloid.
 
         This is a **convenience** draw for tests/initialization; it is
@@ -277,6 +274,8 @@ class LorentzManifold:
         """
         if batch_size < 0:
             raise ValueError(f"batch_size must be >= 0, got {batch_size}")
+        # A torch.Generator belongs to one device, so the draw runs on the
+        # generator's device and is moved to the manifold's device afterward.
         v_spatial = torch.randn(
             batch_size,
             self.n,
@@ -330,6 +329,9 @@ class LorentzManifold:
           Lorentz Model of Hyperbolic Geometry, §3, Riemannian optimization.
           Absil, Mahony, Sepulchre (2008), §3.6.
         """
+        # The Minkowski metric is diag(-1, 1, ..., 1), which is its own
+        # inverse, so the Riemannian gradient flips the sign of the time
+        # component. The projection then removes the normal part.
         metric_gradient = torch.cat((-egrad[..., :1], egrad[..., 1:]), dim=-1)
         return self.projection(point, metric_gradient)
 
@@ -362,11 +364,9 @@ class LorentzManifold:
         """Riemannian norm √⟨v, v⟩_x.
 
         For a true tangent at `x`, ⟨v, v⟩_M ≥ 0. Float drift can push
-        this slightly negative (~ machine eps × ‖v‖²); we use
-        `_safe_sqrt` which both clamps non-positive entries to 0 in
-        the forward pass AND produces a finite (zero) gradient at the
-        boundary; the naive `sqrt(clamp(x, min=0))` pattern would
-        propagate `0·∞ = NaN` through backward at v = 0.
+        this slightly negative (about machine eps × ‖v‖²), so the root is
+        taken with `_safe_sqrt`. That helper returns 0 for non-positive input
+        and has a zero gradient there, so v = 0 gives 0 and not a NaN.
 
         Returns:
           (B,) non-negative norms.
@@ -410,10 +410,9 @@ class LorentzManifold:
         norm_v = self.norm(x, v)                  # (B,)
         alpha = self._sqrt_abs_k * norm_v         # (B,)
 
-        # sinh(α)/α with the analytic limit 1 at α = 0. Use the
-        # autograd-safe helper which keeps unsafe (0) values inside
-        # the masked-out branch only — the formula branch evaluates at
-        # `alpha_safe`, never the raw 0.
+        # sinh(α)/α is 0/0 at α = 0, where its limit is 1. `_safe_sinhc`
+        # handles that point, so the forward value and the gradient stay
+        # finite when v = 0.
         sinhc = _safe_sinhc(alpha)
         cosh_alpha = torch.cosh(alpha)             # cosh(0) = 1, safe
 
@@ -459,10 +458,11 @@ class LorentzManifold:
           (B, n+1) tangent at x.
         """
         alpha = self._sqrt_abs_k * self.distance(x, y)
-        # Distance uses spatial coordinates, avoiding the cancellation in
-        # the ambient Minkowski product. Reconstruct the tangent's temporal
-        # coordinate from its tangency constraint instead of subtracting
-        # large nearly equal temporal components.
+        # The distance comes from the spatial coordinates, which avoids the
+        # cancellation in the ambient Minkowski product at large radius. The
+        # temporal coordinate of the tangent is rebuilt from tangency
+        # (⟨x, u⟩_M = 0) rather than subtracted, since that subtraction would
+        # cancel two large, nearly equal temporal components.
         scale = _safe_sinhc(alpha).reciprocal()
         spatial = scale.unsqueeze(-1) * (
             y[..., 1:] - torch.cosh(alpha).unsqueeze(-1) * x[..., 1:]
@@ -474,9 +474,10 @@ class LorentzManifold:
     def distance(
         self, x: torch.Tensor, y: torch.Tensor,
     ) -> torch.Tensor:
-        """Geodesic distance from a spatial radial decomposition.
+        """Geodesic distance, computed from the spatial coordinates alone.
 
-        Spatial coordinates determine the positive sheet. Resolve the smaller
+        A point's temporal coordinate is fixed by its spatial part, so only the
+        spatial parts enter. Resolve the smaller
         spatial vector into components parallel/perpendicular to the larger
         one. If m = sqrt(1 + ||perp||²) and δ is their axial rapidity
         difference, cosh(√|k| d) - 1 = (m - 1) + 2m sinh²(δ/2).
@@ -505,9 +506,11 @@ class LorentzManifold:
         other = torch.where(a_larger, b, a)
         radius = torch.where(a_larger, a_norm, b_norm)
         unit = axis / torch.where(radius > 0, radius, torch.ones_like(radius))
-        # Normalize a coordinate ratio before resolving the perpendicular
-        # residual. Direct subtraction against a rounded unit vector invents
-        # a large transverse component for large collinear spatial vectors.
+        # Take the residual against the pivot coordinate instead of against a
+        # rounded unit vector. Subtracting the unit vector directly invents a
+        # large transverse component for large collinear spatial vectors. The
+        # pivot is the largest coordinate of `axis`, so dividing by it is
+        # well conditioned.
         pivot = axis.abs().argmax(dim=-1, keepdim=True)
         axis_pivot = axis.gather(-1, pivot)
         safe_pivot = torch.where(axis_pivot != 0, axis_pivot, 1.0)
@@ -526,8 +529,8 @@ class LorentzManifold:
             torch.cat((transverse, axial), dim=-1), dim=-1
         )
         distance = 2.0 * self._inv_sqrt_abs_k * torch.asinh(half_sinh)
-        # The radial decomposition may leave a roundoff-sized perpendicular
-        # residual for bit-identical inputs. Their distance is exactly zero.
+        # Identical spatial parts give exactly 0. The check is explicit so the
+        # zero does not depend on how the decomposition rounds.
         same = (x[..., 1:] == y[..., 1:]).all(dim=-1)
         return torch.where(same, torch.zeros_like(distance), distance)
 
@@ -558,10 +561,10 @@ class LorentzManifold:
         log_xy = self.log(x, y)
         log_yx = self.log(y, x)
         d = self.distance(x, y)
-        # ⟨log_x(y), v⟩_x — uses the induced metric at x
+        # ⟨log_x(y), v⟩_x, using the induced metric at x
         ip = self.inner(x, log_xy, v)
-        # 1/d² with the 0/0 guard via where-on-both. At d = 0 both
-        # log terms are 0 and the correction vanishes, so PT(v) = v.
+        # d² is 0 at d = 0, where both log terms vanish and PT(v) = v. Divide
+        # by 1 there so no 0/0 is formed, then zero the coefficient.
         d_sq = d * d
         d_sq_safe = torch.where(d > 0, d_sq, torch.ones_like(d_sq))
         coeff = torch.where(
@@ -580,10 +583,10 @@ class LorentzManifold:
     ) -> torch.Tensor:
         """Retraction = exponential map.
 
-        On constant-curvature spaces, exp is the canonical second-order
-        retraction (the geodesic itself satisfies the retraction axioms
-        trivially). The optimizer module's `RiemannianSGD` calls this
-        method through the standard `egrad_to_rgrad → retraction` pipeline.
+        On constant-curvature spaces, exp is a retraction, and a second-order
+        one: the geodesic it traces has zero acceleration at the base point.
+        `RiemannianSGD` calls this method through the
+        `egrad_to_rgrad → retraction` pipeline.
 
         References:
           Absil, Mahony, Sepulchre (2008), §4.1.
@@ -605,9 +608,9 @@ class LorentzManifold:
             exp_o((0, v)) = (cosh(α)/√|k|,  sinh(α)·v/α),
             α = √|k| · ‖v‖_2.
 
-        Useful for embedding a Euclidean point cloud onto H^n_k. Strictly
-        equivalent to `exp(origin(B), zeros-prefixed v)` but avoids the
-        radial-projection cost.
+        Useful for embedding a Euclidean point cloud onto H^n_k. It equals
+        `exp(origin(B), (0, v))`, but it takes the (n,) coordinates directly,
+        so no ambient tangent is built and no Minkowski product is taken.
 
         Args:
           v_spatial: (B, n) Euclidean coordinates.
@@ -628,10 +631,8 @@ class LorentzManifold:
         cosh_a = torch.cosh(alpha)
         sinhc = _safe_sinhc(alpha)
 
-        # `torch.cat` rather than in-place `out[..., 0] = …` so that
-        # autograd doesn't break (in-place assignment into a freshly-
-        # allocated `torch.empty` would not be a problem in principle,
-        # but `torch.cat` is the more idiomatic differentiable form).
+        # Assemble the ambient point with torch.cat, out of place. Writing into
+        # a preallocated tensor is an in-place op that autograd has to track.
         time = (cosh_a * self._inv_sqrt_abs_k).unsqueeze(-1)
         space = sinhc.unsqueeze(-1) * v_spatial
         out = torch.cat([time, space], dim=-1)
@@ -648,8 +649,9 @@ class LorentzManifold:
             log_o(y)_spatial = β · y_{1:} / ‖y_{1:}‖_2,
             β = asinh(√|k| · ||y_spatial||) / √|k|.
 
-        The spatial-only identity avoids temporal/spatial cancellation at
-        large radius and has the analytic identity derivative at the origin.
+        Working from the spatial part alone avoids the temporal/spatial
+        cancellation at large radius. At y_spatial = 0 the factor asinh(a)/a
+        takes its limit 1 (see `_safe_arcsinhc`), so log_0 is defined there.
 
         Returns:
           (B, n) Euclidean coordinates in T_o H^n_k.
@@ -671,7 +673,7 @@ class LorentzManifold:
     # ----------------------------------------------------------------
 
     def _reproject_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Rescale x_0 so ⟨x, x⟩_M = 1/k exactly (modulo float).
+        """Recompute x_0 so that ⟨x, x⟩_M = 1/k holds again, up to float error.
 
         For a point that satisfies the constraint in exact arithmetic
         but drifts by ε from float operations, recovering exactness is
@@ -680,8 +682,8 @@ class LorentzManifold:
 
         which preserves the spatial part and the upper-sheet sign. This
         is the standard "renormalize after exp" trick (Nickel-Kiela
-        2018 §3) and follows the same drift-correction doctrine as
-        `SPDManifold.exp`'s symmetrization step.
+        2018 §3) and it does the same job as the symmetrization in
+        `SPDManifold.exp`.
 
         Implementation: `torch.cat` rather than in-place subscript
         assignment on a `clone`, so autograd treats the operation as

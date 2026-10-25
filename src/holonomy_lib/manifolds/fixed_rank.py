@@ -44,22 +44,31 @@ from holonomy_lib.algebra.linear import truncated_svd
 # Shapes: U (B, m, r), S (B, r), Vt (B, r, n).
 FixedRankPoint = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
-# Threshold above which exact SVD is competitive with randomized for
-# the retraction's top-r truncation. Empirical (see notes/benchmark_
-# baseline.md): at r/min(m,n) ≥ 0.25 the exact-SVD constant factor
-# wins back the gap, and accuracy / determinism matter more for
-# research workloads. Below this ratio, randomized SVD (HMT 2011) is
-# strictly faster — 37× at 1024×1024, r=32 in our CPU baseline.
-# Cataloged as `fixed_rank_randomized_threshold`.
+# Rank ratio r / min(m, n) where the retraction's top-r truncation stops
+# using randomized SVD. Empirical (see notes/benchmark_baseline.md): above
+# 0.25 the exact SVD's constant factor wins back the gap, and its accuracy
+# and determinism matter more for research workloads. At or below it,
+# randomized SVD (HMT 2011) is strictly faster in our CPU baseline, 37× at
+# 1024×1024 with r = 32. Cataloged in notes/magic_numbers.md under
+# `RETRACTION_RANDOMIZED_THRESHOLD`.
 RETRACTION_RANDOMIZED_THRESHOLD: float = 0.25
 
 
 class _TruncatedSVD(torch.autograd.Function):
-    """First derivative of retained SVD factors without discarded-zero poles.
+    """Top-r SVD factors of a matrix, with a first-derivative backward.
 
-    At repeated retained values, the derivative is defined for losses on
-    the reconstructed matrix, not arbitrary losses on nonunique factors.
-    A tie across the retained/discarded boundary is truly nondifferentiable.
+    Takes a (..., m, n) matrix and a rank r and returns (U, S, Vt) with
+    shapes (..., m, r), (..., r), (..., r, n). The forward runs a full thin
+    SVD and slices, so the backward can see the discarded singular values.
+
+    The backward is Townsend's SVD derivative restricted to the retained
+    factors. Pairs of discarded values carry no gradient, so a run of zero
+    discarded singular values (a rank-deficient input) does not create the
+    1/0 poles that differentiating the full SVD would. At repeated retained
+    values the derivative is defined for losses on the reconstructed matrix,
+    not arbitrary losses on nonunique factors. A tie across the
+    retained/discarded boundary is truly nondifferentiable and comes back
+    as inf or NaN.
 
     References:
       Townsend (2016), Differentiating the Singular Value Decomposition.
@@ -81,41 +90,56 @@ class _TruncatedSVD(torch.autograd.Function):
         u, singular, vt = ctx.saved_tensors
         rank = ctx.rank
         v = vt.mT
+        # Pad the incoming gradients out to the full thin SVD with zeros in
+        # the discarded slots, so Townsend's formulas can run on k = min(m, n)
+        # columns and the discarded directions simply contribute nothing.
         gu, gs, gv = (
             torch.zeros_like(u),
             torch.zeros_like(singular),
             torch.zeros_like(v),
         )
         gu[..., :rank], gs[..., :rank], gv[..., :rank] = grad_u, grad_s, grad_vt.mT
-        a, b = u.mT @ gu, vt @ gv
+        a, b = u.mT @ gu, vt @ gv  # Uᵀ Ū and Vᵀ V̄, both (..., k, k)
         left, right = singular.unsqueeze(-1), singular.unsqueeze(-2)
+        # Masks over (i, j) pairs: `active` when at least one of the two is
+        # retained, `both_kept` when both are.
         kept = torch.arange(singular.shape[-1], device=singular.device) < rank
         active = kept.unsqueeze(-1) | kept.unsqueeze(-2)
         both_kept = kept.unsqueeze(-1) & kept.unsqueeze(-2)
-        gap = right.square() - left.square()
+        gap = right.square() - left.square()  # s_j² − s_i², Townsend's 1/F
         # Every nonzero gap has Townsend's reciprocal, however small it is.
         # The reconstruction limit applies only to exact ties in this dtype.
         repeated = both_kept & (gap == 0)
         # Only discarded/discarded and repeated-retained pairs are removable.
         # A boundary tie remains a zero gap and signals a nonunique projection.
         safe_gap = torch.where(~active | repeated, torch.ones_like(gap), gap)
+        # Townsend's off-diagonal block, (F ∘ (a − aᵀ)) S + S (F ∘ (b − bᵀ)).
         core = ((a - a.mT) * right + left * (b - b.mT)) / safe_gap
+        # 1/s on retained values and 0 on discarded ones. The first where
+        # swaps discarded values for 1 before the reciprocal, so a zero
+        # discarded singular value never produces inf to be masked later.
         inverse = torch.where(kept, singular, torch.ones_like(singular)).reciprocal()
         inverse = torch.where(kept, inverse, torch.zeros_like(inverse))
+        # Exact ties among retained values replace the 0/0 entry by its finite
+        # limit, which is valid for losses on the reconstructed matrix.
         limit = 0.5 * (a * inverse.unsqueeze(-2) + b.mT * inverse.unsqueeze(-1))
         core = torch.where(repeated, limit, torch.where(active, core, 0.0))
+        # The diagonal of the core is the singular-value gradient itself.
         diagonal = torch.eye(
             singular.shape[-1], dtype=torch.bool, device=singular.device
         )
         core = torch.where(diagonal, torch.diag_embed(gs), core)
         grad = u @ core @ vt
+        # The last two terms carry the parts of Ū and V̄ that leave the
+        # spans of U and V, (I − U Uᵀ) Ū S⁻¹ Vᵀ and its V counterpart. They
+        # matter whenever m or n exceeds k.
         grad = grad + ((gu - u @ a) * inverse.unsqueeze(-2)) @ vt
         grad = grad + (u * inverse.unsqueeze(-2)) @ (gv - v @ b).mT
         return grad, None
 
 
 class FixedRankManifold:
-    """Fixed-rank (m, n) matrix manifold of rank r, GPU-native + batched-first.
+    """Fixed-rank (m, n) matrix manifold of rank r, on batched SVD factors.
 
     All operations expect a leading batch dim B and return tensors with a
     leading batch dim B. Single-point use: pass B = 1 (the manifold does not
@@ -144,15 +168,17 @@ class FixedRankManifold:
 
           retraction_mode: how to compute the SVD inside `retraction`.
             - "auto" (default): pick "randomized" when `r / min(m, n)` is
-              below `RETRACTION_RANDOMIZED_THRESHOLD`, else "exact".
-              Empirically a 5-37× speedup on tall-and-thin truncations.
+              at or below `RETRACTION_RANDOMIZED_THRESHOLD`, else "exact".
+              On the CPU baseline that is an 8-37× speedup for small-rank
+              truncations (notes/magic_numbers.md).
             - "exact": always full SVD then slice (Eckart-Young exact).
               Slower but deterministic; pick this when downstream code
               depends on bit-for-bit reproducibility.
-            - "randomized": always Halko-Martinsson-Tropp via
-              `torch.svd_lowrank`. Non-deterministic; the random
-              projection differs across calls; and approximate to
-              ~σ_{r+1}-precision.
+            - "randomized": always Halko-Martinsson-Tropp via the
+              library's `truncated_svd(mode="randomized")`, which
+              oversamples and runs subspace iterations. Non-deterministic,
+              since the random projection is drawn from the global RNG on
+              every call, and approximate to ~σ_{r+1}-precision.
         """
         if r <= 0 or r > min(m, n):
             raise ValueError(
@@ -193,8 +219,8 @@ class FixedRankManifold:
 
         Construction: U from QR of a Gaussian random matrix (Haar-distributed
         on the Stiefel manifold St(m, r) by the Mezzadri (2007) construction);
-        singular values uniform in (0, 1), sorted descending so the SVD-form
-        invariant (S decreasing) holds; V analogous.
+        singular values uniform in [0, 1) from `torch.rand`, sorted descending
+        so the SVD-form invariant (S decreasing) holds; V analogous.
 
         Note: the singular-value distribution here is uniform, NOT the
         Marchenko–Pastur or any "natural" prior on M_r; it's a convenience
@@ -218,6 +244,10 @@ class FixedRankManifold:
             device=generator.device if generator is not None else self.device,
             dtype=self.dtype,
         ).to(self.device)
+        # QR alone is not Haar: LAPACK's sign convention on diag(R) biases Q.
+        # Flipping each column of Q by the sign of the matching R diagonal
+        # entry is Mezzadri's fix and makes the draw uniform on the Stiefel
+        # manifold.
         U, R = torch.linalg.qr(A)
         U = U * torch.sign(R.diagonal(dim1=-2, dim2=-1)).unsqueeze(-2)
         C = torch.randn(
@@ -373,9 +403,9 @@ class FixedRankManifold:
         first-order retraction (Absil et al. 2008, §4.1).
 
         Performance: full SVD scales O(m·n·min(m, n)). For r ≪ min(m, n)
-        we switch to `torch.svd_lowrank` (Halko-Martinsson-Tropp) which
-        scales O(m·n·r); on our CPU baseline the speedup is 8-37× at
-        common ranks. The threshold is governed by
+        we switch to the library's randomized `truncated_svd`
+        (Halko-Martinsson-Tropp), which scales O(m·n·r); on our CPU
+        baseline the speedup is 8-37× at common ranks. The threshold is governed by
         `retraction_mode` (default "auto"); see `__init__` docstring.
 
         Differentiated calls use exact SVD, regardless of mode. The backward
@@ -398,6 +428,9 @@ class FixedRankManifold:
         """
         M_plus = self.dense(point) + tangent  # (B, m, n)
         r = self.r
+        # Anything autograd will differentiate goes through the exact SVD
+        # with the custom backward. The randomized path has no derivative of
+        # its own and the plain svd backward has poles at repeated values.
         if M_plus.requires_grad and torch.is_grad_enabled():
             return _TruncatedSVD.apply(M_plus, r)
         mode = self.retraction_mode
@@ -406,11 +439,11 @@ class FixedRankManifold:
             mode = "randomized" if r <= RETRACTION_RANDOMIZED_THRESHOLD * min_dim \
                                  else "exact"
         if mode == "randomized":
-            # Use our `truncated_svd` (HMT with oversample=5, n_iter=2)
-            # rather than `torch.svd_lowrank` directly. svd_lowrank with
-            # q=r has NO oversampling and produces ~40% relative error
-            # on retraction inputs — unacceptable for an optimizer step.
-            # Our randomized path oversamples per Halko-Martinsson-Tropp.
+            # Use our `truncated_svd` (HMT with oversample=5, n_iter=2 by
+            # its cataloged defaults) rather than `torch.svd_lowrank`
+            # directly. svd_lowrank with q=r has no oversampling and gives
+            # ~40% relative error on retraction inputs, which is too much
+            # for an optimizer step.
             return truncated_svd(M_plus, r=r, mode="randomized")
         U_full, S_full, Vt_full = torch.linalg.svd(M_plus, full_matrices=False)
         U_r = U_full[..., :, :r].contiguous()
