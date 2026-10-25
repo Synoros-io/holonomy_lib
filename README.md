@@ -1,137 +1,88 @@
 # holonomy_lib
 
-Batched PyTorch primitives for Riemannian geometry, spectral graph theory,
-discrete curvature, topology, and tensor decompositions. Version **0.8.0**.
-Dense tensor operations take a leading batch dimension and use the device and
-dtype of their inputs; sparse and sequential exceptions are described below.
+Geometry, graph and topology primitives for PyTorch. Most functions take a batch
+of inputs (a leading batch dimension) and run on the device and dtype you pass in.
 
 ## Install
 
-Requires Python 3.12 or later.
+Python 3.12 or later. Install PyTorch for your hardware first, using the
+[PyTorch selector](https://pytorch.org/get-started/locally/), then:
 
 ```bash
-pip install holonomy-lib
+pip install git+https://github.com/Synoros-io/holonomy_lib
 ```
 
-From a source checkout:
+## Example
 
-```bash
-uv sync --extra dev
-```
-
-PyTorch determines hardware support: choose its build with the
-[installation selector](https://pytorch.org/get-started/locally/).
-ROCm also uses the `cuda` device string.
-
-## Example: two graphs in one batch
-
-Compare a three-node path with a triangle, treating each edge as a unit
-conductance. The triangle provides a second route between nodes 0 and 2,
-so its effective resistance is lower.
+Effective resistance between the ends of a three-node path and of a triangle,
+computed as one batch:
 
 ```python
 import torch
+from holonomy_lib.spectral import effective_resistance
 
-from holonomy_lib.spectral import effective_resistance, laplacian
-
-# CUDA covers both NVIDIA and ROCm builds; otherwise use the CPU.
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cuda" if torch.cuda.is_available() else "cpu"  # ROCm builds also use "cuda"
 adjacency = torch.tensor([
-    [[0, 1, 0], [1, 0, 1], [0, 1, 0]],  # path
+    [[0, 1, 0], [1, 0, 1], [0, 1, 0]],  # path 0-1-2
     [[0, 1, 1], [1, 0, 1], [1, 1, 0]],  # triangle
-], device=device, dtype=torch.float64)
+], dtype=torch.float64, device=device)
 
-L = laplacian.combinatorial(adjacency)
 R = effective_resistance(adjacency)
-
-# Only presentation moves the results to the CPU.
-print("Batch shape:", tuple(L.shape))
-# Batch shape: (2, 3, 3)
-print("Degrees:", L.diagonal(dim1=-2, dim2=-1).cpu().tolist())
-# Degrees: [[1.0, 2.0, 1.0], [2.0, 2.0, 2.0]]
-print("Resistance 0 to 2:", [round(x, 6) for x in R[:, 0, 2].cpu().tolist()])
-# Resistance 0 to 2: [2.0, 0.666667]
-print("Laplacian row sums:", L.sum(dim=-1).cpu().tolist())
-# Laplacian row sums: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+print(R.shape)        # torch.Size([2, 3, 3])
+print(R[:, 0, 2])     # tensor([2.0000, 0.6667], dtype=torch.float64)
 ```
 
-## What's included
+## What's in it
 
-Each subpackage lives under `holonomy_lib`. See [CONTENTS.md](CONTENTS.md)
-for signatures, method lists, and mathematical citations.
+[CONTENTS.md](CONTENTS.md) lists every function with its signature and the
+paper it implements.
 
-| Subpackage | Primitives |
+| Subpackage | Contents |
 |---|---|
-| `manifolds` | Fixed-rank, SPD, Lorentz, Lorentzian, stereographic and product manifolds; model-space volumes and areas. |
-| `optimization` | Riemannian SGD with ambient-to-Riemannian gradient conversion. |
-| `hyperbolic` | Fréchet means, manifold-aware inner products, and hyperbolic heat kernels. |
-| `lie` | SO(3) exponential/logarithm maps, rotations, and real spherical harmonics. |
-| `info_geometry` | Bregman and KL divergences, Fisher information, and natural gradients. |
-| `tensor_calculus` | Mode unfolding, mode products, and HOSVD. |
-| `algebra` | Truncated SVD, dense/sparse eigensolvers, conjugate gradient, and LSQR. |
+| `manifolds` | Fixed-rank, SPD, Lorentz, Lorentzian, stereographic and product manifolds; model-space volumes. |
+| `optimization` | Riemannian SGD. |
+| `hyperbolic` | Fréchet means, manifold-aware inner products, hyperbolic heat kernels. |
+| `lie` | SO(3) exponential and logarithm, rotations, real spherical harmonics. |
+| `info_geometry` | Bregman and KL divergences, Fisher information, natural gradients. |
+| `tensor_calculus` | Mode unfolding, mode products, HOSVD. |
+| `algebra` | Truncated SVD, dense and sparse eigensolvers, conjugate gradient, LSQR. |
 | `convex` | Regularized least squares. |
-| `spectral` | Graph Laplacians, embeddings, heat diffusion, resistance, and spectral dimension. |
-| `discrete_geometry` | Ollivier and Forman curvature; discrete Ricci flow and surgery. |
-| `sheaf` | Graph sheaves, coboundaries, Laplacians, energies, and bottom spectra. |
-| `simplicial` | Dense/sparse complexes, boundary operators, and Vietoris-Rips construction. |
-| `topology` | Hodge Laplacians, Betti numbers, and persistent homology. |
+| `spectral` | Graph Laplacians, embeddings, heat diffusion, effective resistance, spectral dimension. |
+| `discrete_geometry` | Ollivier and Forman curvature, Ricci flow with surgery. |
+| `sheaf` | Graph sheaves, coboundaries, sheaf Laplacians and their spectra. |
+| `simplicial` | Dense and sparse simplicial complexes, boundary operators, Vietoris-Rips. |
+| `topology` | Hodge Laplacians, Betti numbers, persistent homology. |
 
 ## Explorer
 
-Run `holonomy-explorer` or `python -m holonomy_explorer` to open a local
-page driven by the library. Use `--device`, `--dtype`, and `--port` to
-choose execution settings, or `--no-browser` to print the URL only.
+`holonomy-explorer` opens a local page that runs the library live: curvature
+and diffusion on graphs, geodesics as curvature passes through zero,
+persistent homology of point clouds, and batch-size timings on your hardware.
+Options: `--device`, `--dtype`, `--port`, `--no-browser`.
 
-- **Graphs:** inspect spectral embeddings, heat diffusion, resistance, and curvature.
-- **Curvature:** explore spherical, Euclidean, and hyperbolic charts by varying κ.
-- **Topology:** inspect a point cloud's Vietoris-Rips filtration and persistence intervals.
-- **Batching:** measure selected operations at different batch sizes on your hardware.
+![The explorer's graph view](docs/explorer.png)
 
-![Local explorer showing graph geometry and numerical results](docs/explorer.png)
+## Experimental
 
-## Experimental (in progress)
+`holonomy_lib.experimental` holds two unfinished pieces that are not part of
+the stable API:
 
-`holonomy_lib.experimental` contains two unfinished constructions:
+- `hyperbolic_laplacian_eigenmaps`: nothing in its objective keeps nodes apart,
+  so an embedding can collapse to a point.
+- `HeterogeneousKappaManifold`: a curvature per point. Its `dissimilarity` is
+  not a metric.
 
-- `hyperbolic_laplacian_eigenmaps` moves graph nodes on a manifold using an
-  attraction-only objective. Coincident nodes minimize that objective, so
-  embeddings can collapse; it is not a constrained Laplacian eigenmap method.
-- `HeterogeneousKappaManifold` gives each point its own curvature and combines
-  endpoint curvatures for pairwise comparisons. Its `dissimilarity` is not a
-  metric: different points can compare as zero, and triangle inequalities fail.
+## Limits
 
-## Numerical notes and known limits
-
-- Use `float64` for accuracy-critical work. Supported dtypes depend on the
-  underlying PyTorch operation; low precision can lose geometric information.
-- Dense APIs use a leading batch dimension. Sparse eigensolvers, sparse
-  complexes, and sheaf structures represent one instance; their shapes are
-  listed in [CONTENTS.md](CONTENTS.md).
-- Persistent homology accepts batches, but Z2 boundary reduction and H0
-  union-find run sequentially per batch member and use host-side metadata.
-  Sparse complexes have sparse boundaries; Hodge Laplacians currently become dense.
-- The default sparse smallest-algebraic solver uses SciPy on CPU and
-  `torch.lobpcg` on other devices; largest-algebraic Lanczos uses PyTorch.
-  Full/near-full requests can use dense `eigh`. SciPy computes in CPU float64
-  before restoring output placement and dtype. Sparse eigensolvers are not
-  differentiable.
-- Ollivier curvature solves entropy-regularized transport on neighborhood
-  supports and warns when either marginal has not converged. At the defaults
-  the karate club is within 5.6e-4 of exact transport; a result without a
-  warning still carries entropic bias that grows with `reg`. Adjacency values
-  serve both as edge lengths and as random-walk weights, so interpret weighted
-  results with care. Augmented Forman curvature accepts binary adjacency only.
-- Ricci flow with surgery separates clear community structure such as a ring
-  of cliques. It does not recover the two factions of the karate club at any
-  setting we swept.
-- Gradients through `cg` are unreliable when it converges in very few
-  iterations (an identity-matrix gradcheck fails). This predates 0.8.0 and is open.
+- Use `float64` when accuracy matters.
+- Sparse eigensolvers, sparse simplicial complexes and sheaves handle one
+  instance at a time. Sparse eigensolvers are not differentiable.
+- Persistent homology runs its reduction one batch member at a time on the CPU.
+- Ollivier curvature uses entropy-regularized transport, so it is close to the
+  exact value rather than equal to it, and it warns if the solver did not
+  converge. Edge weights act as both lengths and random-walk weights.
+- Gradients through `cg` can be wrong when it converges in very few iterations.
 - Effective resistance and commute time are `inf` between disconnected components.
-  Diffusion maps warn on disconnected graphs and require nonnegative integer time.
-
-The least-squares default dispatch comes from a dated measurement,
-[2026-07-08 solvers](notes/benchmark_2026-07-08_solvers.md). It describes
-that version and workload, not a current performance guarantee.
 
 ## Development
 
@@ -143,8 +94,8 @@ python -m mypy src/
 python tools/audit.py src/holonomy_lib --strict
 ```
 
-Run these commands in the synced environment. See [CONVENTIONS.md](CONVENTIONS.md)
-for coding and numerical standards, and [CHANGELOG.md](CHANGELOG.md) for release changes.
+[CONVENTIONS.md](CONVENTIONS.md) has the coding and numerical rules;
+[CHANGELOG.md](CHANGELOG.md) has the release history.
 
 ## Citation
 
@@ -158,11 +109,11 @@ for coding and numerical standards, and [CHANGELOG.md](CHANGELOG.md) for release
 }
 ```
 
-Please also cite the original sources listed in the functions' docstrings.
+Please also cite the papers named in the docstrings of the functions you use.
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE.md): free to use and modify for permitted purposes;
-Synoros reserves competing commercial use. Each release becomes Apache-2.0
-two years after it ships. Releases up to 0.7.0 remain AGPL-3.0-or-later.
-For other licensing, contact [contact@synoros.io](mailto:contact@synoros.io).
+[FSL-1.1-ALv2](LICENSE.md). You can use and modify it freely; competing
+commercial use is reserved to Synoros. Each release becomes Apache-2.0 two
+years after it ships. Releases up to 0.7.0 remain AGPL-3.0-or-later. For other
+terms, contact [contact@synoros.io](mailto:contact@synoros.io).
