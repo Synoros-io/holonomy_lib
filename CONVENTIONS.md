@@ -2,7 +2,7 @@
 
 These are the binding rules every primitive in this library follows.
 They're enforced by:
-- the audit tool (`python -m holonomy_lib.audit src/ --strict`) for the
+- the audit tool (`python tools/audit.py src/holonomy_lib --strict`) for the
   numerical-constant rules,
 - the test suite for the API-shape rules,
 - and code review for the rest.
@@ -29,12 +29,16 @@ by the math dimensions:
 
 Single-point use is `B = 1`. Outputs preserve the batch shape:
 `(B, …)` in, `(B, …)` out. **All primitives must work for
-`B ∈ {0, 1, > 1}`**; there is a test for each.
+`B ∈ {0, 1, > 1}`**. Check numerical correspondence with distinct batch
+members, not just shapes. Single-instance sparse APIs and sheaf structures
+must state their exceptions explicitly; do not advertise them as batched.
 
 ### 1.2 Device and dtype propagation
 
 Outputs land on the same device and (compatible) dtype as inputs. We
-do not silently `.cpu()` or upcast. The constructors of class-based
+do not silently `.cpu()` or upcast. Document backend boundaries: sparse
+eigensolvers may compute in SciPy on CPU in float64 and restore output
+device/dtype; persistence reduction uses host metadata. The constructors of class-based
 primitives (`FixedRankManifold`, `SPDManifold`) accept `device` and
 `dtype`; functional primitives infer from their tensor arguments.
 
@@ -99,13 +103,13 @@ handles asymmetric input via the phase factor.
   via `torch.where(d > 0, …, 0)`. See `Cheng-Wu (2024)` for the
   formal treatment.
 
-- **Disconnected components**: each primitive documents its behavior.
-  Ollivier curvature inflates the shortest-path distance to a large
-  finite value (`DISCONNECTED_DISTANCE_MULTIPLIER`) so Sinkhorn stays
-  finite; diffusion-map emits a `UserWarning` because the embedding
-  contains degenerate constant-on-component modes; effective
-  resistance returns 0 between components (which the docstring
-  flags as "not physically meaningful, mask by component").
+- **Disconnected components**: effective resistance and commute time are
+  `inf` between components, with zero diagonals even at isolated nodes.
+  Commute time uses the volume of the component containing the pair.
+  Ollivier curvature masks cross-component pairs to `0`; this is an output
+  convention, not a transport distance between those components.
+  Diffusion maps emit a `UserWarning` because the embedding contains
+  degenerate constant-on-component modes.
 
 ---
 
@@ -115,11 +119,13 @@ handles asymmetric input via the phase factor.
 
 The library-wide `numerical_floor_convention` is `1e-9`. It's the
 floor used in `1 / max(x, 1e-9)`-style guards. It's listed in
-`audit.ALLOWED_LITERALS` so every primitive can reuse it.
+`tools/audit.py:ALLOWED_LITERALS` so every primitive can reuse it.
 
-Rationale: `1e-9` is comfortably below float32 eps (`~1.19e-7`) for
-safety across dtypes, and well above `torch.finfo(float64).tiny`
-(`~2.22e-308`) so we never amplify true zero into a huge reciprocal.
+This is a historical convention, not a universal stability bound. Flooring
+a nonnegative denominator at `1e-9` bounds its reciprocal by `1e9`; that
+can still be a large amplification. Suitability depends on units, input
+scale, and dtype. Being below float32 epsilon does not establish safety.
+Use a dtype- and problem-aware threshold when the computation requires one.
 
 ### 3.2 Eigenvalue clamping
 
@@ -137,23 +143,30 @@ factorize. For chained ops at the same `S`, expose a
 `whitening=(S_sqrt, S_inv_sqrt)` kwarg so callers can precompute
 once and pass through.
 
-### 3.4 Pseudoinverse threshold
+### 3.4 Rank and pseudoinverse tolerance
 
-When computing the Moore-Penrose pseudoinverse of a symmetric matrix
-via eigh, the threshold for "is this eigenvalue effectively zero?"
-is `max_abs · 1e-9`. Compare against unclamped eigenvalues for the
-where-branch; clamp the safe value for the reciprocal:
+Do not apply one rank cutoff to a whole padded batch or a whole
+multi-component matrix. A single cutoff is blind to the scale of each
+component and changes with the padding next to a batch member. Prefer
+constructions that need no global cutoff:
 
-```python
-safe_eig = eigvals.clamp(min=torch.finfo(dtype).tiny)
-inv_eig = torch.where(eigvals > max_abs * 1e-9,
-                       torch.reciprocal(safe_eig),
-                       torch.zeros_like(eigvals))
-```
+- Integer invariants from exact combinatorial matrices. Betti numbers use
+  ranks of the 0/±1 boundary matrices in float64, per batch member, with a
+  tolerance set by that member's own sizes.
+- Grounded, per-component factorizations instead of a pseudoinverse.
+  Effective resistance scales each component by its maximum weighted degree,
+  adds the projector onto its constants, and uses Cholesky.
+- Eigenvalue classification against the accuracy the eigensolver achieved.
+  Sheaf kernel filtering compares each mode with its residual bound and a
+  matrix-scale tolerance.
 
-This pattern handles isolated nodes, disconnected components, and
-the all-zeros graph correctly (all eigenvalues exactly zero ⇒
-pseudoinverse is zero).
+Where a rank or pseudoinverse is unavoidable, use
+`torch.linalg.matrix_rank(A, hermitian=True)` or
+`torch.linalg.pinv(A, hermitian=True)` per member, with their dtype- and
+size-aware defaults. A fixed `1e-9` relative cutoff can mistake float32
+roundoff for a nonzero eigenvalue. Do not use the numerical floor in §3.1
+as a rank threshold. If an API exposes an explicit tolerance, document its
+units and meaning.
 
 ---
 
@@ -174,17 +187,22 @@ appear in inner loops without a clear reason. Specifically:
 
 ### 4.2 Pre-allocate hot-loop tensors
 
-Don't rebuild tensors in tight loops. The Lanczos `V` matrix is
-pre-allocated as `torch.empty(*batch, n, n_iter + 1)` and written
-in-place per iteration, never reassembled with `torch.stack`.
+Preallocate working storage when it is safe for autograd. Never write in
+place into a tensor, or a view of one, that an operation has saved for
+backward. A later basis-column write can invalidate an earlier matrix
+product's gradient even when the forward result is correct. Use independent
+iteration tensors and assemble them with `torch.stack` when backward needs
+the earlier values. Verify the actual gradient path before optimizing storage.
 
 ### 4.3 Tile when memory is the bottleneck
 
-The `(B, n², n)` Sinkhorn pair structure was the canonical example:
-materializing it explodes RAM at modest `n`. The fix is
-**tile-over-pairs** with a configurable `tile_size` parameter
-(default `SINKHORN_TILE_DEFAULT = 256`). Future memory-bound
-primitives should follow the same pattern.
+Ollivier transport is the canonical example. Solving every pair over
+full length-`n` measures needs `(B, n², n)` storage and `O(B n⁴)` work.
+Each lazy-walk measure lives on one node's neighborhood, so the solver
+gathers those supports (width: largest degree plus one) and tiles over
+pairs with a configurable `tile_size` (default
+`SINKHORN_TILE_DEFAULT = 256`). Future memory-bound primitives should
+follow the same pattern: shrink the problem to its support, then tile.
 
 ### 4.4 Algorithm switching
 
@@ -207,9 +225,10 @@ The pattern is:
 Every numerical literal in source code must fall into one of:
 
 1. **Derived from inputs**: `1/N`, `1/sqrt(d)`, `n(n+1)/2`.
-   No catalog entry needed; the audit treats these as ✅.
-2. **Universal invariant**: `0, 1, -1, 0.5, 2, 1024, 1000, π, e,
-   1e-9`. Listed in `audit.ALLOWED_LITERALS`. No catalog entry
+   No catalog entry is needed for the derivation itself; any unexplained
+   literals within it still need review.
+2. **Allowlisted mathematical identities and conventions**: `0, 1, -1, 0.5, 2, 1024, 1000, π, e,
+   1e-9`. Listed in `tools/audit.py:ALLOWED_LITERALS`. No catalog entry
    needed.
 3. **Experimentally tuned**: `SINKHORN_TILE_DEFAULT = 256`,
    `MAGNETIC_CHARGE_DEFAULT = 0.25`, etc. **Catalog entry required**
@@ -220,7 +239,16 @@ Every numerical literal in source code must fall into one of:
      distribution changes substantially),
    - the file path where it's used.
 
-The audit tool fails the build on any uncataloged literal.
+Run `python tools/audit.py src/holonomy_lib --strict`. The catalog covers the
+library's mathematical constants; the explorer's interface constants (ports,
+size caps, layout) are named with a comment in `src/holonomy_explorer` and are
+not cataloged. The audit scans Python AST numeric
+literals, accepts allowlisted values and cataloged assignment names, and
+fails on undocumented literals or missing, unreadable, or unparseable input.
+It is a heuristic, not a proof: it cannot establish mathematical derivations,
+check the truth of a citation or a catalog entry, or certify numerical
+correctness. Allowlisted values and excluded files can hide inappropriate
+constants; review those uses as well.
 
 ### 5.2 Catalog entries
 
@@ -232,8 +260,10 @@ re-derive; point at the docstring and the paper.
 
 ## 6. Citations
 
-Every public function has a `References:` section in its docstring
-pointing to the paper or textbook that defines its math. Format:
+Every public mathematical function has a `References:` section in its docstring
+pointing to the paper or textbook that defines its math. Properties and plain
+constructors are exempt; a constructor that implements a mathematical
+algorithm still cites that algorithm. Format:
 
 ```
 References:
@@ -254,73 +284,47 @@ original research (write it down first, then implement).
 
 ## 7. Provenance
 
-Public, top-level primitives are decorated with `@with_provenance`:
+Provenance was removed in 0.8.0.
+The removal rationale and requirements for any return are in `archive/README.md`.
 
-```python
-@with_provenance("holonomy_lib.module.op_name", op_version="0.1")
-def op_name(x: torch.Tensor, k: int = 3) -> torch.Tensor:
-    ...
-```
+### 7.1 Op IDs (removed in 0.8.0)
 
-### 7.1 Op IDs
+### 7.2 Op versions (removed in 0.8.0)
 
-Format: `holonomy_lib.module.submodule.op_name`. Match the import
-path. Don't change without bumping `op_version`.
-
-### 7.2 Op versions
-
-Start at `"0.1"`. Bump when the **semantics** of the function
-change in a way that would alter the output for the same inputs.
-Bump when:
-
-- Math changes (different algorithm, different formula).
-- Default parameter values change.
-- A new parameter is added (signature changes are output-changing
-  for callers who relied on the defaults).
-
-Don't bump for:
-
-- Documentation-only changes.
-- Performance-only changes that don't alter output.
-- Renaming an internal helper.
-
-### 7.3 No `*args` / `**kwargs`
-
-`@with_provenance` doesn't support variadic signatures (every input
-needs a stable name for the hex computation). The decorator raises
-at decoration time if you try.
+### 7.3 No `*args` / `**kwargs` (removed in 0.8.0)
 
 ---
 
 ## 8. Testing
 
-### 8.1 Three layers
+### 8.1 Correctness guarantees
 
-Every primitive has:
+Tests guard results that a user must be able to rely on. Choose a closed
+form, independently computed reference value, cross-library comparison, or
+mathematical invariant that could expose an incorrect implementation.
+Check gradients where differentiation is supported, and compare distinct
+batch members with their singleton computations. Cover empty batches
+(`B = 0`) and device/dtype behavior where those are part of the contract.
 
-1. **Unit tests**: shape correctness across `B ∈ {0, 1, several}`.
-   Validation tests (rejects bad input).
-2. **Property tests**: mathematical invariants (a projection is
-   idempotent; a retraction lands on the manifold; a divergence
-   is non-negative).
-3. **Comparison tests**: agreement with an established library
-   where one exists (`pymanopt`, `geoopt`, `tensorly`,
-   `GraphRicciCurvature`). Tests `pytest.importorskip` the
-   comparison library so the suite runs without it installed.
+Do not add shape-only checks, duplicated cases, or tautologies such as
+comparing a function with itself. Shape assertions belong beside a numerical
+assertion when shape matters. Optional cross-library checks may use
+`pytest.importorskip` when the reference library is unavailable.
 
 ### 8.2 Tolerances
 
-Use `torch.testing.assert_close` with explicit `atol` and `rtol`.
-Default `atol=1e-12, rtol=0` for exact closed-form checks (e.g.
-K_3 Ollivier curvature). Loosen only with a comment explaining
-why (e.g. Sinkhorn convergence plateau).
+Use `torch.testing.assert_close` with explicit `atol` and `rtol` justified
+by the reference, dtype, scale, and approximation error. Closed-form float64
+checks can often use `atol=1e-12, rtol=0`; this is not a float32 or iterative
+solver default. A loose tolerance must not hide failure to converge.
 
 ### 8.3 Regression tests
 
-When you fix a bug, add a regression test in the same commit. The
-test should fail against the buggy code and pass against the fix.
-A new test file isn't needed; add to the existing module's test
-file under an appropriate class.
+A new test needs a stated reason: name the correctness guarantee and how the
+assertion can fail. For a reproduced bug, repair or extend the existing test
+for that function with the corrected reference value and confirm that it
+rejects the buggy behavior. Prefer one meaningful case over several
+redundant ones. Do not add test files or coverage targets by default.
 
 ---
 
@@ -334,7 +338,7 @@ Every public function has a docstring with:
 - Math statement (formula, LaTeX-style ascii is fine).
 - `Args:` section with shape conventions.
 - `Returns:` section with shape conventions.
-- `References:` section (see §6).
+- `References:` section for mathematical functions (see §6 for exemptions).
 - Optional `Notes:` for performance, convergence caveats,
   scale-of-validity, etc.
 
@@ -371,15 +375,15 @@ Format: `module: short summary` (e.g. `spectral: drop self-loops at
 entry to graph primitives`). The body explains _what changed and
 why_, not _what the code does_; that's the docstring's job.
 
-End every commit with the `Co-Authored-By` trailer when the work
-was done in pair with the Claude Code agent:
-
-```
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
+Commits carry no co-author or tool-attribution trailers.
 
 ### 10.4 No internal-only files in the public tree
 
-Files like `CLAUDE.md` (Claude Code's operating constraints) and
-`HANDOFF.md` (build-plan from the seeding session) belong on local
-disk only. They're listed in `.gitignore`.
+`AGENTS.md` is the canonical agent instruction file and **is** tracked:
+it carries this library's operating constraints and points here for the
+coding standard. `CLAUDE.md` is a symlink to it.
+
+Working-state files stay on local disk only, because they can name
+private sibling repos: `CLAUDE.md` (the symlink), `direction.md`
+(current goal), `ledger.md` (session log), and `archive/` (superseded
+docs plus their tombstones). All are listed in `.gitignore`.

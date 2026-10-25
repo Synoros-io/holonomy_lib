@@ -1,30 +1,30 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
-"""holonomy_lib.lie — Lie group primitives for SO(3) and the 2-sphere.
+"""holonomy_lib.lie : Lie group primitives for SO(3) and the 2-sphere.
 
 The Lie group `SO(3)` is the group of orientation-preserving
 rotations of R³; its Lie algebra `so(3)` is the 3-dim space of
 skew-symmetric matrices (equivalently, angular-velocity vectors).
 This module ships the standard exp/log/random/compose primitives
-plus real spherical harmonics, which are the natural basis for any
-SO(3)-equivariant function on the unit sphere.
+plus real spherical harmonics, the standard basis for functions on the
+unit sphere that rotate in a known way under SO(3).
 
 Currently exposed:
-  so3.axis_angle_to_matrix(axis, angle)  — Rodrigues formula.
-  so3.matrix_to_axis_angle(R)            — inverse log map.
-  so3.so3_exp(omega)                     — matrix exp on so(3).
-  so3.so3_log(R)                         — matrix log on SO(3).
-  so3.random_so3(batch_size, generator)  — Haar-uniform via
+  so3.axis_angle_to_matrix(axis, angle)  : Rodrigues formula.
+  so3.matrix_to_axis_angle(R)            : inverse log map.
+  so3.so3_exp(omega)                     : matrix exp on so(3).
+  so3.so3_log(R)                         : matrix log on SO(3).
+  so3.random_so3(batch_size, generator)  : Haar-uniform via
                                             quaternion sampling.
-  so3.compose(R1, R2)                    — group product (matmul).
+  so3.compose(R1, R2)                    : group product (matmul).
   real_spherical_harmonics(directions, l_max)
-                                          — closed-form Y_lm for
+                                          : closed-form Y_lm for
                                             l ≤ 4 evaluated at
-                                            (B, 3) unit direction
-                                            vectors.
+                                            (B, 3) direction vectors
+                                            (normalized internally).
 
-Planned (v0.2 follow-ups):
+Planned, not implemented yet:
   Wigner-D matrices (real basis) for higher-l rotation actions on
     spherical-harmonic features.
   Clebsch-Gordan coefficients for SO(3) tensor products (l₁ ⊗ l₂ → L).

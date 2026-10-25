@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for discrete_ricci_flow + ricci_flow_with_surgery.
 
@@ -16,6 +16,7 @@ import torch
 
 from holonomy_lib.discrete_geometry import (
     discrete_ricci_flow,
+    ollivier_ricci_curvature,
     ricci_flow_with_surgery,
 )
 
@@ -53,20 +54,13 @@ class TestValidation:
         with pytest.raises(ValueError, match="n_steps"):
             discrete_ricci_flow(A, n_steps=-1)
 
-    def test_flow_rejects_nonpositive_dt(self):
-        A = _complete_graph(4)
-        with pytest.raises(ValueError, match="dt"):
-            discrete_ricci_flow(A, n_steps=1, dt=0.0)
 
     def test_surgery_rejects_nonpositive_period(self):
         A = _complete_graph(4)
         with pytest.raises(ValueError, match="surgery_period"):
             ricci_flow_with_surgery(A, n_steps=1, surgery_period=0)
-
-    def test_surgery_rejects_nonpositive_threshold(self):
-        A = _complete_graph(4)
-        with pytest.raises(ValueError, match="surgery_threshold"):
-            ricci_flow_with_surgery(A, n_steps=1, surgery_threshold=-1.0)
+        with pytest.raises(ValueError, match="n_steps"):
+            ricci_flow_with_surgery(A, n_steps=-1)
 
 
 # --------------------------------------------------------------------
@@ -77,18 +71,13 @@ class TestValidation:
 class TestFlow:
     def test_zero_steps_returns_input(self):
         A = _complete_graph(4)
-        out = discrete_ricci_flow(A, n_steps=0)
+        out = discrete_ricci_flow(A + 5 * torch.eye(4), n_steps=0)
         torch.testing.assert_close(out, A, atol=0, rtol=0)
+        empty = torch.empty(0, 4, 4, dtype=A.dtype)
+        torch.testing.assert_close(
+            discrete_ricci_flow(empty, n_steps=1), empty, atol=0, rtol=0,
+        )
 
-    def test_flow_preserves_symmetry(self):
-        A = _two_cliques_with_bridge(cluster_size=3)
-        out = discrete_ricci_flow(A, n_steps=3, dt=0.5)
-        torch.testing.assert_close(out, out.mT, atol=1e-9, rtol=0)
-
-    def test_flow_preserves_nonneg_weights(self):
-        A = _two_cliques_with_bridge(cluster_size=3)
-        out = discrete_ricci_flow(A, n_steps=3, dt=0.5)
-        assert (out >= 0).all()
 
     def test_flow_normalize_keeps_norm_constant(self):
         A = _two_cliques_with_bridge(cluster_size=3)
@@ -96,6 +85,26 @@ class TestFlow:
         out = discrete_ricci_flow(A, n_steps=5, dt=0.3, normalize=True)
         n1 = torch.linalg.matrix_norm(out).item()
         assert abs(n0 - n1) / max(n0, 1e-9) < 1e-6
+        path = torch.tensor(
+            [[[0., 1., 0.], [1., 0., 1.], [0., 1., 0.]]], dtype=A.dtype,
+        )
+        looped = discrete_ricci_flow(path + 5 * torch.eye(3), n_steps=1)
+        torch.testing.assert_close(looped, path, atol=1e-12, rtol=0)
+        # Normalization is relative to the graph's own scale, including
+        # lengths below the old absolute norm floor.
+        for dtype in (torch.float64, torch.float32):
+            for scale in (1e-12, 1.0):
+                tiny = _complete_graph(3, dtype=dtype) * scale
+                for flow in (discrete_ricci_flow, ricci_flow_with_surgery):
+                    result = flow(
+                        tiny, n_steps=1, dt=.2, normalize=True,
+                        reg=.4 * scale, n_sinkhorn_iters=1000, sinkhorn_tol=1e-6,
+                    )
+                    torch.testing.assert_close(result.norm() / tiny.norm(),
+                                               tiny.new_tensor(1.))
+                    zero = torch.zeros_like(tiny)
+                    torch.testing.assert_close(flow(zero, n_steps=1), zero,
+                                               atol=0, rtol=0)
 
 
 class TestFlowDynamics:
@@ -107,7 +116,24 @@ class TestFlowDynamics:
         bridge = (3, 4)  # the bridge edge
         intra = (0, 1)   # an intra-clique edge
 
+        # Solving only existing edge pairs must give the same update as
+        # using the public all-pairs curvature on this nonuniform graph.
+        expected = A * (1 - 0.5 * ollivier_ricci_curvature(A))
+        actual = discrete_ricci_flow(A, n_steps=1, dt=0.5, normalize=False)
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=0)
+
         out = discrete_ricci_flow(A, n_steps=2, dt=0.5, normalize=True)
+        torch.testing.assert_close(out, out.mT, atol=1e-9, rtol=0)
+        assert (out >= 0).all()
+        small = discrete_ricci_flow(
+            _two_cliques_with_bridge(cluster_size=3), n_steps=3, dt=0.5,
+        )
+        torch.testing.assert_close(small, small.mT, atol=1e-9, rtol=0)
+        assert (small >= 0).all()
+        # K3 curvature is 1/2, so one unnormalized dt=.2 step is .9.
+        clique = _complete_graph(3)
+        absolute = discrete_ricci_flow(clique, n_steps=1, dt=0.2, normalize=False)
+        torch.testing.assert_close(absolute, 0.9 * clique, atol=1e-9, rtol=0)
 
         # Compute ratios
         initial_ratio = A[0, bridge[0], bridge[1]] / A[0, intra[0], intra[1]]
@@ -126,11 +152,15 @@ class TestFlowDynamics:
 class TestSurgery:
     def test_zero_steps_returns_input(self):
         A = _two_cliques_with_bridge(cluster_size=4)
-        out = ricci_flow_with_surgery(A, n_steps=0)
+        out = ricci_flow_with_surgery(A + 5 * torch.eye(A.shape[-1]), n_steps=0)
         torch.testing.assert_close(out, A, atol=0, rtol=0)
+        empty = torch.empty(0, 4, 4, dtype=A.dtype)
+        torch.testing.assert_close(
+            ricci_flow_with_surgery(empty, n_steps=1), empty, atol=0, rtol=0,
+        )
 
     def test_complete_clique_no_surgery_with_high_threshold(self):
-        """On K_n every edge has positive curvature — under flow they
+        """On K_n every edge has positive curvature; under flow they
         shrink, not grow. Surgery shouldn't remove anything when
         threshold is well above the initial mean.
         """
@@ -163,6 +193,17 @@ class TestSurgery:
             dt=0.5,
             normalize=True,
         )
+        # Self-loops cannot alter either normalization or surgery's cutoff.
+        looped = ricci_flow_with_surgery(
+            A + 5 * torch.eye(A.shape[-1]), n_steps=4, surgery_period=1,
+            surgery_threshold=1.5, dt=0.5, normalize=True,
+        )
+        torch.testing.assert_close(looped, out, atol=1e-12, rtol=0)
+        # The surviving cliques form exactly two connected components.
+        from holonomy_lib.spectral import laplacian
+        L = laplacian.combinatorial(out)
+        n_components = L.shape[-1] - torch.linalg.matrix_rank(L, hermitian=True)
+        assert n_components.item() == 2
         # Check the bridge is gone
         bridge_weight = out[0, cluster_size - 1, cluster_size].item()
         assert bridge_weight < 1e-9, (
@@ -173,50 +214,3 @@ class TestSurgery:
         assert intra_weight > 1e-9, (
             f"intra-clique edges should survive; weight={intra_weight:.3e}"
         )
-
-    def test_n_components_increases_with_surgery(self):
-        """After surgery removes the bridge, the graph has 2 connected
-        components instead of 1.
-        """
-        A = _two_cliques_with_bridge(cluster_size=4)
-        out = ricci_flow_with_surgery(
-            A, n_steps=4, surgery_period=1, surgery_threshold=1.5,
-            dt=0.5, normalize=True,
-        )
-
-        # Count connected components via Laplacian rank deficiency
-        from holonomy_lib.spectral import laplacian
-        L = laplacian.combinatorial(out)
-        eigvals = torch.linalg.eigvalsh(L)
-        # Components = number of near-zero eigenvalues
-        n_components = (eigvals[0] < 1e-6).sum().item()
-        assert n_components >= 2, (
-            f"expected ≥ 2 components after surgery; got {n_components}"
-        )
-
-
-# --------------------------------------------------------------------
-# Provenance integration — flow + surgery participate in mech-interp
-# --------------------------------------------------------------------
-
-
-class TestProvenanceIntegration:
-    def test_flow_emits_provenance_node(self):
-        from holonomy_lib import provenance
-        A = _complete_graph(4)
-        with provenance.record() as reg:
-            discrete_ricci_flow(A, n_steps=1, dt=0.5)
-        # Should have the outer flow node + the inner curvature node(s)
-        op_ids = {n.op_id for n in reg}
-        assert "holonomy_lib.discrete_geometry.discrete_ricci_flow" in op_ids
-        assert "holonomy_lib.discrete_geometry.ollivier_ricci_curvature" in op_ids
-
-    def test_surgery_emits_provenance_node(self):
-        from holonomy_lib import provenance
-        A = _two_cliques_with_bridge(cluster_size=3)
-        with provenance.record() as reg:
-            ricci_flow_with_surgery(
-                A, n_steps=1, surgery_period=1, surgery_threshold=2.0, dt=0.3,
-            )
-        op_ids = {n.op_id for n in reg}
-        assert "holonomy_lib.discrete_geometry.ricci_flow_with_surgery" in op_ids

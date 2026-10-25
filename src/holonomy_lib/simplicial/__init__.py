@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """holonomy_lib.simplicial: simplicial complexes + boundary operators
 + Vietoris-Rips construction.
@@ -32,7 +32,7 @@ Construction:
 
 References:
   Munkres, J. R. (1984). Elements of Algebraic Topology. Westview
-    Press. §1 — chain complex + boundary operator.
+    Press. §1 : chain complex + boundary operator.
   Hausmann, J.-C. (1995). On the Vietoris-Rips complexes and a
     cohomology theory for metric spaces. In Prospects in Topology,
     Annals of Math Studies 138.

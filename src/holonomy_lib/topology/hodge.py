@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Hodge Laplacians + Betti numbers on simplicial complexes.
 
@@ -23,22 +23,18 @@ Two paths share the same public function `hodge_laplacian(complex, k)`:
   Dense complex (`DenseSimplicialComplex`)
     Boundary operators returned as dense `(B, n_{k-1}_max, n_k_max)`
     tensors. The Hodge Laplacian is built via batched dense matmuls
-    and returned as `(B, n_k_max, n_k_max)`. Use this path for small
-    complexes (n_k ≤ 10⁴) where `eigvalsh` on the dense matrix is
-    fast and batching helps amortize overhead.
+    and returned as `(B, n_k_max, n_k_max)`. Boundary and Laplacian
+    storage both scale with the padded batch dimensions.
 
   Sparse complex (`SparseSimplicialComplex`)
     Boundary operators returned as `torch.sparse_csc_tensor
     (n_{k-1}, n_k)`. The Hodge Laplacian is built via sparse matmul
-    and returned as a dense `(n_k, n_k)` tensor (the product of two
-    sparse boundary matrices is generally dense). Use this path when
-    `n_k` is too large for the dense batched path but the product
-    `L_k` still fits in memory.
+    and returned as a dense `(n_k, n_k)` tensor. This avoids dense
+    boundary storage but still requires space for the final dense L_k.
 
-`betti_numbers(complex, max_dim, threshold=1e-9)` returns the Betti
-numbers for dims 0..max_dim by counting eigenvalues of each `L_k`
-that fall below a relative `threshold` (cataloged as the library's
-`numerical_floor_convention`).
+`betti_numbers(complex, max_dim)` returns the Betti numbers for dims
+0..max_dim from float64 boundary ranks. Rank tolerances use each
+member's real simplex counts, independently of batch padding.
 
 References:
   Eckmann, B. (1944). Harmonische Funktionen und Randwertaufgaben in
@@ -59,16 +55,12 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial import (
     DenseSimplicialComplex,
     SparseSimplicialComplex,
 )
 
 
-@with_provenance(
-    "holonomy_lib.topology.hodge_laplacian", op_version="0.1",
-)
 def hodge_laplacian(
     complex: DenseSimplicialComplex | SparseSimplicialComplex,
     k: int,
@@ -82,8 +74,13 @@ def hodge_laplacian(
 
     Returns:
       Dense complex  → `(B, n_k_max, n_k_max)` Tensor.
-      Sparse complex → `(n_k, n_k)` Tensor (dense, since the matmul
-        of two sparse boundary matrices is generally dense).
+      Sparse complex → `(n_k, n_k)` dense Tensor. Boundary products
+        are computed sparsely, then materialized for this return contract.
+
+    References:
+      Eckmann (1944). Harmonische Funktionen und Randwertaufgaben in
+        einem Komplex. Comment. Math. Helv. 17:240–255.
+      Lim (2020). Hodge Laplacians on graphs. SIAM Review 62:685–715.
     """
     if k < 0:
         raise ValueError(f"k must be >= 0, got {k}")
@@ -97,43 +94,38 @@ def hodge_laplacian(
     )
 
 
-@with_provenance(
-    "holonomy_lib.topology.betti_numbers", op_version="0.1",
-)
 def betti_numbers(
     complex: DenseSimplicialComplex | SparseSimplicialComplex,
     max_dim: int,
-    threshold: float = 1e-9,
+    threshold: float | None = None,
 ) -> torch.Tensor:
     """Betti numbers `(β_0, β_1, …, β_max_dim)` for a simplicial complex.
 
-    `β_k = n_k - rank(L_k)`; equivalently, the multiplicity of zero
-    in `spec(L_k)`. We count eigenvalues of `L_k` that fall below a
-    relative threshold (default 1e-9, the library's
-    `numerical_floor_convention`).
+    `β_k = n_k - rank(∂_k) - rank(∂_{k+1})`. Boundary entries are
+    exactly 0 or ±1, so ranks are computed in float64 regardless of
+    the complex's storage dtype. This avoids squaring the conditioning
+    by forming a Hodge Laplacian.
 
     Args:
       complex: a `DenseSimplicialComplex` or `SparseSimplicialComplex`.
       max_dim: highest dim to return Betti numbers for. Must satisfy
         `0 ≤ max_dim ≤ complex.max_dim`.
-      threshold: relative tolerance for "eigenvalue is zero". An
-        eigenvalue `λ` is counted as zero iff
-        `|λ| ≤ threshold · max(|spec(L_k)|, 1)`.
+      threshold: optional positive relative rank tolerance. With `None`,
+        each boundary uses `max(n_{k-1}, n_k) * eps(float64)`, with
+        real simplex counts for that batch member. An explicit value
+        applies to boundary singular values, with zero absolute tolerance.
 
     Returns:
       Dense complex  → `(B, max_dim + 1)` Tensor of int64 Betti numbers.
       Sparse complex → `(max_dim + 1,)` Tensor.
 
     Notes:
-      For each k, we compute the full eigenspectrum via
-      `torch.linalg.eigvalsh` and count near-zero entries. For very
-      large complexes you can compute Betti numbers more efficiently
-      via `lanczos_eigsh` for the bottom-k smallest eigenvalues with
-      a known spectrum bound, but the dense path is simpler and fast
-      at v1 sizes (n_k ≤ a few thousand).
+      Dense boundaries retain zero padding for batched SVD; it adds only
+      zero singular values and does not enter the per-member tolerance.
+      Sparse boundaries are materialized for the rank computation.
 
     References:
-      Eckmann (1944) — kernel of L_k equals harmonic k-forms.
+      Eckmann (1944); kernel of L_k equals harmonic k-forms.
       Lim (2020), §4.
     """
     if max_dim < 0:
@@ -142,48 +134,38 @@ def betti_numbers(
         raise ValueError(
             f"max_dim={max_dim} exceeds complex.max_dim={complex.max_dim}"
         )
-    if threshold <= 0:
+    if threshold is not None and threshold <= 0:
         raise ValueError(f"threshold must be > 0, got {threshold}")
 
     if isinstance(complex, DenseSimplicialComplex):
         B = complex.batch_size
-        out = torch.zeros(B, max_dim + 1, dtype=torch.int64,
-                           device=complex.device)
-        for k in range(max_dim + 1):
-            L_k = hodge_laplacian(complex, k)            # (B, n_k_max, n_k_max)
-            eigvals = torch.linalg.eigvalsh(L_k)         # (B, n_k_max)
-            abs_eigvals = eigvals.abs()
-            # Spectral norm per-batch as reference; clamp to 1 so that
-            # all-zero spectra (e.g., empty dim) use absolute threshold.
-            ref = abs_eigvals.max(dim=-1, keepdim=True).values.clamp(min=1.0)
-            zero_mask = abs_eigvals <= threshold * ref
-            # Also mask off the padding rows of L_k — they contribute
-            # eigenvalue 0 spuriously. The valid_mask for dim k tells
-            # us which positions are real; we need to subtract the
-            # padding count from the zero-eigenvalue count.
-            valid_count = complex.valid_mask[k].sum(dim=-1)
-            zero_count = zero_mask.sum(dim=-1)
-            n_k_max = complex.simplices_by_dim[k].shape[1]
-            pad_count = n_k_max - valid_count
-            out[:, k] = (zero_count - pad_count).clamp(min=0).to(torch.int64)
-        return out
+        ranks = torch.zeros(B, max_dim + 2, dtype=torch.int64,
+                            device=complex.device)
+        for k in range(1, min(max_dim + 1, complex.max_dim) + 1):
+            boundary = complex.boundary(k).to(torch.float64)
+            relative_tol: float | torch.Tensor | None = threshold
+            if relative_tol is None:
+                real_size = torch.maximum(
+                    complex.n_simplices(k - 1), complex.n_simplices(k),
+                )
+                relative_tol = real_size.to(torch.float64) * torch.finfo(
+                    torch.float64,
+                ).eps
+            ranks[:, k] = torch.linalg.matrix_rank(boundary, rtol=relative_tol)
+        counts = torch.stack([
+            complex.n_simplices(k) for k in range(max_dim + 1)
+        ], dim=-1)
+        return counts - ranks[:, :-1] - ranks[:, 1:]
 
     if isinstance(complex, SparseSimplicialComplex):
-        out = torch.zeros(max_dim + 1, dtype=torch.int64,
-                           device=complex.device)
-        for k in range(max_dim + 1):
-            L_k = hodge_laplacian(complex, k)            # (n_k, n_k)
-            eigvals = torch.linalg.eigvalsh(L_k)
-            abs_eigvals = eigvals.abs()
-            ref = abs_eigvals.max().clamp(min=1.0)
-            # No padding subtraction here: the sparse complex has no
-            # padded rows/cols (every row of L_k corresponds to a real
-            # simplex), so every near-zero eigenvalue counts. Contrast
-            # with the dense path above, which must subtract the
-            # padding count from the raw zero count.
-            zero_count = (abs_eigvals <= threshold * ref).sum()
-            out[k] = zero_count.to(torch.int64)
-        return out
+        ranks = torch.zeros(max_dim + 2, dtype=torch.int64, device=complex.device)
+        for k in range(1, min(max_dim + 1, complex.max_dim) + 1):
+            boundary = complex.boundary(k, dtype=torch.float64).to_dense()
+            ranks[k] = torch.linalg.matrix_rank(boundary, rtol=threshold)
+        counts = torch.tensor([
+            complex.n_simplices(k) for k in range(max_dim + 1)
+        ], dtype=torch.int64, device=complex.device)
+        return counts - ranks[:-1] - ranks[1:]
 
     raise TypeError(
         f"complex must be a Dense or Sparse SimplicialComplex; "
@@ -192,14 +174,19 @@ def betti_numbers(
 
 
 # ============================================================
-# Internal — dispatched paths
+# Internal: dispatched paths
 # ============================================================
 
 
 def _hodge_dense(
     complex: DenseSimplicialComplex, k: int,
 ) -> torch.Tensor:
-    """L_k = ∂_{k+1} ∂_{k+1}^T + ∂_k^T ∂_k on the dense path."""
+    """Hodge Laplacian L_k on a dense complex, batched over members.
+
+    Takes a `DenseSimplicialComplex` and k with k <= complex.max_dim. Returns a
+    `(B, n_k_max, n_k_max)` tensor in the complex dtype. Padded simplex rows
+    and columns are zero.
+    """
     if k > complex.max_dim:
         raise ValueError(
             f"k={k} exceeds complex.max_dim={complex.max_dim}"
@@ -213,12 +200,14 @@ def _hodge_dense(
     L = torch.zeros(B, n_k_max, n_k_max,
                      device=complex.device, dtype=complex.dtype)
 
-    # ∂_k^T ∂_k term — zero for k=0 (no (-1)-simplices).
+    # The ∂_k^T ∂_k term. It is skipped for k = 0, since there are no
+    # (-1)-simplices.
     if k > 0:
         d_k = complex.boundary(k)                    # (B, n_{k-1}, n_k)
         L = L + torch.matmul(d_k.mT, d_k)
 
-    # ∂_{k+1} ∂_{k+1}^T term — zero if (k+1)-simplices don't exist.
+    # The ∂_{k+1} ∂_{k+1}^T term. It is skipped when the complex has no
+    # (k+1)-simplex table.
     if (k + 1) in complex.simplices_by_dim:
         d_kp1 = complex.boundary(k + 1)              # (B, n_k, n_{k+1})
         L = L + torch.matmul(d_kp1, d_kp1.mT)
@@ -230,18 +219,15 @@ def _hodge_sparse(
     complex: SparseSimplicialComplex, k: int,
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:
-    """L_k on the sparse path; returns dense (n_k, n_k).
+    """Hodge Laplacian L_k on a sparse complex, returned as a dense (n_k, n_k).
 
-    The matmul of two sparse boundary matrices is generally dense,
-    so we materialize the dense result. For very large complexes
-    where this would exceed memory, the user can call Lanczos
-    directly with a sparse `LinearOperator`-style implicit Hodge
-    operator (planned for v2).
+    Takes a `SparseSimplicialComplex` and k with k <= complex.max_dim. Each
+    boundary product is computed sparsely and densified once, then added into
+    the dense L_k, because the public return contract is dense.
 
-    `SparseSimplicialComplex` doesn't carry a float dtype attribute,
-    so we accept one explicitly (default `torch.float64`). Boundary
-    operators are constructed at this dtype to keep the L_k matmul
-    type-consistent.
+    `SparseSimplicialComplex` has no float dtype attribute, so the dtype is
+    passed in (default `torch.float64`). Both boundary operators are built at
+    this dtype so the matmul sees matching types.
     """
     if k > complex.max_dim:
         raise ValueError(
@@ -254,16 +240,11 @@ def _hodge_sparse(
 
     if k > 0:
         d_k = complex.boundary(k, dtype=dtype)       # sparse (n_{k-1}, n_k)
-        # sparse @ dense → dense via to_dense().T @ to_dense().
-        # PyTorch sparse-CSC @ sparse-CSC requires both to be in the
-        # same layout and may produce a sparse-COO result. For v1
-        # simplicity, densify and use the standard matmul.
-        d_k_dense = d_k.to_dense()
-        L = L + d_k_dense.mT @ d_k_dense
+        d_k_coo = d_k.to_sparse_coo().coalesce()
+        L = L + torch.sparse.mm(d_k_coo.mT, d_k_coo).to_dense()
 
     if (k + 1) in complex.simplices_by_dim:
-        d_kp1 = complex.boundary(k + 1, dtype=dtype)
-        d_kp1_dense = d_kp1.to_dense()
-        L = L + d_kp1_dense @ d_kp1_dense.mT
+        d_kp1 = complex.boundary(k + 1, dtype=dtype).to_sparse_coo().coalesce()
+        L = L + torch.sparse.mm(d_kp1, d_kp1.mT).to_dense()
 
     return L

@@ -1,16 +1,17 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """holonomy_lib.optimization: Riemannian optimizers on the library's manifolds.
 
 Currently implemented:
   RiemannianSGD(manifold, lr)  : steepest descent on a manifold.
 
-The optimizer wraps the existing `FixedRankManifold` / `SPDManifold`
-`projection` + `retraction` API. The flow is:
+The optimizer only calls `egrad_to_rgrad` and `retraction` on its manifold,
+so it works with any manifold that has both (`FixedRankManifold`,
+`SPDManifold`, `ProductManifold`). The flow is:
 
   1. Caller computes the ambient gradient `g` of the objective.
-  2. `optimizer.step(point, g)` projects `g` to the tangent space at
+  2. `optimizer.step(point, g)` converts `g` using the metric at
      `point`, scales by `-lr`, and retracts back onto the manifold.
   3. Returns the new point. Caller drives the loop.
 
@@ -20,10 +21,9 @@ training loops.
 
 Why no Adam (or RMSProp, AdamW, ...): adaptive step-size schemes are
 user-side ergonomics, not part of the math of optimization on a
-manifold. SGD's projection + retraction *is* the Riemannian gradient
-step; everything else is preconditioning. Users who want Adam-style
-adaptive rates can compute their adaptive step in ambient space and
-pass the rescaled gradient into `step()`.
+manifold. SGD uses metric gradient conversion followed by retraction.
+Users who want Adam-style rates can compute their adaptive step in
+ambient space and pass the rescaled gradient into `step()`.
 
 Planned:
   - `torch.optim.Optimizer` integration via a `ManifoldParameter`

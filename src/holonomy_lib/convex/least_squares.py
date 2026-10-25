@@ -1,11 +1,11 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Regularized (Tikhonov / ridge) least squares with solver dispatch.
 
-The one convex problem substrate demonstrably hand-rolls in four
-inconsistent ways (normal-equation `solve`, `lstsq`, sparse LSQR, dense
-pseudoinverse):
+synoros-substrate hand-rolls this one convex problem four inconsistent
+ways (normal-equation `solve`, `lstsq`, sparse LSQR, dense pseudoinverse),
+so it lives here once:
 
     min_x ‖A x − b‖² + λ ‖x‖²
 
@@ -13,11 +13,11 @@ Three solution paths, one interface:
 
   - `"cholesky"`: normal equations `(AᵀA + λI) x = Aᵀb` via Cholesky
     factorization + triangular solve (CONVENTIONS §3.3). Exact, one
-    factorization, the right default for dense problems — but it squares
+    factorization, the default for dense problems. It squares
     the condition number, so for ill-conditioned `A` with tiny `λ`
     prefer `"lsqr"`.
-  - `"cg"`: conjugate gradient on the normal OPERATOR `v ↦ Aᵀ(Av) + λv`
-    — `AᵀA` is never materialized. For very large dense problems where
+  - `"cg"`: conjugate gradient on the normal operator `v ↦ Aᵀ(Av) + λv`.
+    `AᵀA` is never materialized. For very large dense problems where
     the `(n, n)` Gram matrix itself is the memory bottleneck.
   - `"lsqr"`: `algebra.solvers.lsqr` with `damp = √λ` (the damped
     least-squares equivalence, Paige-Saunders 1982 §1). Works directly
@@ -48,12 +48,11 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 
 from holonomy_lib.algebra.solvers import cg, lsqr
-from holonomy_lib.provenance import with_provenance
 
 _SPARSE_LAYOUTS = (
     torch.sparse_coo, torch.sparse_csr, torch.sparse_csc,
@@ -62,16 +61,13 @@ _SPARSE_LAYOUTS = (
 Method = Literal["auto", "cholesky", "cg", "lsqr"]
 
 
-@with_provenance(
-    "holonomy_lib.convex.regularized_lstsq", op_version="0.1",
-)
 def regularized_lstsq(
     A: torch.Tensor,
     b: torch.Tensor,
     lam: float,
     method: Method = "auto",
-    rtol: Optional[float] = None,
-    maxiter: Optional[int] = None,
+    rtol: float | None = None,
+    maxiter: int | None = None,
 ) -> torch.Tensor:
     """Solve the ridge problem `min_x ‖A x − b‖² + λ ‖x‖²`.
 
@@ -82,7 +78,7 @@ def regularized_lstsq(
 
     Args:
       A: dense `(m, n)` / `(B, m, n)`, or sparse 2-D `(m, n)`
-        (COO/CSR/CSC — dispatched to `"lsqr"`/`"cg"`; `"cholesky"`
+        (COO/CSR/CSC; dispatched to `"lsqr"`/`"cg"`; `"cholesky"`
         rejects sparse input).
       b: `(B, m)` or `(m,)` observations.
       lam: ridge weight `λ ≥ 0`.
@@ -113,6 +109,8 @@ def regularized_lstsq(
         raise ValueError(f"lam must be >= 0; got {lam}")
 
     sparse = A.layout in _SPARSE_LAYOUTS
+    # Cholesky forms a dense Gram matrix, so under "auto" sparse A never
+    # takes that route.
     if method == "auto":
         method = "lsqr" if sparse else "cholesky"
     if sparse and method == "cholesky":
@@ -127,10 +125,17 @@ def regularized_lstsq(
                 f"dense A must be (..., m, n); got A.shape={tuple(A.shape)}"
             )
         n = A.shape[-1]
-        squeeze = b.ndim == 1
+        # A lone right-hand side (m,) is lifted to (1, m) so the batched code
+        # below handles it. The batch axis is dropped again at the return, but
+        # only when A is unbatched too: a batched A of size 1 has to keep its
+        # batch axis, or the output shape would depend on the batch size.
+        squeeze = b.ndim == 1 and A.ndim == 2
         b2 = b.unsqueeze(0) if squeeze else b
         gram = A.mT @ A                                   # (..., n, n)
         eye = torch.eye(n, dtype=A.dtype, device=A.device)
+        # λI makes S positive definite even when A is rank deficient. Cholesky
+        # can therefore only fail for λ = 0 with a singular AᵀA, which is the
+        # full-column-rank requirement in the docstring.
         S = gram + lam * eye
         Atb = (A.mT @ b2.unsqueeze(-1)).squeeze(-1)       # (..., n) or (B, n)
         L = torch.linalg.cholesky(S)
@@ -138,6 +143,8 @@ def regularized_lstsq(
         return x.squeeze(0) if squeeze and x.ndim > 1 else x
 
     if method == "lsqr":
+        # Damped LSQR minimizes ‖Ax − b‖² + damp²‖x‖², so damp = √λ gives the
+        # ridge objective exactly.
         return lsqr(
             A, b, damp=math.sqrt(lam),
             atol=rtol, btol=rtol, maxiter=maxiter,
@@ -146,6 +153,8 @@ def regularized_lstsq(
     # method == "cg": CG on the normal operator v ↦ Aᵀ(Av) + λv. The
     # Gram matrix is never materialized; `A` may be dense or sparse.
     if sparse:
+        # One COO copy of A and one of Aᵀ, built once here, so every matvec
+        # inside cg is a sparse mm rather than a fresh conversion.
         A_coo = (A if A.layout == torch.sparse_coo
                  else A.to_sparse_coo()).coalesce()
         At = A_coo.t().coalesce()
@@ -165,7 +174,11 @@ def regularized_lstsq(
         def rproject(u: torch.Tensor) -> torch.Tensor:
             return (A.mT @ u.unsqueeze(-1)).squeeze(-1)
 
-    squeeze = b.ndim == 1
+    # A lone b is lifted to (1, m) and squeezed back at the end, as in the
+    # cholesky path, again only when A has no batch axis of its own. Sparse A
+    # is always a single 2-D matrix. The right-hand side of the normal
+    # equations is Aᵀb.
+    squeeze = b.ndim == 1 and A.ndim == 2
     b2 = b.unsqueeze(0) if squeeze else b
     x = cg(normal_op, rproject(b2), rtol=rtol, maxiter=maxiter)
     return x.squeeze(0) if squeeze else x

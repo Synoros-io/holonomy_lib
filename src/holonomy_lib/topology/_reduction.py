@@ -1,64 +1,26 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Z/2 left-to-right boundary-matrix reduction for persistent homology.
 
-The persistent-homology algorithm (Edelsbrunner-Letscher-Zomorodian
-2002) reduces the boundary matrix `D` whose columns are simplices in
-filtration order, with `D[i, j] = 1` iff simplex `i` is a face of
-simplex `j` (working modulo 2). The reduction sweeps columns left to
-right: for each column `j`, while `low(j)` (the largest row index of
-any non-zero entry in column `j`) collides with the `low` of some
-already-paired column `k < j`, replace `column j ← column j ⊕
-column k`. The result yields persistence pairs: each column `j` with
-non-zero `low(j) = i` becomes the persistence pair `(birth_i,
-birth_j)`. Columns that reduce to zero are essential — their birth
-gets matched only to `+∞` (until a higher-dim simplex kills them,
-if applicable).
+Boundary columns are prepared by tensor face enumeration and row joins.
+The Python backend transfers their indices and filtration metadata to the
+host together, once per filtration. The torch backend keeps columns on the
+input device and transfers only metadata in that bulk operation.
 
-Two backends:
+Reduction is sequential: a column's pivot depends on earlier reduced
+columns. Python uses set symmetric differences; torch uses odd occurrence
+counts in concatenated index tensors. The torch backend synchronizes once
+per pivot attempt, including every attempt after an XOR. It is not a fully
+asynchronous GPU reduction. Neither backend implements clearing.
 
-  `backend="python"` (default) — each column is a Python `set[int]`
-    of non-zero row indices. XOR is set symmetric difference. `low`
-    is `max(col_set)` if non-empty. C-implemented set ops are
-    extremely fast for the small-to-moderate columns that typical
-    PH inputs produce; the bottleneck is the inherently sequential
-    column loop, not the per-column work.
-
-  `backend="torch"` — each column is a `torch.LongTensor` of row
-    indices on the filtration's native device. XOR is implemented
-    via concat + `torch.unique(return_counts=True)` + odd-count
-    filter; `low` is `col.max().item()` (one CPU sync per column).
-    This path runs end-to-end on whatever device the filtration
-    lives on (CPU or GPU), which is what `persistence_diagrams`
-    needs when the filtration was already built on GPU. For typical
-    small-to-moderate complexes the Python-set path is competitive
-    or faster (set ops are tight C code) — the torch path matters
-    when (1) you need device-agnostic semantics, or (2) the
-    column sizes get large enough that vectorized `unique` beats
-    Python set hashing. v1 ships as a foundation for a future
-    custom CUDA kernel.
-
-The reduction is inherently sequential per matrix (column j depends
-on all earlier columns), but PH batches across point clouds at the
-higher API level (`persistence_diagrams`).
-
-Micro-optimizations applied:
-  Clearing optimization (Bauer-Kerber-Reininghaus 2014, §3): a
-  column already paired by an earlier column is zero, skip it. We
-  detect this by tracking `essential_columns` and `paired_columns`
-  during reduction.
+A nonzero reduced column pairs its lowest face with a death. A zero column
+is essential only when no later column has paired that birth with a death.
 
 References:
   Edelsbrunner, H., Letscher, D., Zomorodian, A. (2002). Topological
-    persistence and simplification. Discrete & Computational
-    Geometry 28:511-533. Original algorithm.
-  Bauer, U., Kerber, M., Reininghaus, J. (2014). Clear and Compress:
-    Computing Persistent Homology in Chunks. In: Topological Methods
-    in Data Analysis and Visualization III, Springer. §3 — clearing.
-  Otter, N., Porter, M. A., Tillmann, U., Grindrod, P., Harrington,
-    H. A. (2017). A roadmap for the computation of persistent
-    homology. EPJ Data Science 6(17). Survey + benchmarks.
+    persistence and simplification. Discrete & Computational Geometry
+    28:511-533. Left-to-right boundary reduction.
 """
 
 from __future__ import annotations
@@ -67,259 +29,199 @@ from typing import Literal
 
 import torch
 
+from holonomy_lib.simplicial._face_lookup import enumerate_faces, lookup_rows
 from holonomy_lib.topology._filtration import Filtration
+
+
+def _boundary_columns(filtration: Filtration) -> torch.Tensor:
+    """Build the padded boundary matrix of a filtration, with -1 for unused slots.
+
+    Takes a filtration whose complex is closed under taking faces. Returns an
+    `(n_total, max_dim + 1)` int64 tensor. Row j holds the filtration ids of the
+    faces of the simplex at filtration position j, and vertex rows are all -1.
+    """
+    complex = filtration.complex
+    n_total = filtration.birth_times.numel()
+    device = filtration.birth_times.device
+    columns = torch.full(
+        (n_total, complex.max_dim + 1), -1, dtype=torch.int64, device=device,
+    )
+    filtration_ids = torch.arange(n_total, device=device)
+    inverse_by_dim: dict[int, torch.Tensor] = {}
+    # Map each simplex's row within its dimension to its position in the
+    # filtration. Faces are found by row, so this inverse turns them into
+    # filtration ids.
+    for dim, simplices in complex.simplices_by_dim.items():
+        selected = filtration.sorted_dims == dim
+        inverse = torch.empty(simplices.shape[0], dtype=torch.int64, device=device)
+        inverse[filtration.sorted_indices[selected]] = filtration_ids[selected]
+        inverse_by_dim[dim] = inverse
+    for dim, simplices in complex.simplices_by_dim.items():
+        if dim == 0 or simplices.shape[0] == 0:
+            continue
+        # Each simplex has dim+1 faces. enumerate_faces lists them as vertex
+        # tuples, and lookup_rows finds each one's row in the dimension below.
+        # The reshape gives every simplex its own row of face rows.
+        faces, _ = enumerate_faces(simplices)
+        face_ids = lookup_rows(
+            complex.simplices_by_dim[dim - 1], faces.reshape(-1, dim),
+        ).reshape(simplices.shape[0], dim + 1)
+        columns[inverse_by_dim[dim], :dim + 1] = inverse_by_dim[dim - 1][face_ids]
+    return columns
+
+
+def _host_records(
+    filtration: Filtration, columns: torch.Tensor | None,
+) -> tuple[list[int], list[float], list[list[int]]]:
+    """Copy dims, birth times, and optional boundary columns to host lists.
+
+    Takes a filtration and the padded boundary matrix or None. Returns three
+    lists: the dim of each simplex, its birth time, and the columns as nested
+    lists of filtration ids (empty when `columns` is None). Everything goes
+    over in one device-to-host copy as raw bytes, so int64 indices never pass
+    through a float dtype.
+    """
+    dims = filtration.sorted_dims.contiguous()
+    births = filtration.birth_times.contiguous()
+    chunks = [dims.view(torch.uint8), births.view(torch.uint8)]
+    if columns is not None:
+        chunks.append(columns.contiguous().view(torch.uint8).flatten())
+    host = torch.cat(chunks).cpu()
+    dims_end = dims.numel() * dims.element_size()
+    births_end = dims_end + births.numel() * births.element_size()
+    host_dims = host[:dims_end].view(dims.dtype).tolist()
+    host_births = host[dims_end:births_end].view(births.dtype).tolist()
+    # Float births can leave the columns at a byte offset that is not a
+    # multiple of 8, and an int64 view needs that alignment. Cloning the slice
+    # gives it a fresh host buffer that starts at offset 0. This is a host
+    # copy, not another device transfer.
+    host_columns = (
+        host[births_end:].clone().view(columns.dtype).reshape(columns.shape).tolist()
+        if columns is not None else []
+    )
+    return host_dims, host_births, host_columns
 
 
 def reduce_filtration(
     filtration: Filtration,
     backend: Literal["python", "torch"] = "python",
 ) -> dict[int, list[tuple[float, float]]]:
-    """Run Z/2 left-to-right reduction. Return persistence pairs by dim.
+    """Run sequential Z/2 reduction and return persistence pairs by dimension.
 
     Args:
-      filtration: a `Filtration` produced by `build_filtration`.
-      backend: which reduction backend to use. `"python"` (default)
-        uses Python `set[int]` columns; `"torch"` uses
-        `torch.LongTensor` columns and runs on the filtration's
-        native device.
+      filtration: the simplex ordering produced by `build_filtration`.
+      backend: `"python"` for host set columns, or `"torch"` for index
+        tensors on the input device. Torch synchronizes for each pivot
+        attempt because the next column operation depends on that pivot.
 
     Returns:
-      `dict[k, list[(birth, death)]]` — finite + essential bars for
-      each dim k. Essential bars have `death = +inf`.
+      A dictionary keyed by homology dimension, holding the finite and
+      essential `(birth, death)` pairs. Essential bars have infinite death;
+      zero-length bars are omitted.
+
+    References:
+      Edelsbrunner, Letscher, Zomorodian (2002). Topological persistence
+        and simplification. Discrete & Computational Geometry 28:511-533.
     """
+    if backend not in ("python", "torch"):
+        raise ValueError(f"backend must be 'python' or 'torch'; got {backend!r}")
+    boundary = _boundary_columns(filtration)
+    # The python backend needs the boundary on the host as sets. The torch
+    # backend keeps it on the device, so only dims and births are copied.
+    dims, births, host_columns = _host_records(
+        filtration, boundary if backend == "python" else None,
+    )
     if backend == "torch":
-        return _reduce_filtration_torch(filtration)
-    if backend != "python":
-        raise ValueError(
-            f"backend must be 'python' or 'torch'; got backend={backend!r}"
-        )
-    n_total = int(filtration.birth_times.shape[0])
-    # Build column-set representation of the boundary matrix in
-    # filtration order. column[j] = set of row indices i (j's faces)
-    # such that simplex i is a face of simplex j (mod 2).
-    # We need the inverse map (dim, original_idx) -> filtration index.
-    dims = filtration.sorted_dims.tolist()
-    indices = filtration.sorted_indices.tolist()
-    births = filtration.birth_times.tolist()
-    complex = filtration.complex
+        pairs, pivots, empty = _reduce_torch(boundary, dims)
+    else:
+        # One set of filtration ids per column. A dim-0 simplex has no
+        # boundary, so its column starts out empty.
+        columns = [set(row[:dim + 1]) if dim else set()
+                   for row, dim in zip(host_columns, dims, strict=True)]
+        pairs, pivots, empty = _reduce_python(columns)
 
-    # Map (dim, original_idx_within_dim) -> filtration column index.
-    orig_to_filt: dict[tuple[int, int], int] = {}
-    for filt_idx in range(n_total):
-        orig_to_filt[(dims[filt_idx], indices[filt_idx])] = filt_idx
-
-    # Pre-compute face → filtration-index map for each dim.
-    # For each (k-1)-face of every k-simplex, we need to find its
-    # filtration index. Build the face lookup once per dim.
-    from holonomy_lib.simplicial._face_lookup import build_simplex_index
-
-    face_lookup_by_dim: dict[int, dict[tuple[int, ...], int]] = {}
-    for k, simplices in complex.simplices_by_dim.items():
-        face_lookup_by_dim[k] = build_simplex_index(simplices)
-
-    # Build columns (Python sets of int row indices in filtration order).
-    columns: list[set[int]] = []
-    for j in range(n_total):
-        k = dims[j]
-        idx_in_dim = indices[j]
-        if k == 0:
-            columns.append(set())  # vertices have empty boundary
-            continue
-        simplex = complex.simplices_by_dim[k][idx_in_dim]
-        face_indices = face_lookup_by_dim.get(k - 1, {})
-        col_set: set[int] = set()
-        # Enumerate faces: drop each vertex in turn. The Koszul sign
-        # is irrelevant in Z/2; XOR commutes regardless.
-        verts = simplex.tolist()
-        for i in range(k + 1):
-            face = tuple(verts[:i] + verts[i + 1:])
-            if face not in face_indices:
-                raise ValueError(
-                    f"reduce_filtration: face {face} of simplex "
-                    f"{tuple(verts)} not found in dim-{k - 1} simplices"
-                )
-            face_idx_in_dim = face_indices[face]
-            filt_idx = orig_to_filt[(k - 1, face_idx_in_dim)]
-            # XOR in Z/2: toggle membership.
-            if filt_idx in col_set:
-                col_set.remove(filt_idx)
-            else:
-                col_set.add(filt_idx)
-        columns.append(col_set)
-
-    # Z/2 left-to-right reduction.
-    # `pivot_map[low] = j` for the paired column j with low(j) = low.
-    # `death_columns: set[int]` tracks which columns are deaths (the
-    # values of `pivot_map`); we maintain it alongside `pivot_map`
-    # because `pivot_map.values()` is an O(n) view scan on dict, and
-    # the essential-bar pass below would otherwise be O(n²) in
-    # n_total.
-    pivot_map: dict[int, int] = {}
-    death_columns: set[int] = set()
+    # Each pair joins a birth simplex to the simplex that kills it. A bar whose
+    # death is not after its birth has zero length and is dropped.
     pairs_by_dim: dict[int, list[tuple[float, float]]] = {}
+    for birth_id, death_id in pairs:
+        birth, death = births[birth_id], births[death_id]
+        if birth < death:
+            pairs_by_dim.setdefault(dims[birth_id], []).append((birth, death))
 
-    for j in range(n_total):
-        col = columns[j]
-        while col:
-            low = max(col)
-            if low in pivot_map:
-                # XOR column j with column pivot_map[low].
-                col ^= columns[pivot_map[low]]
-            else:
-                # New pivot — record the persistence pair.
-                pivot_map[low] = j
-                death_columns.add(j)
-                death_dim = dims[j]
-                # Pair lives in dim (death_dim - 1) since it's the
-                # H_{death_dim-1} bar born when `low` (a (death_dim-1)-
-                # simplex) appeared and killed when j (a death_dim-
-                # simplex) joined as its filler.
-                bd_dim = death_dim - 1
-                birth = births[low]
-                death = births[j]
-                if birth < death:
-                    # Skip zero-length bars: they have no persistence.
-                    pairs_by_dim.setdefault(bd_dim, []).append(
-                        (birth, death),
-                    )
-                break
-
-    # Essential bars: any column j that wasn't matched as a death AND
-    # reduces to an empty column. In Z/2 reduction the algorithm
-    # always finds a pivot for any non-empty reduced column, so the
-    # `columns[j]` check is the actual condition; the membership test
-    # in `death_columns` (O(1) set lookup) handles the corresponding
-    # paired-column case.
-    for j in range(n_total):
-        if j in death_columns:
-            continue
-        if columns[j]:
-            continue
-        # Essential bar for dim = dims[j], born at births[j].
-        bd_dim = dims[j]
-        pairs_by_dim.setdefault(bd_dim, []).append(
-            (births[j], float("inf")),
-        )
-
+    # A zero column creates a class at its own index. If some column later has
+    # that index as its low, the class died there. The rest never die.
+    essential = torch.tensor(empty, dtype=torch.bool)
+    essential[list(pivots)] = False
+    for index in essential.nonzero().flatten().tolist():
+        pairs_by_dim.setdefault(dims[index], []).append((births[index], float("inf")))
     return pairs_by_dim
 
 
-def _reduce_filtration_torch(
-    filtration: Filtration,
-) -> dict[int, list[tuple[float, float]]]:
-    """Torch-tensor reduction: same algorithm, device-agnostic.
+def _reduce_python(
+    columns: list[set[int]],
+) -> tuple[list[tuple[int, int]], dict[int, int], list[bool]]:
+    """Reduce the boundary columns left to right over Z/2.
 
-    Each column is a `torch.LongTensor` of non-zero row indices on
-    the filtration's native device. XOR is `unique(cat(a, b))` filtered
-    by `count % 2 == 1`; `low(col)` is `col.max().item()`. Pivot
-    bookkeeping stays on CPU (a Python dict of int → int) since it's
-    pure scalar logic.
-
-    Cost per column: one `.item()` sync to read `low`, plus per XOR
-    one `cat` + `unique` + boolean filter. For small sparse columns
-    this is slower than CPython set ops; the benefit is that the
-    column data never leaves the filtration's device.
+    Takes one set of filtration ids per simplex, in filtration order. Returns
+    the (low, index) pairs, a map from each low to the column that owns it,
+    and a flag per column that is True when the reduced column is zero.
+    Assumes the columns are in filtration order, since each column's pivot
+    depends only on the columns before it.
     """
-    n_total = int(filtration.birth_times.shape[0])
-    device = filtration.birth_times.device
-    dims = filtration.sorted_dims.tolist()
-    indices = filtration.sorted_indices.tolist()
-    births = filtration.birth_times.tolist()
-    complex = filtration.complex
-
-    orig_to_filt: dict[tuple[int, int], int] = {}
-    for filt_idx in range(n_total):
-        orig_to_filt[(dims[filt_idx], indices[filt_idx])] = filt_idx
-
-    from holonomy_lib.simplicial._face_lookup import build_simplex_index
-
-    face_lookup_by_dim: dict[int, dict[tuple[int, ...], int]] = {}
-    for k, simplices in complex.simplices_by_dim.items():
-        face_lookup_by_dim[k] = build_simplex_index(simplices)
-
-    # Build columns as LongTensors. Pre-collect each column's face
-    # filtration indices on Python side (face enumeration is cheap)
-    # then construct a tensor on `device`.
-    columns: list[torch.Tensor] = []
-    for j in range(n_total):
-        k = dims[j]
-        idx_in_dim = indices[j]
-        if k == 0:
-            columns.append(torch.empty(0, dtype=torch.int64, device=device))
-            continue
-        simplex = complex.simplices_by_dim[k][idx_in_dim]
-        face_indices = face_lookup_by_dim.get(k - 1, {})
-        face_filt: list[int] = []
-        verts = simplex.tolist()
-        for i in range(k + 1):
-            face = tuple(verts[:i] + verts[i + 1:])
-            if face not in face_indices:
-                raise ValueError(
-                    f"_reduce_filtration_torch: face {face} of simplex "
-                    f"{tuple(verts)} not found in dim-{k - 1} simplices"
-                )
-            face_idx_in_dim = face_indices[face]
-            face_filt.append(orig_to_filt[(k - 1, face_idx_in_dim)])
-        # Face indices are all distinct on a simplex (no duplicate
-        # vertices) — the column has exactly k+1 entries before any
-        # XOR. Construct directly without de-dup.
-        columns.append(torch.tensor(face_filt, dtype=torch.int64, device=device))
-
     pivot_map: dict[int, int] = {}
-    death_columns: set[int] = set()
-    pairs_by_dim: dict[int, list[tuple[float, float]]] = {}
-
-    for j in range(n_total):
-        col = columns[j]
-        while col.numel() > 0:
-            low = int(col.max().item())                          # CPU sync
+    pairs: list[tuple[int, int]] = []
+    for index, column in enumerate(columns):
+        while column:
+            # The low is the largest filtration id left in the column, which is
+            # the latest-born face. If an earlier column already owns that low,
+            # add that column in over Z/2 to cancel the face, then look again.
+            # Otherwise this column claims the low and is done.
+            low = max(column)
             if low in pivot_map:
-                other = columns[pivot_map[low]]
-                col = _xor_columns(col, other)
-                columns[j] = col
+                column ^= columns[pivot_map[low]]
             else:
-                pivot_map[low] = j
-                death_columns.add(j)
-                death_dim = dims[j]
-                bd_dim = death_dim - 1
-                birth = births[low]
-                death = births[j]
-                if birth < death:
-                    pairs_by_dim.setdefault(bd_dim, []).append(
-                        (birth, death),
-                    )
+                pivot_map[low] = index
+                pairs.append((low, index))
                 break
+    return pairs, pivot_map, [not column for column in columns]
 
-    for j in range(n_total):
-        if j in death_columns:
-            continue
-        if columns[j].numel() > 0:
-            continue
-        bd_dim = dims[j]
-        pairs_by_dim.setdefault(bd_dim, []).append(
-            (births[j], float("inf")),
-        )
 
-    return pairs_by_dim
+def _reduce_torch(
+    boundary: torch.Tensor, dims: list[int],
+) -> tuple[list[tuple[int, int]], dict[int, int], list[bool]]:
+    """Reduce the boundary columns on the device; same output as the python path.
+
+    Takes the padded boundary matrix and the dim of each simplex. Returns the
+    same triple as `_reduce_python`. Each pass through the loop reads the pivot
+    back with `.item()`, so every pivot attempt costs one device sync.
+    """
+    # Keep only the real faces of each row. Vertex rows have none, and the -1
+    # padding is cut off.
+    columns = [row[:dim + 1] if dim else row[:0]
+               for row, dim in zip(boundary.unbind(), dims, strict=True)]
+    pivot_map: dict[int, int] = {}
+    pairs: list[tuple[int, int]] = []
+    for index, column in enumerate(columns):
+        while column.numel():
+            # .item() copies the pivot to the host because the branch below
+            # depends on its value. This is the one sync per attempt.
+            low = int(column.max().item())
+            if low in pivot_map:
+                column = _xor_columns(column, columns[pivot_map[low]])
+                columns[index] = column
+            else:
+                pivot_map[low] = index
+                pairs.append((low, index))
+                break
+    return pairs, pivot_map, [column.numel() == 0 for column in columns]
 
 
 def _xor_columns(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Z/2 XOR of two index-sets represented as LongTensors.
+    """Return the Z/2 sum of two boundary columns as a sorted index tensor.
 
-    The set XOR `A △ B = (A ∪ B) − (A ∩ B)` is equivalent to "elements
-    that appear in exactly one of A, B". With both as sorted/unsorted
-    LongTensors, concatenate them and keep entries whose total count
-    is odd — exactly the XOR.
-
-    Precondition: each input tensor is itself duplicate-free (a true
-    "set"). The reduction loop guarantees this — initial columns are
-    built from distinct simplex faces, and every later column is the
-    output of `torch.unique` from a prior XOR. If you call this helper
-    in a context where duplicates are possible, dedupe both inputs
-    first; a triply-occurring index would incorrectly be dropped
-    rather than kept (3 % 2 == 1 but the algorithm treats it as a
-    cancelled "1 + 1 + 1" rather than an odd-survivor).
+    Takes two 1-D index tensors. Returns the entries that appear in exactly one
+    input, sorted ascending. Assumes no repeats within either input, since a
+    repeat would be counted as a second occurrence and cancel wrongly.
     """
-    combined = torch.cat([a, b])
-    uniq, counts = torch.unique(combined, return_counts=True)
-    return uniq[counts % 2 == 1]
+    unique, counts = torch.unique(torch.cat((a, b)), return_counts=True)
+    return unique[counts % 2 == 1]

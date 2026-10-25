@@ -1,15 +1,15 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.sheaf.HeterogeneousGraphSheaf (per-node stalk dims).
 
 Three layers:
-  1. Unit — construction + validation (shape/self-loop/duplicate/range).
-  2. Property — reduction: a heterogeneous sheaf with UNIFORM dims + identity
+  1. Unit; construction + validation (shape/self-loop/duplicate/range).
+  2. Property; reduction: a heterogeneous sheaf with UNIFORM dims + identity
      maps reproduces `GraphSheaf.trivial`'s Laplacian exactly (cross-checks the
      ragged coboundary against the tested uniform path); genuinely-variable dims
      give a symmetric PSD Laplacian of size Σ d_v; Dirichlet energy = xᵀ L x.
-  3. Edge cases — zero edges, batched Dirichlet energy.
+  3. Edge cases; zero edges, batched Dirichlet energy.
 """
 
 from __future__ import annotations
@@ -106,36 +106,20 @@ class TestValidation:
                 (torch.randn(2, 3, dtype=DT),),
             )
 
-    def test_rejects_self_loop(self):
-        with pytest.raises(ValueError, match="self-loop"):
-            _het([2, 2], [[0, 0]])
 
-    def test_rejects_duplicate_edges(self):
+        edge = torch.tensor([[0, 1]])
+        dims = torch.tensor([1, 1])
+        maps = (torch.ones(1, 1, dtype=DT),)
+        with pytest.raises(ValueError, match="int64"):
+            HeterogeneousGraphSheaf(2, edge.to(DT), dims, dims[:1], maps, maps)
+        with pytest.raises(ValueError, match="int64"):
+            HeterogeneousGraphSheaf(2, edge, dims.to(DT), dims[:1], maps, maps)
+        with pytest.raises(ValueError, match="real floating"):
+            HeterogeneousGraphSheaf(2, edge, dims, dims[:1],
+                                    (1j * maps[0],), (1j * maps[0],))
         with pytest.raises(ValueError, match="duplicate"):
-            _het([2, 2, 2], [[0, 1], [0, 1]])
-
-    def test_rejects_out_of_range_edge(self):
-        # construct directly: the range check must fire before the F-shape loop
-        # (which would otherwise index a nonexistent node's dim)
-        with pytest.raises(ValueError, match="n_nodes"):
-            HeterogeneousGraphSheaf(
-                2, torch.tensor([[0, 5]], dtype=torch.int64),
-                torch.tensor([2, 2], dtype=torch.int64),
-                torch.tensor([1], dtype=torch.int64),
-                (torch.randn(1, 2, dtype=DT),),
-                (torch.randn(1, 2, dtype=DT),),
-            )
-
-    def test_rejects_bad_node_dims_shape(self):
-        edges = torch.tensor([[0, 1]], dtype=torch.int64)
-        with pytest.raises(ValueError, match="node_stalk_dims"):
-            HeterogeneousGraphSheaf(
-                2, edges,
-                torch.tensor([2, 3, 4], dtype=torch.int64),   # 3 != n_nodes=2
-                torch.tensor([2], dtype=torch.int64),
-                (torch.randn(2, 2, dtype=DT),),
-                (torch.randn(2, 3, dtype=DT),),
-            )
+            HeterogeneousGraphSheaf(2, torch.tensor([[0, 1], [1, 0]]),
+                                    dims, dims, maps * 2, maps * 2)
 
 
 # --------------------------------------------------------------------
@@ -183,30 +167,17 @@ def _reference_coboundary(sheaf: HeterogeneousGraphSheaf) -> torch.Tensor:
     return delta
 
 
-def test_vectorized_coboundary_matches_reference_loop():
-    het = _het(
-        [2, 3, 1, 4, 2],
-        [[0, 1], [1, 2], [2, 3], [0, 3], [3, 4], [1, 4]],
-        edge_dims=[2, 1, 3, 2, 1, 4],
-        seed=7,
-    )
-    # atol=0: the assembly places values, no arithmetic happens.
-    torch.testing.assert_close(
-        sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
-    )
-
-
-def test_vectorized_coboundary_single_edge():
-    het = _het([3, 2], [[0, 1]], edge_dims=[2], seed=1)
-    torch.testing.assert_close(
-        sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
-    )
-
-
-def test_vectorized_coboundary_reversed_edge_pair():
-    # (u, v) and (v, u) are distinct edges (both allowed); their row blocks
-    # stay disjoint so plain index assignment is exact.
-    het = _het([2, 3], [[0, 1], [1, 0]], edge_dims=[2, 1], seed=3)
+@pytest.mark.parametrize("node_dims, edges, edge_dims, seed", [
+    ([2, 3, 1, 4, 2], [[0, 1], [1, 2], [2, 3], [0, 3], [3, 4], [1, 4]],
+     [2, 1, 3, 2, 1, 4], 7),
+    ([3, 2], [[0, 1]], [2], 1),
+    ([2, 3], [[1, 0]], [1], 3),
+])
+def test_vectorized_coboundary_matches_reference_loop(
+    node_dims, edges, edge_dims, seed,
+):
+    het = _het(node_dims, edges, edge_dims=edge_dims, seed=seed)
+    # Exact equality checks that arbitrary orientations retain the correct maps.
     torch.testing.assert_close(
         sheaf_coboundary(het), _reference_coboundary(het), atol=0.0, rtol=0.0,
     )

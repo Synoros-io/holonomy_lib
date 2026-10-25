@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Magnetic Laplacian for directed and signed-directed graphs.
 
@@ -26,33 +26,25 @@ direction": q = 1/4 separates directed eigenmodes most clearly
 (Furutani 2020, §5).
 
 Four forms exposed:
-  combinatorial(A, q)                  — L^(q) = D_s − H ⊙ A_s
-  symmetric_normalized(A, q)           — L_sym^(q) = I − D_s^{−1/2} (H ⊙ A_s) D_s^{−1/2}
-  sign_magnetic_combinatorial(A, q)    — signed-directed analog,
+  combinatorial(A, q)                  : L^(q) = D_s − H ⊙ A_s
+  symmetric_normalized(A, q)           : L_sym^(q) = I − D_s^{−1/2} (H ⊙ A_s) D_s^{−1/2}
+  sign_magnetic_combinatorial(A, q)    : signed-directed analog,
                                           unifies Kunegis signed + magnetic
-  sign_magnetic_symmetric_normalized(A, q)  — normalized signed-directed
+  sign_magnetic_symmetric_normalized(A, q)  : normalized signed-directed
 
-The signed-magnetic forms accept arbitrary real `A` (entries may be
-negative AND the matrix may be non-symmetric). They keep the sign of
-each edge in the off-diagonal `A_s^signed = (A + A^T)/2` but use the
-signless degree `D^|.| = Σ_j |A_s|_{ij}` for the diagonal, exactly as
-the Kunegis (2010) signed Laplacian does. The phase argument uses the
-signed antisymmetric part `A − A^T`, so opposite-sign edges contribute
-opposing phase shifts. The result is Hermitian and reduces correctly
-to every existing primitive in this library:
-
-  unsigned A ≥ 0                → magnetic.combinatorial(A, q)
-  signed symmetric A            → laplacian.signed(A) (cast to complex)
-  unsigned symmetric A          → standard combinatorial Laplacian
-  zero-charge q = 0             → real Kunegis signed Laplacian of A_s^signed
-
-The phase argument in the signed-magnetic forms uses |A| (magnitudes),
-not signed A. That keeps direction and sign independent: flipping a
-single directed edge's sign genuinely changes the spectrum, instead of
-collapsing into the gauge-equivalent unsigned magnetic spectrum.
+The signed forms implement MSGNN (He, Perlmutter, Reinert, Cucuringu
+2022, equations 1 and 2). They use the signed symmetric adjacency
+A_s = (A + A^T)/2, absolute degree D_abs[i,i] = sum_j
+(|A[i,j]| + |A[j,i]|)/2, and phase exp(i 2π q (A - A^T)).
+Both operators are positive semidefinite; the normalized spectrum
+lies in [0, 2]. Nonnegative input gives the ordinary magnetic
+Laplacian. Symmetric signed input gives the signed Laplacian for
+any charge. At q = 0 the phase disappears, leaving D_abs - A_s.
+For opposite-sign reciprocal edges, D_abs differs from sum_j |A_s|;
+this distinction is part of MSGNN's definition.
 
 All four functions return a complex Hermitian tensor of shape
-(B, n, n). Use `torch.linalg.eigh` on the result — its real-eigenvalue
+(B, n, n). Use `torch.linalg.eigh` on the result : its real-eigenvalue
 output is the spectrum and its complex eigenvectors are the
 directed-graph modes.
 
@@ -73,13 +65,9 @@ References:
     Albayrak, S. (2010). Spectral analysis of signed graphs for
     clustering, prediction and visualization. SDM 2010. The signed
     Laplacian that the q = 0 signed-magnetic case reduces to.
-  Fiorini, S., Coniglio, S., Ciavotta, M., Messina, E. (2023). SigMaNet:
-    One Laplacian to Rule Them All. AAAI 2023. The sign-magnetic
-    Laplacian recipe: signless degree on the diagonal, signed
-    symmetrized adjacency off-diagonal, directional phase factor.
-  He, Y., Reinert, G., Wang, S., Cucuringu, M. (2023). MSGNN: A
-    Spectral Graph Neural Network Based on a Novel Magnetic Signed
-    Laplacian. LoG 2022 / TMLR 2023. Closely related formulation.
+  He, Y., Perlmutter, M., Reinert, G., Cucuringu, M. (2022). MSGNN:
+    A Spectral Graph Neural Network Based on a Novel Magnetic Signed
+    Laplacian. LoG 2022, PMLR 198, §3.2, equations 1 and 2.
 """
 
 from __future__ import annotations
@@ -89,20 +77,15 @@ import math
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.provenance import with_provenance
-
 
 # Default magnetic charge q ∈ [0, 1) per Furutani et al. (2020), §5.
 # `q = 1/4` is the value that maximally separates the directed
 # eigenmodes for a cycle and is therefore the standard literature
 # default. **Scale of validity**: dimensionless ratio of magnetic flux
-# units; does not depend on n. Cataloged as `magnetic_charge_default`.
+# units; does not depend on n. Cataloged as `MAGNETIC_CHARGE_DEFAULT`.
 MAGNETIC_CHARGE_DEFAULT: float = 0.25
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.combinatorial", op_version="0.2",
-)
 def combinatorial(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -135,9 +118,6 @@ def combinatorial(
     return D_diag - H_times_As
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.symmetric_normalized", op_version="0.2",
-)
 def symmetric_normalized(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -145,13 +125,13 @@ def symmetric_normalized(
 
     L_sym^(q) = I − D_s^{−1/2} (H ⊙ A_s) D_s^{−1/2}
 
-    Spectrum ⊂ [0, 2] regardless of q (Furutani 2020, Prop. 1). Use
+    For nonnegative A, spectrum ⊂ [0, 2] regardless of q (Furutani 2020, Prop. 1). Use
     this form for spectral embeddings of directed graphs; the
     eigenvectors at the bottom-k eigenvalues are the directed analog
     of Laplacian eigenmaps.
 
     Args:
-      A: (B, n, n) weighted adjacency. May be non-symmetric.
+      A: (B, n, n) nonnegative weighted adjacency. May be non-symmetric.
       q: magnetic charge in [0, 1).
 
     Returns:
@@ -165,11 +145,10 @@ def symmetric_normalized(
     A_s = 0.5 * (A + A.mT)
     D_s = A_s.sum(dim=-1)                         # (B, n)
 
-    # Moore-Penrose pseudoinverse handling for isolated nodes — same
+    # Moore-Penrose pseudoinverse handling for isolated nodes, the same
     # convention as `holonomy_lib.spectral.laplacian.symmetric_normalized`.
-    # The library-wide `1e-9` (numerical_floor_convention) doubles as
-    # the dtype-tiny floor below: for any reasonable dtype, `tiny` is
-    # well below 1e-9, so `where(D_s > 0, ...)` selects the same set.
+    # The clamp keeps rsqrt finite on the branch `where` throws away, so
+    # an isolated node never puts an inf into the autograd graph
     floor = torch.finfo(A.dtype).tiny
     safe_D = D_s.clamp(min=floor)
     d_inv_sqrt = torch.where(
@@ -178,7 +157,9 @@ def symmetric_normalized(
 
     H_times_As = _magnetic_phase_times_adj(A, A_s, q)
 
-    # D^{-1/2} H ⊙ A_s D^{-1/2} via broadcasting.
+    # D^{-1/2} (H ⊙ A_s) D^{-1/2} as an outer product of the two scalings.
+    # The real scale has to be cast to complex before it multiplies the
+    # complex phase matrix
     scale = (
         d_inv_sqrt.unsqueeze(dim=-1) * d_inv_sqrt.unsqueeze(dim=-2)
     ).to(H_times_As.dtype)
@@ -196,16 +177,12 @@ def symmetric_normalized(
 # ============================================================
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.sign_magnetic_combinatorial",
-    op_version="0.1",
-)
 def sign_magnetic_combinatorial(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
     """Sign-magnetic combinatorial Laplacian for signed-directed graphs.
 
-    L^(q,σ) = D_|.| − exp(i · 2π · q · (|A| − |A|^T)) ⊙ A_s^signed
+    L^(q,σ) = D_|.| − exp(i · 2π · q · (A − A^T)) ⊙ A_s^signed
 
     where:
       A_s^signed = (A + A^T) / 2                   (signed symmetric part)
@@ -213,7 +190,9 @@ def sign_magnetic_combinatorial(
       D_|.|      = diag(Σ_j A_s^|.|[i, j])         (signless degree, à la
                                                     Kunegis 2010)
 
-    Phase uses |A| (magnitudes) so direction and sign stay independent.
+    Phase uses signed A, as in MSGNN equation 1. At q = 0 the phase
+    disappears. The absolute degree is computed before symmetrization,
+    so opposite-sign reciprocal edges still contribute to the degree.
 
     Reduces to:
       magnetic.combinatorial(A, q)   if A ≥ 0      (signs irrelevant)
@@ -226,11 +205,11 @@ def sign_magnetic_combinatorial(
       q: magnetic charge in [0, 1). Default 1/4.
 
     Returns:
-      L: (B, n, n) complex Hermitian Laplacian, PSD when q = 0 and the
-        underlying signed graph is balanced (Kunegis 2010, Theorem 3.4).
+      L: (B, n, n) complex Hermitian positive-semidefinite Laplacian.
 
     References:
-      Fiorini et al. (2023) SigMaNet, eq. 6.
+      He, Perlmutter, Reinert, Cucuringu (2022). MSGNN. LoG 2022,
+        PMLR 198, §3.2, equation 1 and Theorem 1.
       Kunegis et al. (2010) for the q = 0 (signed-undirected) reduction.
     """
     _validate_real_adjacency(A, q)
@@ -240,15 +219,11 @@ def sign_magnetic_combinatorial(
     A_s_abs = 0.5 * (abs_A + abs_A.mT)
     D_abs = A_s_abs.sum(dim=-1)                       # (B, n)
 
-    H_times_As = _sign_magnetic_phase_times_adj(A, abs_A, A_s_signed, q)
+    H_times_As = _magnetic_phase_times_adj(A, A_s_signed, q)
     D_diag = torch.diag_embed(D_abs).to(H_times_As.dtype)
     return D_diag - H_times_As
 
 
-@with_provenance(
-    "holonomy_lib.spectral.magnetic.sign_magnetic_symmetric_normalized",
-    op_version="0.1",
-)
 def sign_magnetic_symmetric_normalized(
     A: torch.Tensor, q: float = MAGNETIC_CHARGE_DEFAULT,
 ) -> torch.Tensor:
@@ -256,7 +231,8 @@ def sign_magnetic_symmetric_normalized(
 
     L_sym^(q,σ) = I − D_|.|^{−1/2} (exp(iΘ) ⊙ A_s^signed) D_|.|^{−1/2}
 
-    where Θ_{ij} = 2π · q · (|A|_{ij} − |A|_{ji}). Use this form for
+    where Θ_{ij} = 2π · q · (A_{ij} − A_{ji}) and
+    D_|.|[i,i] = sum_j (|A[i,j]| + |A[j,i]|)/2. Use this form for
     spectral embeddings of signed-directed graphs; the eigenvectors at
     the bottom-k eigenvalues are the signed-directed analog of
     Laplacian eigenmaps.
@@ -266,10 +242,12 @@ def sign_magnetic_symmetric_normalized(
       q: magnetic charge in [0, 1).
 
     Returns:
-      L_sym^(q,σ): (B, n, n) complex Hermitian.
+      L_sym^(q,σ): (B, n, n) complex Hermitian, spectrum in [0, 2].
+        Isolated nodes have diagonal 1 under the pseudoinverse convention.
 
     References:
-      Fiorini et al. (2023) SigMaNet, normalized form.
+      He, Perlmutter, Reinert, Cucuringu (2022). MSGNN. LoG 2022,
+        PMLR 198, §3.2, equation 2 and Theorems 1 and 2.
     """
     _validate_real_adjacency(A, q)
     A = drop_self_loops(A)
@@ -286,7 +264,7 @@ def sign_magnetic_symmetric_normalized(
         D_abs > 0, torch.rsqrt(safe_D), torch.zeros_like(D_abs),
     )                                                  # (B, n)
 
-    H_times_As = _sign_magnetic_phase_times_adj(A, abs_A, A_s_signed, q)
+    H_times_As = _magnetic_phase_times_adj(A, A_s_signed, q)
 
     scale = (
         d_inv_sqrt.unsqueeze(dim=-1) * d_inv_sqrt.unsqueeze(dim=-2)
@@ -308,7 +286,10 @@ def sign_magnetic_symmetric_normalized(
 def _validate_real_adjacency(A: torch.Tensor, q: float) -> None:
     """Shared input validation for the magnetic Laplacian primitives.
 
-    Rejects complex-valued `A` outright: the phase factor
+    Takes the adjacency and charge, returns nothing, raises `ValueError`
+    if `A` is not square in its last two dims, is not a real floating
+    dtype (complex and integer tensors both fail), or `q` is outside
+    [0, 1). Complex `A` is rejected outright: the phase factor
     `H = exp(i · 2π · q · (A − A^T))` is only defined for real
     antisymmetric arguments. Passing a complex `A` would let
     `torch.cos`/`torch.sin` produce complex outputs and
@@ -334,19 +315,21 @@ def _magnetic_phase_times_adj(
 ) -> torch.Tensor:
     """Return H ⊙ A_s where H_{ij} = exp(i · 2π · q · (A_{ij} - A_{ji})).
 
-    Computed as a single complex tensor of shape (*A_s.shape).
-    For symmetric A the phase is identically 1 and the result reduces
-    to A_s + 0j — but we still pay the complex allocation. For q = 0
-    the phase is also identically 1; we short-circuit that case.
+    Takes the real adjacency `A` (for the phase) and the already
+    symmetrized `A_s` (signed or unsigned, the caller picks), both
+    `(..., n, n)`, and returns one complex tensor of the same shape. For
+    symmetric A the phase is identically 1 and the result reduces to
+    A_s + 0j, but we still pay for building the phase. For q = 0 the
+    phase is also identically 1, and that case skips the trig entirely.
     """
     if q == 0.0:
-        # Phase is identically 1; result is A_s as a complex tensor.
-        # Cast to the appropriate complex dtype matching A.dtype.
+        # no phase at all, so the answer is just A_s cast to complex
         complex_dtype = _matching_complex_dtype(A.dtype)
         return A_s.to(complex_dtype)
 
-    # Antisymmetric part of A; for purely symmetric inputs this is 0
-    # and we land in the q-doesn't-matter regime anyway.
+    # the antisymmetric part A - A^T carries the direction of each edge.
+    # For a symmetric input it is all zeros, the phase is 1 everywhere,
+    # and q has no effect, which is the reduction the module promises
     asym = A - A.mT                                # (B, n, n)
     angle = (2.0 * math.pi * q) * asym             # (B, n, n) real
     phase = torch.complex(torch.cos(angle), torch.sin(angle))
@@ -354,48 +337,15 @@ def _magnetic_phase_times_adj(
     return phase * A_s.to(complex_dtype)
 
 
-def _sign_magnetic_phase_times_adj(
-    A: torch.Tensor, abs_A: torch.Tensor,
-    A_s_signed: torch.Tensor, q: float,
-) -> torch.Tensor:
-    """Return exp(i · 2π · q · (|A| − |A|^T)) ⊙ A_s_signed.
-
-    Callers pass `abs_A = A.abs()` so we don't recompute it (each
-    sign-magnetic entry point already needs the magnitudes for the
-    signless degree, so hoisting saves one extra `.abs()` kernel
-    launch per call).
-
-    The phase argument uses **magnitudes** |A| (not signed A) so that
-    direction and sign are independent: flipping a single directed
-    edge's sign genuinely changes the result. Using signed A in the
-    phase would let sign and direction collapse into each other for
-    purely directed edges (sign-flip = direction-flip + a phase-
-    conjugate cancellation), making the operator insensitive to signs.
-
-    Reductions still hold:
-      - For A ≥ 0: |A| = A → phase matches magnetic.combinatorial,
-        A_s_signed = A_s, total reduces to the standard magnetic
-        Laplacian.
-      - For A = A^T: |A| is symmetric → phase ≡ 1, A_s_signed = A,
-        total reduces to D_|.| − A which is the Kunegis signed
-        Laplacian after taking the signless degree on the diagonal.
-    """
-    if q == 0.0:
-        complex_dtype = _matching_complex_dtype(A.dtype)
-        return A_s_signed.to(complex_dtype)
-
-    asym = abs_A - abs_A.mT                            # (B, n, n)
-    angle = (2.0 * math.pi * q) * asym                 # (B, n, n) real
-    phase = torch.complex(torch.cos(angle), torch.sin(angle))
-    complex_dtype = phase.dtype
-    return phase * A_s_signed.to(complex_dtype)
-
-
 def _matching_complex_dtype(real_dtype: torch.dtype) -> torch.dtype:
-    """Pick a complex dtype matching the precision of a real dtype."""
+    """Pick a complex dtype matching the precision of a real dtype.
+
+    float64 maps to complex128 and float32 to complex64. Anything else
+    (half, bfloat16) goes up to complex64, since half-precision complex
+    support in torch is thin.
+    """
     if real_dtype == torch.float64:
         return torch.complex128
     if real_dtype == torch.float32:
         return torch.complex64
-    # Fallback for half-precision and others — go up to complex64.
     return torch.complex64

@@ -37,6 +37,15 @@ htmlcov/
 *.pth
 .claude/
 
-# Local agent / development docs (kept on disk, not in the public repo)
+# Local agent / development docs (kept on disk, not in the public repo).
+# AGENTS.md IS tracked: it is the canonical repo instruction file and is
+# public-safe. CLAUDE.md is only a symlink to it. The working-state files
+# below can name private sibling repos, so they stay local.
 CLAUDE.md
 HANDOFF.md
+direction.md
+ledger.md
+archive/
+
+# Session scratch (briefs, review output, logs); deleted by the session that made it.
+.scratch/

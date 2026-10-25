@@ -1,6 +1,6 @@
 """Sympy symbolic verification of the closed-form n=5 heat kernel.
 
-Pseudo-verification for **C2** (research-claims catalog). The
+The
 implementation in `src/holonomy_lib/hyperbolic/heat_kernel.py:
 _heat_kernel_unit_n5` uses the hand-derived polynomial form
 

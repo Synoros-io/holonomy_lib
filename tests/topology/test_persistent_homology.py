@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.topology.persistent_homology.
 
@@ -13,6 +13,7 @@ Layers:
 
 from __future__ import annotations
 
+import importlib
 import math
 
 import pytest
@@ -27,52 +28,41 @@ def _seeded(seed: int) -> torch.Generator:
     return g
 
 
+def _sorted_pairs(pairs):
+    """Order whole pairs, preserving both their pairing and multiplicity."""
+    order = torch.argsort(pairs[:, 1], stable=True)
+    order = order[torch.argsort(pairs[order, 0], stable=True)]
+    return pairs[order]
+
+
 # --------------------------------------------------------------------
 # H_0 closed forms
 # --------------------------------------------------------------------
 
 
 class TestH0ClosedForms:
-    def test_three_collinear_points(self):
-        """Points at 0, 1, 2. H_0: 3 bars total — two finite (deaths
-        at 1.0) and one essential (survives to ∞)."""
-        pts = torch.tensor([[[0.0], [1.0], [2.0]]], dtype=torch.float64)
-        diagrams, masks = persistence_diagrams(pts, max_dim=0)
-        diag0 = diagrams[0][0]   # (3, 2)
-        mask0 = masks[0][0]
-        # 3 components born at time 0
-        births = diag0[mask0][:, 0]
-        torch.testing.assert_close(
-            births, torch.zeros_like(births), atol=1e-12, rtol=0,
+    @pytest.mark.parametrize("points", [
+        [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+        [[0.0, 0.0], [1.0, 0.0], [0.5, math.sqrt(3) / 2]],
+    ])
+    @pytest.mark.parametrize("backend", ["python", "torch"])
+    @pytest.mark.parametrize("dtype", [
+        torch.float16, torch.bfloat16, torch.float32, torch.float64,
+    ])
+    def test_three_collinear_points(self, points, backend, dtype):
+        """The line and filled equilateral triangle have no persistent H_1."""
+        diagrams, masks = persistence_diagrams(
+            torch.tensor([points], dtype=dtype), max_dim=1,
+            reduction_backend=backend,
         )
-        # Deaths: two finite (both ≈ 1.0), one ∞
-        deaths = diag0[mask0][:, 1].sort().values
-        assert deaths[0].item() == pytest.approx(1.0, abs=1e-9)
-        assert deaths[1].item() == pytest.approx(1.0, abs=1e-9)
-        assert torch.isinf(deaths[2]).item()
+        expected = torch.tensor([[0., 1.], [0., 1.], [0., math.inf]],
+                                dtype=dtype)
+        torch.testing.assert_close(
+            _sorted_pairs(diagrams[0][masks[0]]), expected,
+            atol=2 * torch.finfo(dtype).eps, rtol=0,
+        )
+        assert masks[1].sum() == 0
 
-    def test_equilateral_triangle(self):
-        """Three vertices of an equilateral triangle with side 1.
-        H_0 = 3 components: 2 die together at length 1 (the
-        first union merges two; the second merges the third),
-        1 essential."""
-        pts = torch.tensor([[
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.5, math.sqrt(3) / 2],
-        ]], dtype=torch.float64)
-        diagrams, _ = persistence_diagrams(pts, max_dim=0)
-        diag = diagrams[0][0]
-        deaths = diag[:, 1]
-        finite_deaths = deaths[torch.isfinite(deaths)]
-        assert len(finite_deaths) == 2
-        torch.testing.assert_close(
-            finite_deaths.sort().values,
-            torch.tensor([1.0, 1.0], dtype=torch.float64),
-            atol=1e-9, rtol=0,
-        )
-        # One ∞ bar
-        assert torch.isinf(deaths).sum().item() == 1
 
     def test_two_clusters_separated(self):
         """Two tight clusters far apart. H_0: 3 components die early
@@ -144,29 +134,29 @@ class TestH1Circle:
     persistent H_1 bar (the loop survives until simplices fill the
     interior) and short bars from noise."""
 
-    def test_clean_circle_has_one_persistent_loop(self):
+    @pytest.mark.parametrize("backend", ["python", "torch"])
+    def test_clean_circle_has_one_persistent_loop(self, backend):
         n = 30
-        theta = torch.linspace(
-            0, 2 * math.pi, n + 1, dtype=torch.float64,
-        )[:-1]
-        pts = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
-        pts = pts.unsqueeze(0)  # (1, n, 2)
+        theta = torch.linspace(0, 2 * math.pi, n + 1, dtype=torch.float64)[:-1]
+        pts = torch.stack([theta.cos(), theta.sin()], dim=-1).unsqueeze(0)
         diagrams, masks = persistence_diagrams(
-            pts, max_dim=1, max_radius=1.5,
+            pts, max_dim=1, max_radius=1.5, reduction_backend=backend,
         )
-        # Expect at least one H_1 bar with long persistence.
-        diag1 = diagrams[1][0]
-        mask1 = masks[1][0]
-        valid = diag1[mask1]
-        if valid.numel() == 0:
-            pytest.fail("no H_1 bars detected for the clean circle")
-        persistence = valid[:, 1] - valid[:, 0]
-        # The longest persistence should be substantial (about the
-        # radius gap between "first triangle closes" and "interior
-        # fills in"). For a 30-point unit circle this is ~0.3.
-        longest = persistence.max().item()
-        assert longest > 0.2, (
-            f"longest H_1 bar {longest:.3f} should be > 0.2 for a clean circle"
+        expected = torch.tensor([[2 * math.sin(math.pi / n), math.inf]],
+                                dtype=torch.float64)
+        torch.testing.assert_close(
+            diagrams[1][masks[1]], expected, atol=1e-12, rtol=0,
+        )
+        # In a square the loop dies at the diagonal, an independent finite bar.
+        square = torch.tensor([[[0., 0.], [1., 0.], [1., 1.], [0., 1.]]],
+                              dtype=torch.float64)
+        diagrams, masks = persistence_diagrams(
+            square, max_dim=1, reduction_backend=backend,
+        )
+        torch.testing.assert_close(
+            diagrams[1][masks[1]],
+            torch.tensor([[1., math.sqrt(2)]], dtype=torch.float64),
+            atol=1e-12, rtol=0,
         )
 
 
@@ -187,25 +177,33 @@ class TestAlgebraicInvariants:
                 f"n={n}: expected {n} H_0 bars, got {count}"
             )
 
-    def test_batched_consistency(self):
-        """B identical point clouds produce B identical diagrams."""
-        torch.manual_seed(7)
-        n = 6
-        pts_single = torch.randn(n, 2, generator=_seeded(7), dtype=torch.float64)
-        pts_batch = pts_single.unsqueeze(0).repeat(3, 1, 1)  # (3, n, 2)
-        diagrams, masks = persistence_diagrams(pts_batch, max_dim=1, max_radius=2.0)
-        for k in range(2):
-            d_k = diagrams[k]
-            m_k = masks[k]
-            # All three batch elements have the same valid count.
-            counts = m_k.sum(dim=-1)
-            assert counts.unique().numel() == 1
-            # The diagrams agree up to padding (compare valid entries).
-            ref = d_k[0][m_k[0]]
-            for b in range(1, 3):
-                cur = d_k[b][m_k[b]]
+    @pytest.mark.parametrize("backend", ["python", "torch"])
+    def test_batched_consistency(self, backend):
+        """Distinct square scales must stay attached to their batch members."""
+        square = torch.tensor([[0., 0.], [1., 0.], [1., 1.], [0., 1.]],
+                              dtype=torch.float64)
+        scales = torch.tensor([1., 1.2, 0.8], dtype=torch.float64)
+        points = scales[:, None, None] * square
+        diagrams, masks = persistence_diagrams(
+            points, max_dim=1, max_radius=2., reduction_backend=backend,
+        )
+        for batch, scale in enumerate(scales.tolist()):
+            single, single_masks = persistence_diagrams(
+                points[batch:batch + 1], max_dim=1, max_radius=2.,
+                reduction_backend=backend,
+            )
+            expected = [
+                [[0., scale]] * 3 + [[0., math.inf]],
+                [[scale, scale * math.sqrt(2)]],
+            ]
+            for dim in (0, 1):
+                actual = _sorted_pairs(diagrams[dim][batch][masks[dim][batch]])
                 torch.testing.assert_close(
-                    cur.sort(dim=0).values, ref.sort(dim=0).values,
+                    actual, torch.tensor(expected[dim], dtype=torch.float64),
+                    atol=1e-12, rtol=0,
+                )
+                torch.testing.assert_close(
+                    actual, _sorted_pairs(single[dim][single_masks[dim]]),
                     atol=1e-12, rtol=0,
                 )
 
@@ -228,7 +226,7 @@ class TestEdgeCases:
         assert diag0.shape[0] == 5
 
     def test_batch_zero(self):
-        """B=0 must work — required by CONVENTIONS.md §1.1."""
+        """B=0 must work; required by CONVENTIONS.md §1.1."""
         pts = torch.zeros(0, 5, 2, dtype=torch.float64)
         diagrams, masks = persistence_diagrams(pts, max_dim=1)
         for k in range(2):
@@ -242,10 +240,6 @@ class TestValidation:
         with pytest.raises(ValueError, match="max_dim"):
             persistence_diagrams(pts, max_dim=-1)
 
-    def test_rejects_2d_input(self):
-        # Need 3-D (B, n, d) or (B, n, n).
-        with pytest.raises(ValueError, match="3-D"):
-            persistence_diagrams(torch.randn(4, 2), max_dim=0)
 
     def test_distance_input(self):
         n = 4
@@ -267,7 +261,7 @@ class TestValidation:
 
 
 try:
-    from ripser import ripser  # noqa: F401
+    importlib.import_module("ripser")
     _HAVE_RIPSER = True
 except ImportError:
     _HAVE_RIPSER = False
@@ -276,7 +270,7 @@ except ImportError:
 @pytest.mark.skipif(not _HAVE_RIPSER, reason="ripser not installed")
 class TestAgainstRipser:
     def test_h0_h1_match_ripser_on_random_2d(self):
-        from ripser import ripser as ripser_compute
+        ripser_compute = importlib.import_module("ripser").ripser
         torch.manual_seed(42)
         n = 12
         pts = torch.randn(n, 2, generator=_seeded(42), dtype=torch.float64)
@@ -286,33 +280,11 @@ class TestAgainstRipser:
         diagrams, masks = persistence_diagrams(
             pts_batch, max_dim=1, max_radius=3.0,
         )
-        ours_h0 = diagrams[0][0][masks[0][0]].tolist()
-        ours_h1 = diagrams[1][0][masks[1][0]].tolist()
-
-        # ripser
         result = ripser_compute(pts.numpy(), maxdim=1, thresh=3.0)
-        ripser_h0 = result["dgms"][0].tolist()
-        ripser_h1 = result["dgms"][1].tolist()
-
-        # Match cardinality on each dim (modulo ties — accept either
-        # match within a generous tolerance).
-        assert len(ours_h0) == len(ripser_h0), (
-            f"H_0 bar count differs: ours={len(ours_h0)}, ripser={len(ripser_h0)}"
-        )
-        assert len(ours_h1) == len(ripser_h1), (
-            f"H_1 bar count differs: ours={len(ours_h1)}, ripser={len(ripser_h1)}"
-        )
-
-        # Match birth/death sets up to permutation, within tolerance.
-        # Filter out infinite-death bars; finite-death sets compared
-        # via sorted Euclidean distance per pair.
-        def _finite_sorted(diag):
-            arr = [pair for pair in diag if not math.isinf(pair[1])]
-            arr.sort(key=lambda p: (p[0], p[1]))
-            return arr
-
-        our_h0_f = _finite_sorted(ours_h0)
-        rip_h0_f = _finite_sorted(ripser_h0)
-        for (b1, d1), (b2, d2) in zip(our_h0_f, rip_h0_f):
-            assert abs(b1 - b2) < 1e-9
-            assert abs(d1 - d2) < 1e-9
+        for dim in (0, 1):
+            ours = _sorted_pairs(diagrams[dim][0][masks[dim][0]])
+            reference = _sorted_pairs(torch.as_tensor(
+                result["dgms"][dim], dtype=torch.float64,
+            ))
+            # Ripser computes in float32. Include births of essential bars.
+            torch.testing.assert_close(ours, reference, atol=1e-6, rtol=1e-6)

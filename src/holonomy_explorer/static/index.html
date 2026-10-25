@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Holonomy · Explorer</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <header class="brand"><span class="mark" aria-hidden="true">h</span><div>holonomy<span>LOCAL EXPLORER</span></div></header>
+    <nav aria-label="Scenes" id="scenes">
+      <button data-scene="graphs" aria-current="page"><span>01</span>Graphs</button>
+      <button data-scene="curvature"><span>02</span>Curvature</button>
+      <button data-scene="topology"><span>03</span>Topology</button>
+      <button data-scene="batching"><span>04</span>Batching</button>
+    </nav>
+    <form id="controls" aria-label="Scene controls"></form>
+    <div class="compute-settings">
+      <label>Device<select id="device" aria-label="Compute device"><option value="cpu">CPU</option></select></label>
+      <label>Precision<select id="dtype" aria-label="Tensor precision"><option>float64</option><option>float32</option></select></label>
+    </div>
+    <p class="sidebar-note">PyTorch computation.<br>Offline, in this Python environment.</p>
+  </aside>
+  <main>
+    <header class="scene-header"><div><p class="eyebrow">LIBRARY WORKBENCH</p><h1 id="title">Graphs</h1><p id="description"></p></div><span class="live-label"><i></i>LOCAL</span></header>
+    <div id="error" role="alert" hidden></div>
+    <div id="warnings" aria-live="polite"></div>
+    <div class="workspace">
+      <section class="visual-panel" aria-label="Visualization">
+        <div class="visual-toolbar"><span id="view-label">Spectral embedding</span><span id="hint"></span></div>
+        <div class="canvas-wrap"><canvas id="canvas" tabindex="0" aria-label="Interactive scene. Controls also support coordinate entry."></canvas><div id="empty">Connecting to the local library…</div></div>
+        <div id="legend" class="legend"></div>
+        <div id="playback" hidden></div>
+        <div id="charts" class="charts"></div>
+      </section>
+      <aside class="details" aria-label="Computed values"><p class="eyebrow">COMPUTED VALUES</p><div id="details"></div></aside>
+    </div>
+    <section id="data-table" class="data-table" hidden></section>
+  </main>
+  <footer><span id="status-device">CPU · float64</span><span id="status-state" role="status">Starting…</span><span id="status-time">Library call: —</span></footer>
+</body>
+</html>

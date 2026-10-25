@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Benchmarks for holonomy_lib.topology.
 
@@ -11,7 +11,7 @@ The torch backend is NOT a custom CUDA kernel; it's a same-algorithm
 port to torch ops so the reduction can stay on whatever device the
 filtration lives on. For typical small inputs CPython sets are
 competitive or faster (tight C ops). The crossover, if any, is at
-sizes large enough that vectorized `unique` beats hashing — these
+sizes large enough that vectorized `unique` beats hashing; these
 benchmarks measure that.
 """
 
@@ -24,12 +24,12 @@ import torch
 from holonomy_lib.topology import persistence_diagrams
 from tests.benchmarks.harness import Bench
 
-
 bench = Bench("topology")
 
 
 def _seeded(seed: int) -> torch.Generator:
-    g = torch.Generator(device="cpu"); g.manual_seed(seed)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
     return g
 
 

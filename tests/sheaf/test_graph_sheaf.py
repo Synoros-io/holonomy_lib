@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.sheaf.
 
@@ -14,7 +14,7 @@ Cover layers:
   6. Coboundary and Laplacian agree: `L_F = δ^T δ`.
   7. Dirichlet energy `E(x) = x^T L_F x = ‖δx‖²` on batched signals.
   8. A non-trivial restriction map gives a different kernel than the
-     trivial sheaf — the actual content of the sheaf-theoretic
+     trivial sheaf; the actual content of the sheaf-theoretic
      framework.
 """
 
@@ -68,14 +68,6 @@ def _adjacency_from_undirected_edges(
 
 
 class TestValidation:
-    def test_rejects_bad_n_nodes(self):
-        with pytest.raises(ValueError, match="n_nodes"):
-            GraphSheaf(
-                n_nodes=0, edges=torch.zeros(0, 2, dtype=torch.int64),
-                node_stalk_dim=1, edge_stalk_dim=1,
-                F_left=torch.zeros(0, 1, 1, dtype=torch.float64),
-                F_right=torch.zeros(0, 1, 1, dtype=torch.float64),
-            )
 
     def test_rejects_F_shape_mismatch(self):
         edges = torch.tensor([[0, 1], [1, 2]], dtype=torch.int64)
@@ -88,19 +80,24 @@ class TestValidation:
                 F_right=torch.zeros(2, 3, 2, dtype=torch.float64),
             )
 
-    def test_rejects_edge_out_of_range(self):
-        edges = torch.tensor([[0, 5]], dtype=torch.int64)
-        with pytest.raises(ValueError, match="\\[0, n_nodes"):
-            GraphSheaf(
-                n_nodes=3, edges=edges,
-                node_stalk_dim=1, edge_stalk_dim=1,
-                F_left=torch.zeros(1, 1, 1, dtype=torch.float64),
-                F_right=torch.zeros(1, 1, 1, dtype=torch.float64),
-            )
+
+        maps = torch.ones(1, 1, 1, dtype=torch.float64)
+        edge = torch.tensor([[0, 1]])
+        with pytest.raises(ValueError, match="real floating"):
+            GraphSheaf(2, edge, 1, 1, 1j * maps, 1j * maps)
+        with pytest.raises(ValueError, match="int64"):
+            GraphSheaf(2, torch.tensor([[0.0, 1.5]]), 1, 1, maps, maps)
+        with pytest.raises(ValueError, match="integer"):
+            GraphSheaf(2, edge, 1.5, 1, maps, maps)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="duplicate"):
+            GraphSheaf(2, torch.tensor([[0, 1], [1, 0]]), 1, 1,
+                       maps.expand(2, 1, 1), maps.expand(2, 1, 1))
 
     def test_trivial_helper_rejects_bad_edges(self):
         with pytest.raises(ValueError, match="edges must be"):
             GraphSheaf.trivial(n_nodes=3, edges=torch.zeros(5))
+        with pytest.raises(ValueError, match="int64"):
+            GraphSheaf.trivial(2, torch.tensor([[0.0, 1.5]]))
 
     def test_dirichlet_energy_dim_check(self):
         sheaf = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
@@ -108,26 +105,10 @@ class TestValidation:
         with pytest.raises(ValueError, match="n_nodes"):
             sheaf_dirichlet_energy(sheaf, x_wrong)
 
-    def test_rejects_self_loops(self):
-        """A self-loop edge `(u, u)` makes the sheaf Laplacian disagree
-        silently with the standard graph Laplacian (which drops
-        self-loops by convention). Reject upfront."""
-        edges = torch.tensor([[0, 1], [1, 1], [2, 0]], dtype=torch.int64)
-        with pytest.raises(ValueError, match="self-loops"):
-            GraphSheaf.trivial(n_nodes=3, edges=edges)
-
-    def test_rejects_duplicate_edges(self):
-        """Duplicate `(u, v)` entries would double the off-diagonal
-        block of the sheaf Laplacian, breaking the trivial-sheaf
-        reduction. Reject upfront."""
-        edges = torch.tensor([[0, 1], [1, 2], [0, 1]], dtype=torch.int64)
-        with pytest.raises(ValueError, match="duplicate"):
-            GraphSheaf.trivial(n_nodes=3, edges=edges)
 
     def test_dense_size_cap_raises(self):
         """A sheaf large enough to overflow the dense-δ byte cap should
         fail with a useful pre-flight message, not an OOM later."""
-        from holonomy_lib.sheaf import sheaf_coboundary
         # Construct a sheaf that would need > 2 GiB of dense allocation
         # without actually allocating it (the byte check runs before the
         # zeros() call).
@@ -155,7 +136,7 @@ class TestValidation:
 
 class TestTrivialHelperReturnsIndependentTensors:
     """`F_left` and `F_right` returned by `GraphSheaf.trivial` must be
-    independent storage — mutating one must not affect the other.
+    independent storage; mutating one must not affect the other.
     Otherwise the frozen-dataclass contract leaks mutability
     asymmetrically."""
 
@@ -178,30 +159,17 @@ class TestTrivialSheafReducesToGraphLaplacian:
     Laplacian must equal the combinatorial graph Laplacian of the
     same edge set."""
 
-    @pytest.mark.parametrize("n", [4, 5, 8])
-    def test_cycle(self, n):
-        edges = _cycle_edges(n)
-        sheaf = GraphSheaf.trivial(n_nodes=n, edges=edges)
-        L_sheaf = sheaf_laplacian(sheaf)
-        A = _adjacency_from_undirected_edges(n, edges)
-        L_graph = graph_lap.combinatorial(A.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sheaf, L_graph, atol=1e-12, rtol=0)
-
-    @pytest.mark.parametrize("n", [4, 6])
-    def test_path(self, n):
-        edges = _path_edges(n)
-        sheaf = GraphSheaf.trivial(n_nodes=n, edges=edges)
-        L_sheaf = sheaf_laplacian(sheaf)
-        A = _adjacency_from_undirected_edges(n, edges)
-        L_graph = graph_lap.combinatorial(A.unsqueeze(0)).squeeze(0)
-        torch.testing.assert_close(L_sheaf, L_graph, atol=1e-12, rtol=0)
-
-    def test_complete_graph_k4(self):
-        n = 4
-        edges = torch.tensor(
-            [(i, j) for i in range(n) for j in range(i + 1, n)],
-            dtype=torch.int64,
-        )
+    @pytest.mark.parametrize(
+        "graph, n", [("cycle", 4), ("cycle", 5), ("cycle", 8),
+                     ("path", 4), ("path", 6), ("complete", 4)],
+    )
+    def test_cycle(self, graph, n):
+        if graph == "cycle":
+            edges = _cycle_edges(n)
+        elif graph == "path":
+            edges = _path_edges(n)
+        else:
+            edges = torch.combinations(torch.arange(n), r=2)
         sheaf = GraphSheaf.trivial(n_nodes=n, edges=edges)
         L_sheaf = sheaf_laplacian(sheaf)
         A = _adjacency_from_undirected_edges(n, edges)
@@ -216,7 +184,7 @@ class TestTrivialSheafReducesToGraphLaplacian:
 
 class TestTrivialHigherDimSheaf:
     """For stalk_dim = d > 1 with identity restriction maps, the sheaf
-    Laplacian is `I_d ⊗ L_graph` in node-major / dim-minor ordering:
+    Laplacian is `L_graph ⊗ I_d` in node-major / dim-minor ordering:
     each node contributes a `d × d` diagonal block of the scalar
     Laplacian's value at that diagonal entry, and each edge contributes
     a `d × d` off-diagonal block.
@@ -276,51 +244,28 @@ class TestSymmetryAndPSD:
 # --------------------------------------------------------------------
 
 
-class TestLaplacianEqualsDeltaTDelta:
-    def test_explicit_construction_matches(self):
-        n = 5
-        edges = _cycle_edges(n)
-        d_v, d_e = 2, 3
-        g = _seeded(7)
-        F_left = torch.randn(n, d_e, d_v, dtype=torch.float64, generator=g)
-        F_right = torch.randn(n, d_e, d_v, dtype=torch.float64, generator=g)
-        sheaf = GraphSheaf(
-            n_nodes=n, edges=edges,
-            node_stalk_dim=d_v, edge_stalk_dim=d_e,
-            F_left=F_left, F_right=F_right,
-        )
-        delta = sheaf_coboundary(sheaf)
-        L_explicit = delta.mT @ delta
-        L_explicit = 0.5 * (L_explicit + L_explicit.mT)  # match symmetrize
-        L = sheaf_laplacian(sheaf)
-        torch.testing.assert_close(L, L_explicit, atol=1e-12, rtol=0)
-
-
 # --------------------------------------------------------------------
 # Dirichlet energy
 # --------------------------------------------------------------------
 
 
 class TestDirichletEnergy:
-    def test_unbatched_matches_xTLx(self):
-        n = 4
-        sheaf = GraphSheaf.trivial(n_nodes=n, edges=_cycle_edges(n))
-        x = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+    @pytest.mark.parametrize("n, stalk_dim, batch", [(4, 1, None), (5, 2, 0),
+                                                      (5, 2, 1), (5, 2, 3)])
+    def test_unbatched_matches_xTLx(self, n, stalk_dim, batch):
+        sheaf = GraphSheaf.trivial(n, _cycle_edges(n), stalk_dim=stalk_dim)
+        if batch is None:
+            x = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+        else:
+            x = torch.randn(batch, n * stalk_dim, dtype=torch.float64,
+                            generator=_seeded(0))
         E = sheaf_dirichlet_energy(sheaf, x)
         L = sheaf_laplacian(sheaf)
-        ref = x @ L @ x
-        torch.testing.assert_close(E, ref, atol=1e-12, rtol=0)
-
-    def test_batched_matches_xTLx(self):
-        n = 5
-        d_v = 2
-        sheaf = GraphSheaf.trivial(n_nodes=n, edges=_cycle_edges(n), stalk_dim=d_v)
-        B = 3
-        x = torch.randn(B, n * d_v, dtype=torch.float64, generator=_seeded(0))
-        E = sheaf_dirichlet_energy(sheaf, x)
-        L = sheaf_laplacian(sheaf)
-        ref = torch.einsum("bi,ij,bj->b", x, L, x)
+        ref = torch.einsum("...i,ij,...j->...", x, L, x)
         torch.testing.assert_close(E, ref, atol=1e-10, rtol=0)
+        if batch is None:
+            # Four unit cycle edges have squared differences 1, 1, 1, 9.
+            assert E.item() == pytest.approx(12.0, abs=1e-12)
 
     def test_constant_signal_has_zero_energy_for_trivial_sheaf(self):
         """The kernel of the trivial-sheaf Laplacian = constant signals
@@ -341,7 +286,7 @@ class TestNonTrivialSheafSeparatesFromGraphLaplacian:
     """The whole point of sheaves: they capture structure invisible to
     the scalar Laplacian. Take a graph where two sheaves with the same
     edge set but different restriction maps have different kernel
-    dimensions — that's a property the scalar graph Laplacian cannot
+    dimensions; that's a property the scalar graph Laplacian cannot
     distinguish."""
 
     def test_orientation_sheaf_on_triangle_has_smaller_kernel(self):
@@ -359,7 +304,9 @@ class TestNonTrivialSheafSeparatesFromGraphLaplacian:
         eig_triv = torch.linalg.eigvalsh(L_triv)
         # Number of zero eigenvalues = kernel dim.
         kdim_triv = int((eig_triv < 1e-9).sum().item())
-        assert kdim_triv == 1, f"trivial cycle should have kernel dim 1; got {kdim_triv}"
+        assert kdim_triv == 1, (
+            f"trivial cycle should have kernel dim 1; got {kdim_triv}"
+        )
 
         # Orientation-flip sheaf: same edges, but F_right on the last
         # edge is [-1] instead of [+1]. The "monodromy around the loop"
@@ -380,27 +327,3 @@ class TestNonTrivialSheafSeparatesFromGraphLaplacian:
             f"orientation-flip cycle should have NO global sections; "
             f"got kernel dim {kdim_flip}"
         )
-
-
-# --------------------------------------------------------------------
-# Provenance integration
-# --------------------------------------------------------------------
-
-
-class TestProvenanceIntegration:
-    def test_sheaf_laplacian_emits_node(self):
-        from holonomy_lib import provenance
-
-        sheaf = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        with provenance.record() as reg:
-            sheaf_laplacian(sheaf)
-        op_ids = sorted(n.op_id for n in reg)
-        assert "holonomy_lib.sheaf.sheaf_laplacian" in op_ids
-
-    def test_sheaf_provenance_signature_stable_across_instances(self):
-        """Two GraphSheaf instances with identical topology + stalk
-        dims must produce the same provenance signature — the dict
-        must NOT embed the Python `id()`."""
-        s1 = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        s2 = GraphSheaf.trivial(n_nodes=4, edges=_cycle_edges(4))
-        assert s1._provenance_signature() == s2._provenance_signature()

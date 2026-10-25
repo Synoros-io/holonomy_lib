@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Cached Gauss-Legendre quadrature nodes (internal).
 
@@ -30,9 +30,14 @@ import torch
 from scipy.special import roots_legendre
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _gauss_legendre_float64_cpu(n_quad: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Master copy: float64 CPU `(nodes, weights)` of the `n_quad`-point rule."""
+    """Master copy: float64 CPU `(nodes, weights)` of the `n_quad`-point rule.
+
+    Input is `n_quad >= 1`. Output is two float64 CPU tensors of shape
+    `(n_quad,)`. The cache key is `n_quad` alone, so every caller gets the
+    same tensors and none of them may write into them.
+    """
     nodes_np, weights_np = roots_legendre(n_quad)
     return (
         torch.as_tensor(nodes_np, dtype=torch.float64),
@@ -45,7 +50,7 @@ def gauss_legendre_nodes(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`(nodes, weights)` of the `n_quad`-point Gauss-Legendre rule on (-1, 1).
 
-    The float64 CPU master is computed once per `n_quad` (`lru_cache`); the
+    The float64 CPU master is computed once per `n_quad` (`functools.cache`); the
     per-call `.to(dtype, device)` is a cheap cast/copy (no-op when they match).
 
     Args:
@@ -60,6 +65,9 @@ def gauss_legendre_nodes(
       Golub-Welsch (1969); see module docstring.
     """
     nodes, weights = _gauss_legendre_float64_cpu(n_quad)
+    # The cast comes last so the cache always holds float64 on CPU, whatever
+    # the caller asked for. When the request matches the master, `.to` hands
+    # back the cached tensor itself, which is why callers must not mutate it.
     return (
         nodes.to(dtype=dtype, device=device),
         weights.to(dtype=dtype, device=device),

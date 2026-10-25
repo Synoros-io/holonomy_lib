@@ -1,18 +1,20 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """holonomy_lib.algebra: audit-clean wrappers around torch.linalg + extras.
 
 Currently implemented:
   linear.truncated_svd:  batched truncated SVD (exact + randomized).
-  lanczos_eigsh:         top-k symmetric eigenpairs via Lanczos (LA), or
-                         smallest-k via shift-and-invert (SA) — dense
-                         in-house, sparse via the hybrid backends in
-                         `eigsh_sparse` (SciPy shift-invert / SciPy
-                         LOBPCG+spilu / torch.lobpcg).
+  lanczos_eigsh:         largest/smallest algebraic eigenpairs of dense or
+                         sparse A; an explicit sigma (with which="SA")
+                         targets nearby modes.
+                         Full subspaces use torch.linalg.eigh.
+                         Sparse SA uses the backends in eigsh_sparse
+                         (bounded-pole SciPy eigsh / preconditioned
+                         SciPy LOBPCG / torch.lobpcg).
   eigsh_sparse.eigsh_sparse_sa: the sparse smallest-k backend, callable
                          directly for backend control.
-  solvers.cg:            conjugate gradient for SPD systems — batched
+  solvers.cg:            conjugate gradient for SPD systems: batched
                          dense, sparse, or callable-operator form.
   solvers.lsqr:          iterative (damped) least squares via
                          Golub-Kahan bidiagonalization.

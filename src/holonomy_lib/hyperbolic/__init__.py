@@ -1,13 +1,13 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
-"""holonomy_lib.hyperbolic — manifold-aware graph operations.
+"""holonomy_lib.hyperbolic : manifold-aware graph operations.
 
 The primitives in this module take a manifold (e.g.
 `LorentzManifold`) as an explicit dependency and operate on points
 embedded in that manifold. This is the layer where graph algorithms
-meet differential geometry — Fréchet (intrinsic) means, manifold-
-valued Laplacian eigenmaps, parallel-transport-based similarity,
+meet differential geometry: Fréchet (intrinsic) means,
+a manifold-aware inner product (log maps at the origin),
 and the manifold heat kernel.
 
 Manifold is passed in by dependency injection so primitives
@@ -18,14 +18,10 @@ rewrites.
 
 from holonomy_lib.hyperbolic.frechet_mean import frechet_mean
 from holonomy_lib.hyperbolic.heat_kernel import hyperbolic_heat_kernel
-from holonomy_lib.hyperbolic.laplacian_eigenmaps import (
-    hyperbolic_laplacian_eigenmaps,
-)
 from holonomy_lib.hyperbolic.manifold_inner import manifold_aware_inner
 
 __all__ = [
     "frechet_mean",
     "hyperbolic_heat_kernel",
-    "hyperbolic_laplacian_eigenmaps",
     "manifold_aware_inner",
 ]

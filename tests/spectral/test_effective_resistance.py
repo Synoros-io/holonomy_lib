@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.spectral.effective_resistance + commute_time.
 
@@ -80,42 +80,58 @@ class TestClosedForms:
     def test_complete_graph_edge_resistance(self):
         """On K_n (unweighted), R(u, v) = 2/n for any pair u ≠ v.
 
-        Derivation: the symmetry of K_n forces R to be constant across
-        all pairs. By the sum rule, Σ_{u, v} R(u, v) = 2(n-1)·trace(L⁺),
-        and a direct computation of L⁺ on K_n gives the 2/n value.
+        The pseudoinverse is L⁺ = (I - 11ᵀ/n)/n, so the voltage drop
+        for a unit current between any two distinct nodes is 2/n.
         Reference: Klein-Randić (1993), §3.
         """
-        for n in [3, 4, 5, 6, 7]:
-            A = _complete_graph(n)
-            R = effective_resistance(A)
-            i, j = torch.triu_indices(n, n, offset=1)
-            off_diag = R[0, i, j]
-            expected = 2.0 / n
-            torch.testing.assert_close(
-                off_diag,
-                torch.full_like(off_diag, expected),
-                atol=1e-10, rtol=0,
-            ), f"K_{n}: expected R = 2/n = {expected}, got {off_diag}"
+        for dtype in (torch.float32, torch.float64):
+            for n in [3, 4, 5, 6, 7]:
+                weights = torch.tensor([1.0, 4.0, 0.5], dtype=dtype)
+                A = _complete_graph(n, batch=3, dtype=dtype) * weights[:, None, None]
+                R = effective_resistance(A)
+                i, j = torch.triu_indices(n, n, offset=1)
+                expected = (2.0 / (n * weights))[:, None].expand(-1, i.numel())
+                torch.testing.assert_close(R[:, i, j], expected)
+                for batch_index in range(A.shape[0]):
+                    singleton = A[batch_index:batch_index + 1]
+                    torch.testing.assert_close(
+                        R[batch_index], effective_resistance(singleton)[0],
+                    )
+        generator = torch.Generator().manual_seed(4)
+        weights = torch.rand(3, 6, 6, generator=generator, dtype=torch.float64)
+        A = weights + weights.mT
+        A.diagonal(dim1=-2, dim2=-1).zero_()
+        laplacian = torch.diag_embed(A.sum(-1)) - A
+        inverse = torch.linalg.pinv(laplacian, hermitian=True)
+        diagonal = inverse.diagonal(dim1=-2, dim2=-1)
+        reference = diagonal[..., None] + diagonal[..., None, :] - 2 * inverse
+        torch.testing.assert_close(effective_resistance(A), reference,
+                                   atol=1e-10, rtol=0)
+
+        # Differentiate independent conductances while preserving symmetry.
+        rows, cols = torch.triu_indices(3, 3, offset=1)
+        conductances = torch.tensor([0.7, 1.2, 0.9], dtype=torch.float64,
+                                    requires_grad=True)
+
+        def from_conductances(weights):
+            upper = weights.new_zeros(3, 3).index_put((rows, cols), weights)
+            return effective_resistance((upper + upper.mT)[None])
+
+        assert torch.autograd.gradcheck(from_conductances, (conductances,))
 
     def test_path_graph_endpoint_resistance(self):
-        """On P_n (unweighted path 0—1—...—(n−1)), the resistance
+        """On P_n (unweighted path 0,1,...,(n−1)), the resistance
         between the two endpoints is n − 1: each unit-resistance edge
         adds 1 in series. Series-resistance identity (Doyle-Snell 1984
         §1.3).
         """
-        for n in [3, 4, 5, 6]:
+        for n in [2, 3, 4, 5, 6]:
             A = _path_graph(n)
             R = effective_resistance(A)
             r_ends = R[0, 0, n - 1].item()
             assert r_ends == pytest.approx(float(n - 1), abs=1e-9), (
                 f"P_{n}: expected R(0, {n-1}) = {n-1}, got {r_ends}"
             )
-
-    def test_two_node_unit_edge(self):
-        """Simplest case: a single edge of unit weight. R(0, 1) = 1."""
-        A = torch.tensor([[[0.0, 1.0], [1.0, 0.0]]], dtype=torch.float64)
-        R = effective_resistance(A)
-        assert R[0, 0, 1].item() == pytest.approx(1.0, abs=1e-12)
 
 
 # --------------------------------------------------------------------
@@ -124,21 +140,27 @@ class TestClosedForms:
 
 
 class TestCommuteTime:
-    def test_commute_time_equals_vol_times_resistance(self):
-        """C(u, v) = vol(A) · R(u, v) exactly (Chandra et al. 1996,
-        Theorem 2.1)."""
-        A = _complete_graph(5)
-        R = effective_resistance(A)
-        C = commute_time(A)
-        vol = A.sum(dim=(-2, -1))
-        expected = vol.unsqueeze(-1).unsqueeze(-1) * R
-        torch.testing.assert_close(C, expected, atol=1e-12, rtol=0)
 
     def test_self_commute_zero(self):
         A = _complete_graph(5)
         C = commute_time(A)
         diag = torch.diagonal(C, dim1=-2, dim2=-1)
         torch.testing.assert_close(diag, torch.zeros_like(diag), atol=1e-10, rtol=0)
+        # On K_n the expected round trip between distinct nodes is 2(n - 1).
+        off_diagonal = ~torch.eye(5, dtype=torch.bool)
+        torch.testing.assert_close(C[0, off_diagonal], torch.full((20,), 8.0).double())
+        distinct = torch.cat((_complete_graph(5), _path_graph(5), 4 * _path_graph(5)))
+        batched = commute_time(distinct)
+        assert batched[1, 0, 4] == pytest.approx(32.0)
+        torch.testing.assert_close(batched[1], batched[2])
+        for batch_index in range(distinct.shape[0]):
+            singleton = distinct[batch_index:batch_index + 1]
+            torch.testing.assert_close(
+                batched[batch_index], commute_time(singleton)[0],
+            )
+        edge = _path_graph(2)
+        looped = edge + 10 * torch.eye(2, dtype=edge.dtype)
+        assert commute_time(looped)[0, 0, 1] == pytest.approx(2.0)
 
 
 # --------------------------------------------------------------------
@@ -146,40 +168,43 @@ class TestCommuteTime:
 # --------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("batch", [1, 2, 4])
-class TestShapes:
-    def test_resistance_shape(self, batch):
-        A = _complete_graph(5, batch=batch)
-        R = effective_resistance(A)
-        assert R.shape == (batch, 5, 5)
-
-    def test_commute_time_shape(self, batch):
-        A = _complete_graph(5, batch=batch)
-        C = commute_time(A)
-        assert C.shape == (batch, 5, 5)
-
-
 class TestEdgeCases:
     def test_batch_zero(self):
-        """B=0 must work — project convention is `B ∈ {0, 1, >1}`."""
+        """B=0 preserves empty shapes, including zero-node graphs."""
         A = torch.zeros(0, 4, 4, dtype=torch.float64)
         R = effective_resistance(A)
         assert R.shape == (0, 4, 4)
         C = commute_time(A)
         assert C.shape == (0, 4, 4)
+        for function in (effective_resistance, commute_time):
+            empty = torch.empty(1, 0, 0, dtype=torch.float64)
+            assert function(empty).shape == (1, 0, 0)
 
-    def test_n_one(self):
-        """Single-node "graph": R(0, 0) = 0 trivially."""
-        A = torch.zeros(1, 1, 1, dtype=torch.float64)
-        R = effective_resistance(A)
-        assert R.shape == (1, 1, 1)
-        assert R[0, 0, 0].item() == pytest.approx(0.0, abs=1e-12)
 
     def test_all_zeros_graph(self):
-        """An empty adjacency (no edges anywhere) is a valid degenerate
-        input. R must be all zeros: every node is isolated, the
-        Laplacian is identically zero, the pseudoinverse is zero, and
-        the formula R = L⁺[u,u] + L⁺[v,v] − 2 L⁺[u,v] evaluates to 0."""
-        A = torch.zeros(1, 5, 5, dtype=torch.float64)
-        R = effective_resistance(A)
-        torch.testing.assert_close(R, torch.zeros_like(R), atol=1e-12, rtol=0)
+        """No path means infinite resistance and commute time between distinct nodes."""
+        for n in (1, 5):
+            A = torch.zeros(1, n, n, dtype=torch.float64)
+            expected = torch.full_like(A, float("inf"))
+            expected.diagonal(dim1=-2, dim2=-1).zero_()
+            torch.testing.assert_close(effective_resistance(A), expected)
+            torch.testing.assert_close(commute_time(A), expected)
+        disjoint_edges = torch.block_diag(_path_graph(2)[0], _path_graph(2)[0])[None]
+        resistance = effective_resistance(disjoint_edges)
+        commute = commute_time(disjoint_edges)
+        assert resistance[0, 0, 1] == pytest.approx(1.0)
+        assert commute[0, 0, 1] == pytest.approx(2.0)
+        assert torch.isinf(resistance[0, 0, 2])
+        assert torch.isinf(commute[0, 0, 2])
+        # The strong component cannot erase the weak component's spectrum.
+        for dtype in (torch.float32, torch.float64):
+            different_scales = disjoint_edges.to(dtype)
+            different_scales[:, :2, :2] *= 1e-7
+            resistance = effective_resistance(different_scales)
+            commute = commute_time(different_scales)
+            torch.testing.assert_close(resistance[0, 0, 1],
+                                       torch.tensor(1e7, dtype=dtype))
+            torch.testing.assert_close(commute[0, 0, 1],
+                                       torch.tensor(2., dtype=dtype))
+            assert torch.isinf(resistance[0, 0, 2])
+            assert torch.isinf(commute[0, 0, 2])

@@ -1,67 +1,55 @@
 [project]
 name = "holonomy-lib"
-version = "0.7.0"
-description = "Research-grade PyTorch math: hyperbolic + spherical + Euclidean + pseudo-Riemannian + mixed-curvature + heterogeneous-κ manifolds with full autograd; differentiable hyperbolic heat kernels; spectral graph theory; discrete Ricci flow; simplicial topology; persistent homology; cellular sheaves; SO(3) Lie primitives; information geometry; tensor decompositions; content-addressable provenance. GPU-native, batched-first, audit-clean, cited."
+version = "0.8.0"
+description = "Batched PyTorch primitives for Riemannian geometry, spectral graph theory, discrete curvature, topology, and tensor decompositions."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "FSL-1.1-ALv2"
+license-files = ["LICENSE.md"]
 authors = [{ name = "Jack" }]
 requires-python = ">=3.12"
 keywords = [
     "pytorch",
     "differential-geometry",
     "riemannian-manifolds",
+    "hyperbolic-geometry",
+    "riemannian-optimization",
     "spectral-graph-theory",
-    "ricci-flow",
-    "ollivier-ricci-curvature",
-    "forman-ricci-curvature",
+    "graph-laplacian",
     "magnetic-laplacian",
-    "directed-graphs",
-    "graph-signal-processing",
     "heat-kernel",
     "diffusion-maps",
     "effective-resistance",
-    "lanczos",
-    "information-geometry",
-    "bregman-divergence",
-    "kl-divergence",
-    "tensor-decomposition",
-    "hosvd",
-    "optimal-transport",
-    "sinkhorn",
-    "mechanistic-interpretability",
-    "provenance",
-    "merkle-dag",
-    "numerical-linear-algebra",
-    "gpu-computing",
-    "persistent-homology",
+    "ricci-curvature",
+    "ricci-flow",
+    "cellular-sheaves",
     "simplicial-complex",
-    "topological-data-analysis",
-    "riemannian-optimization",
     "hodge-laplacian",
+    "persistent-homology",
+    "topological-data-analysis",
+    "information-geometry",
+    "tensor-decomposition",
+    "numerical-linear-algebra",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Mathematics",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
 
-# Runtime dependencies. `torch >= 2.0` is included for ergonomic
-# `pip install holonomy-lib` on CPU and the default CUDA wheel.
-# ROCm users: install your own torch wheel BEFORE `pip install
-# holonomy-lib`, or use `--force-reinstall` after, e.g.:
-#   pip install --index-url https://download.pytorch.org/whl/rocm6.4 torch
-#   pip install holonomy-lib
-# pip / uv will respect the already-installed torch.
+# The floors are the first releases that ship Python 3.12 wheels; nothing in
+# the source needs anything newer. torch decides the hardware: pip picks the
+# default CUDA wheel, so for ROCm, a specific CUDA version or CPU-only, install
+# torch first from https://pytorch.org/get-started/locally/ and pip will keep it.
 dependencies = [
-    "torch>=2.0",
-    "numpy",
-    "scipy",
+    "torch>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.11.2",
 ]
 
 [project.urls]
@@ -69,24 +57,15 @@ Homepage = "https://github.com/Synoros-io/holonomy_lib"
 Repository = "https://github.com/Synoros-io/holonomy_lib"
 Issues = "https://github.com/Synoros-io/holonomy_lib/issues"
 
-[project.optional-dependencies]
-# Runtime extras for the optional provenance helpers. The library
-# uses these only inside specific methods:
-#   - `blake3`: ~5-10x faster than sha256 for the provenance hash
-#     computation. Falls back to sha256 if not installed.
-#   - `networkx`: used by `ProvenanceRegistry.to_networkx()`.
-#   - `pandas`: used by `ProvenanceRegistry.to_dataframe()`.
-# Skip this extra if you don't need mech-interp DAG exports.
-provenance-extras = ["blake3", "networkx", "pandas"]
+[project.scripts]
+holonomy-explorer = "holonomy_explorer.__main__:main"
 
-# Comparison-test extras: third-party libraries we cross-check
-# implementations against (pymanopt, geoopt for manifolds; tensorly
-# for HOSVD; gudhi, ripser for persistent homology; GraphRicciCurvature
-# for Ollivier-Ricci; networkx as a graph-data-structure peer). These
-# are NOT runtime dependencies — the comparison tests use
-# `pytest.importorskip` and silently skip when the comparison lib
-# isn't installed. Install this extra ONLY if you want to run the
-# full cross-comparison test suite locally.
+[tool.setuptools.package-data]
+holonomy_explorer = ["static/*"]
+
+[project.optional-dependencies]
+# Libraries the cross-check tests compare against. None of them are needed at
+# runtime; each comparison test skips itself when its library is missing.
 comparison = [
     "pymanopt",
     "geoopt",
@@ -99,35 +78,30 @@ comparison = [
     "GraphRicciCurvature",
 ]
 
-# MCP server: exposes a saved provenance registry as a set of MCP
-# tools (list_ops, where, node_info, ancestors, get_tensor_summary,
-# replay). Useful for letting Claude / other agents inspect a live
-# registry from outside the Python process. Requires the official
-# `mcp` SDK; entry point is `python -m holonomy_lib.provenance.mcp`.
-mcp = ["mcp>=0.9"]
-
-# Jupyter cell magic for inline DAG rendering. Enables
-# `%load_ext holonomy_lib.provenance.jupyter` + `%%record_provenance`
-# wrapping a cell with `record()` and showing the Mermaid DAG below
-# the output. Requires IPython; not used by the core library.
-jupyter = ["ipython"]
-
-# Development toolchain.
-dev = ["pytest", "ruff", "mypy"]
-
-# Convenience extras: everything.
-all = [
-    "blake3",
-    "networkx",
-    "pandas",
-    "pytest",
-    "ruff",
-    "mypy",
-]
+# Development toolchain: tests, lint, type checks (with SciPy's stubs so mypy
+# can see through the sparse and quadrature fallbacks).
+dev = ["pytest", "ruff", "mypy", "scipy-stubs"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [".scratch", "archive", "notes"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true

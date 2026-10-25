@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Internal graph-primitive utilities shared across modules.
 
@@ -13,13 +13,12 @@ Conventions enforced here (see `CONVENTIONS.md`):
 
   Rationale: most of the math (Forman-Ricci, Ollivier-Ricci, the
   random-walk and symmetric-normalized Laplacians, magnetic Laplacian)
-  is defined on simple graphs in the source literature. Implicitly
-  including self-loops changes `d_i = Σ_j A[i, j]` and propagates into
-  every downstream operation (normalizers, walk distributions, phase
-  factors). Letting the caller decide silently produced
-  inconsistent semantics across primitives — different ops gave
-  different answers on the same input depending on whether they
-  happened to cancel the diagonal.
+  is defined on simple graphs in the source literature. Including a
+  self-loop changes `d_i = Σ_j A[i, j]` and every quantity built from
+  it (normalizers, walk distributions, phase factors). If each
+  primitive left the diagonal to the caller, the same input could give
+  different answers depending on whether that primitive happened to
+  cancel it, so the policy is applied once, at entry.
 
   The combinatorial Laplacian `L = D − A` happens to be invariant to
   self-loops (the diagonal subtraction zeroes them), but we still drop
@@ -32,7 +31,7 @@ import torch
 
 
 def drop_self_loops(A: torch.Tensor) -> torch.Tensor:
-    """Return a view of `A` with the diagonal zeroed.
+    """Return a tensor with the diagonal of `A` zeroed.
 
     Args:
       A: (..., n, n) adjacency-like tensor.
@@ -42,10 +41,12 @@ def drop_self_loops(A: torch.Tensor) -> torch.Tensor:
       except `result[..., i, i] = 0` for all i.
 
     Notes:
-      Uses `torch.where` so the operation stays vectorized and is
-      compatible with `torch.vmap` / `torch.compile`. The eye tensor
-      is built with `A`'s dtype to avoid implicit dtype promotion.
+      Uses `torch.where`, so the zeroing is one vectorized op over the
+      batch. The boolean eye mask leaves the value dtype of `A` unchanged.
+
+    References:
+      Chung (1997). Spectral Graph Theory. AMS, Chapter 1, simple graphs.
     """
     n = A.shape[-1]
-    eye = torch.eye(n, device=A.device, dtype=A.dtype).expand_as(A)
-    return torch.where(eye > 0, torch.zeros_like(A), A)
+    eye = torch.eye(n, device=A.device, dtype=torch.bool).expand_as(A)
+    return torch.where(eye, torch.zeros_like(A), A)

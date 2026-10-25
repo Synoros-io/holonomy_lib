@@ -1,6 +1,6 @@
 """Sympy symbolic verification of the hyperbolic-heat-kernel recursion.
 
-Pseudo-verification for **C1** (research-claims catalog). Checks two
+Checks two
 things symbolically:
 
 1. **The corrected recursion identity**

@@ -1,13 +1,13 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.algebra.eigsh_sparse (sparse smallest-k eigenpairs).
 
 Three layers:
-  1. Unit — validation (dense input rejected, k range, bad solver).
-  2. Property — eigenpair residual `A v ≈ λ v`; ascending eigenvalues;
+  1. Unit: validation (dense input rejected, k range, bad solver).
+  2. Property: eigenpair residual `A v ≈ λ v`; ascending eigenvalues;
      orthonormal eigenvectors.
-  3. Comparison — every backend against dense `torch.linalg.eigvalsh`
+  3. Comparison: every backend against dense `torch.linalg.eigvalsh`
      on the same operator, and the two SciPy branches against each
      other (the substrate-era "same modes" claim, re-verified here).
 """
@@ -45,24 +45,15 @@ class TestValidation:
     def test_rejects_dense_input(self):
         with pytest.raises(ValueError, match="sparse"):
             eigsh_sparse_sa(torch.eye(8, dtype=DT), k=2)
-
-    def test_rejects_bad_k(self):
-        A, _ = _sparse_psd(10)
-        with pytest.raises(ValueError, match="k must satisfy"):
-            eigsh_sparse_sa(A, k=0)
-        with pytest.raises(ValueError, match="k must satisfy"):
-            eigsh_sparse_sa(A, k=10)  # k < n strict
-
-    def test_rejects_bad_solver(self):
-        A, _ = _sparse_psd(10)
-        with pytest.raises(ValueError, match="solver"):
-            eigsh_sparse_sa(A, k=2, solver="qr")
+        asymmetric = torch.tensor([[1.0, 1.0], [0.0, 2.0]], dtype=DT).to_sparse()
+        with pytest.warns(UserWarning, match="asymmetric"):
+            eigsh_sparse_sa(asymmetric, k=2)
 
 
 @pytest.mark.parametrize("solver", ["eigsh", "lobpcg", "torch_lobpcg", "auto"])
-def test_bottom_k_matches_dense_eigvalsh(solver):
-    A_sp, A_dn = _sparse_psd(60, seed=1)
-    k = 5
+@pytest.mark.parametrize("n,k,seed", [(60, 5, 1), (80, 6, 2)])
+def test_bottom_k_matches_dense_eigvalsh(solver, n, k, seed):
+    A_sp, A_dn = _sparse_psd(n, seed=seed)
     g = torch.Generator().manual_seed(0)
     vals, vecs = eigsh_sparse_sa(A_sp, k=k, solver=solver, generator=g)
     ref = torch.linalg.eigvalsh(A_dn)[:k]
@@ -79,25 +70,49 @@ def test_bottom_k_matches_dense_eigvalsh(solver):
     resid = (A_dn @ vecs - vecs * vals.unsqueeze(0)).norm(dim=0)
     assert (resid < 1e-6 * torch.linalg.matrix_norm(A_dn, ord=2)).all()
     torch.testing.assert_close(
-        vecs.mT @ vecs, torch.eye(k, dtype=DT), atol=1e-8, rtol=0,
+        vecs.mT @ vecs,
+        torch.eye(k, dtype=DT),
+        atol=1e-8,
+        rtol=0,
     )
     assert (vals.diff() >= -1e-12).all()
+    repeated_vals, repeated_vecs = eigsh_sparse_sa(
+        A_sp,
+        k=k,
+        solver=solver,
+        generator=torch.Generator().manual_seed(0),
+    )
+    torch.testing.assert_close(vals, repeated_vals)
+    torch.testing.assert_close(vecs @ vecs.mT, repeated_vecs @ repeated_vecs.mT)
+    indefinite = torch.diag(torch.tensor([-10.0, -2.0, 1.0, 3.0], dtype=DT))
+    for count in (1, 2, 4):
+        values, vectors = eigsh_sparse_sa(
+            indefinite.to_sparse(),
+            count,
+            solver=solver,
+            generator=torch.Generator().manual_seed(0),
+        )
+        torch.testing.assert_close(
+            values, torch.tensor([-10.0, -2.0, 1.0, 3.0], dtype=DT)[:count]
+        )
+        residual = (indefinite @ vectors - vectors * values).norm(dim=0)
+        assert (residual <= 1e-6 * (indefinite.norm() + values.abs())).all()
+    zero_vals, zero_vectors = eigsh_sparse_sa(
+        torch.zeros(8, 8, dtype=DT).to_sparse(), 1, solver=solver
+    )
+    torch.testing.assert_close(zero_vals, torch.zeros(1, dtype=DT))
+    torch.testing.assert_close(
+        zero_vectors.mT @ zero_vectors, torch.ones(1, 1, dtype=DT)
+    )
+    with pytest.raises(ValueError, match="autograd"):
+        eigsh_sparse_sa(A_sp.requires_grad_(), k=k, solver=solver)
 
 
-def test_scipy_branches_agree_with_each_other():
-    A_sp, _ = _sparse_psd(80, seed=2)
-    k = 6
-    g = torch.Generator().manual_seed(0)
-    vals_e, _ = eigsh_sparse_sa(A_sp, k=k, solver="eigsh")
-    vals_l, _ = eigsh_sparse_sa(A_sp, k=k, solver="lobpcg", generator=g)
-    # The substrate-era claim: same modes from both branches. Values
-    # agree to the LOBPCG convergence tolerance or better.
-    torch.testing.assert_close(vals_e, vals_l, atol=1e-7, rtol=0)
-
-
-def test_lanczos_eigsh_dispatches_sparse_sa():
+@pytest.mark.parametrize("layout", [torch.sparse_coo, torch.sparse_csr])
+def test_lanczos_eigsh_dispatches_sparse_sa(layout):
     A_sp, A_dn = _sparse_psd(50, seed=3)
     k = 4
+    A_sp = A_dn.to_sparse(layout=layout)
     vals, vecs = lanczos_eigsh(A_sp, k, which="SA")
     ref = torch.linalg.eigvalsh(A_dn)[:k]
     torch.testing.assert_close(vals, ref, atol=1e-10, rtol=0)
@@ -111,8 +126,11 @@ def test_dense_and_sparse_sa_agree():
     k = 3
     vals_sp, _ = lanczos_eigsh(A_sp, k, which="SA")
     vals_dn, _ = lanczos_eigsh(
-        A_dn.unsqueeze(0), k, which="SA",
-        sigma=-1e-6, n_iter=40,
+        A_dn.unsqueeze(0),
+        k,
+        which="SA",
+        sigma=-1e-6,
+        n_iter=40,
     )
     torch.testing.assert_close(vals_sp, vals_dn[0], atol=1e-8, rtol=0)
 

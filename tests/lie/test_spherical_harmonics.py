@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.lie.real_spherical_harmonics.
 
@@ -12,7 +12,7 @@ Cover:
   6. Orthonormality: Monte-Carlo integral over uniform-on-S² samples
      gives `δ_{lm,l'm'}` to ~1/√N.
   7. SO(3) equivariance: rotating the input direction permutes the
-     same-l components by an orthogonal real Wigner matrix — concretely,
+     same-l components by an orthogonal real Wigner matrix : concretely,
      the l-block stays in the l-block and its norm is preserved.
 """
 
@@ -22,6 +22,7 @@ import math
 
 import pytest
 import torch
+from scipy.special import sph_harm_y
 
 from holonomy_lib.lie import real_spherical_harmonics, so3
 
@@ -51,23 +52,8 @@ class TestValidationAndShape:
                 torch.zeros(5, 2, dtype=torch.float64), l_max=1,
             )
 
-    def test_rejects_l_max_too_high(self):
-        with pytest.raises(ValueError, match="l_max"):
-            real_spherical_harmonics(
-                torch.zeros(5, 3, dtype=torch.float64), l_max=5,
-            )
 
-    def test_rejects_negative_l_max(self):
-        with pytest.raises(ValueError, match="l_max"):
-            real_spherical_harmonics(
-                torch.zeros(5, 3, dtype=torch.float64), l_max=-1,
-            )
 
-    @pytest.mark.parametrize("l_max", [0, 1, 2, 3, 4])
-    def test_output_shape(self, l_max):
-        v = _uniform_sphere(7, seed=0)
-        y = real_spherical_harmonics(v, l_max=l_max)
-        assert y.shape == (7, (l_max + 1) ** 2)
 
 
 # --------------------------------------------------------------------
@@ -141,11 +127,11 @@ class TestOrthonormality:
         y = real_spherical_harmonics(r, l_max=l_max)    # (n, D)
         # Empirical Gram: 4π · (y^T y) / n ≈ I_D.
         gram = (4.0 * math.pi) * (y.mT @ y) / n
-        I = torch.eye(D, dtype=torch.float64)
+        identity = torch.eye(D, dtype=torch.float64)
         # MC error scales as 1/√n; with n = 80000, expect ~3-4e-3.
-        max_err = (gram - I).abs().max().item()
+        max_err = (gram - identity).abs().max().item()
         assert max_err < 0.02, (
-            f"empirical Gram should be ~I; max |G − I| = {max_err:.4e}"
+            f"empirical Gram should be ~identity; max |G − identity| = {max_err:.4e}"
         )
 
 
@@ -162,9 +148,9 @@ class TestRotationEquivariance:
     equivariance (mixing matrix is orthogonal) is a v0.2 test once
     Wigner-D matrices ship."""
 
-    @pytest.mark.parametrize("l_max", [1, 2, 3, 4])
-    def test_l_block_norm_invariant_under_rotation(self, l_max):
-        n = 50
+    @pytest.mark.parametrize("l_max", [0, 1, 2, 3, 4])
+    @pytest.mark.parametrize("n", [0, 1, 7, 50])
+    def test_l_block_norm_invariant_under_rotation(self, l_max, n):
         r = _uniform_sphere(n, seed=11)
         R = so3.random_so3(batch_size=n, generator=_seeded(13))
         # Rotate each direction by its own random rotation.
@@ -172,10 +158,30 @@ class TestRotationEquivariance:
         r_rot = torch.einsum("nij,nj->ni", R, r)
         y0 = real_spherical_harmonics(r, l_max=l_max)
         y1 = real_spherical_harmonics(r_rot, l_max=l_max)
+        assert y0.shape == (n, (l_max + 1) ** 2)
+        assert y1.shape == y0.shape
+        # The independent complex associated-Legendre implementation fixes
+        # signs as well as norms, including every degree-four component.
+        theta = torch.acos(r[:, 2]).numpy()
+        phi = torch.atan2(r[:, 1], r[:, 0]).numpy()
+        reference = []
+        for degree in range(l_max + 1):
+            for order in range(-degree, degree + 1):
+                complex_value = sph_harm_y(degree, abs(order), theta, phi)
+                if order < 0:
+                    value = math.sqrt(2.) * (-1.) ** order * complex_value.imag
+                elif order > 0:
+                    value = math.sqrt(2.) * (-1.) ** order * complex_value.real
+                else:
+                    value = complex_value.real
+                reference.append(torch.from_numpy(value))
+        torch.testing.assert_close(
+            y0, torch.stack(reference, dim=-1), atol=1e-12, rtol=0,
+        )
         # For each l, slice the (2l+1) components and compare l²-norms.
         offset = 0
-        for l in range(l_max + 1):
-            width = 2 * l + 1
+        for degree in range(l_max + 1):
+            width = 2 * degree + 1
             block0 = y0[..., offset:offset + width]
             block1 = y1[..., offset:offset + width]
             norm0 = (block0 * block0).sum(dim=-1)

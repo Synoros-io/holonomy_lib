@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Vietoris-Rips complex from a point cloud or distance matrix.
 
@@ -9,12 +9,12 @@ exists iff `d(v_i, v_j) ≤ r` for every pair `(i, j)`. It's the
 standard finite-scale approximation to the (typically infinite)
 Čech complex and the input to most persistent-homology pipelines.
 
-Cost: enumerating k-simplices requires checking all `C(n, k+1)`
-candidate (k+1)-tuples; for k-tuples sharing a common (k-1)-face we
-use incremental construction (each k-simplex is built from a
-(k-1)-simplex + one extra "cofaceable" vertex), bringing the
-practical cost to O(n · max_deg^k) where max_deg is the maximum
-1-neighborhood size at radius `r`.
+Construction extends each existing simplex by larger vertex indices.
+Candidates are checked in configurable tiles; no batch, vertex, or simplex
+is traversed individually in Python. Dimension progression is sequential
+because a k-simplex is extended from a (k-1)-simplex. The worst case still
+has combinatorial output size. Tiles bound candidate working memory, not
+the size of the returned complex.
 
 References:
   Hausmann, J.-C. (1995). On the Vietoris-Rips complexes and a
@@ -27,145 +27,174 @@ References:
 
 from __future__ import annotations
 
-from itertools import combinations
-
 import torch
 
-from holonomy_lib.provenance import with_provenance
 from holonomy_lib.simplicial.complex import DenseSimplicialComplex
 from holonomy_lib.simplicial.sparse_complex import SparseSimplicialComplex
 
+# Each tile evaluates at most this many extension candidates, so the temporary
+# index and bool tables stay at O(tile * simplex_width) entries. It is a memory
+# budget with no effect on results. Raise it on large-memory devices for fewer
+# kernel launches. Cataloged in notes/magic_numbers.md.
+VR_CANDIDATE_TILE_DEFAULT = 1024
 
-@with_provenance(
-    "holonomy_lib.simplicial.vietoris_rips_sparse", op_version="0.1",
-)
+
+def _rips_tables(
+    distances: torch.Tensor, max_radius: float, max_dim: int,
+    candidate_tile_size: int,
+) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+    """Build the simplex table of every dimension up to `max_dim`.
+
+    Takes `(B, n, n)` distances, the radius cap, the top dimension, and the
+    candidate tile size. Returns a dict from dimension to `(batch_ids, simplices)`,
+    where `batch_ids` is `(m,)` and `simplices` is `(m, dim + 1)` vertex indices.
+    Rows are grouped by batch member and sorted lexicographically within each
+    member. Only pairs with i < j are read, so the distances are assumed symmetric.
+    """
+    if distances.ndim != 2 + 1 or distances.shape[-1] != distances.shape[-2]:
+        raise ValueError(
+            f"distances must be (B, n, n); got {tuple(distances.shape)}"
+        )
+    if not distances.is_floating_point():
+        raise ValueError("distances must have a real floating dtype")
+    if not isinstance(max_dim, int) or max_dim < 0:
+        raise ValueError(f"max_dim must be a nonnegative integer, got {max_dim}")
+    if not isinstance(candidate_tile_size, int) or candidate_tile_size <= 0:
+        raise ValueError("candidate_tile_size must be a positive integer")
+    if max_radius < 0:
+        raise ValueError("max_radius must be nonnegative")
+
+    batch_size, n_vertices, _ = distances.shape
+    device = distances.device
+    vertex_ids = torch.arange(n_vertices, device=device)
+    batch_ids = torch.arange(batch_size, device=device)
+    tables = {0: (
+        batch_ids.repeat_interleave(n_vertices),
+        vertex_ids.expand(batch_size, -1).reshape(-1, 1),
+    )}
+    if max_dim == 0:
+        return tables
+
+    # Pairs within the cap. The diagonal passes too, but the i < j mask below
+    # removes it.
+    adjacency = distances <= max_radius
+    # torch.where returns indices in row-major order, so edges come out grouped
+    # by batch member and sorted by (i, j).
+    edge_batch, edge_left, edge_right = torch.where(
+        adjacency & (vertex_ids[:, None] < vertex_ids[None, :]),
+    )
+    tables[1] = (edge_batch, torch.stack((edge_left, edge_right), dim=-1))
+    for dim in range(2, max_dim + 1):
+        previous_batch, previous = tables[dim - 1]
+        chunks: list[torch.Tensor] = []
+        batch_chunks: list[torch.Tensor] = []
+        # A candidate is a parent simplex plus one extra vertex. Requiring the
+        # extra vertex to exceed the parent's largest vertex gives every simplex
+        # exactly one parent: the simplex with its largest vertex removed.
+        n_candidates = previous.shape[0] * n_vertices
+        for start in range(0, n_candidates, candidate_tile_size):
+            candidate_ids = torch.arange(
+                start, min(start + candidate_tile_size, n_candidates),
+                device=device,
+            )
+            # Each candidate id encodes (parent row, extra vertex) as
+            # parent * n_vertices + extra.
+            parent_ids = candidate_ids // n_vertices
+            extra_vertices = candidate_ids % n_vertices
+            # Only extra vertices above the parent's largest vertex are canonical.
+            ordered = extra_vertices > previous[parent_ids, -1]
+            parent_ids = parent_ids[ordered]
+            extra_vertices = extra_vertices[ordered]
+            parents = previous[parent_ids]
+            batches = previous_batch[parent_ids]
+            # The parent's own edges already passed, so only the new vertex's
+            # edges to the parent's vertices need checking.
+            cofaceable = adjacency[
+                batches[:, None], parents, extra_vertices[:, None],
+            ].all(dim=-1)
+            chunks.append(torch.cat((
+                parents[cofaceable], extra_vertices[cofaceable, None],
+            ), dim=-1))
+            batch_chunks.append(batches[cofaceable])
+        tables[dim] = (
+            torch.cat(batch_chunks) if batch_chunks else batch_ids[:0],
+            torch.cat(chunks) if chunks else torch.empty(
+                (0, dim + 1), device=device, dtype=torch.int64,
+            ),
+        )
+    return tables
+
+
 def vietoris_rips_sparse(
     distances: torch.Tensor,
     max_radius: float,
     max_dim: int,
+    *,
+    candidate_tile_size: int = VR_CANDIDATE_TILE_DEFAULT,
 ) -> SparseSimplicialComplex:
     """Vietoris-Rips complex from a single distance matrix.
 
     Args:
-      distances: `(n, n)` symmetric distance matrix.
+      distances: `(n, n)` symmetric real distance matrix.
       max_radius: include only pairs with `d <= max_radius`.
-      max_dim: build simplices up to dimension `max_dim` (inclusive).
+      max_dim: build simplex tables through this dimension, including
+        empty tables where no simplex exists.
+      candidate_tile_size: maximum number of simplex-extension candidates
+        evaluated at once. It bounds temporary storage, not output size.
 
     Returns:
-      `SparseSimplicialComplex` containing all VR simplices at scale
-      `max_radius` up to dim `max_dim`.
+      Single-instance complex on the input device.
+
+    Notes:
+      Dimensions are constructed sequentially because each extension uses
+      the preceding dimension. Candidates within a tile are tensorized.
 
     References:
       Hausmann, J.-C. (1995). On the Vietoris-Rips complexes and a
         cohomology theory for metric spaces. In Prospects in Topology,
         Annals of Math Studies 138.
       Bauer, U. (2021). Ripser: efficient computation of Vietoris-Rips
-        persistence barcodes. J. Appl. Comput. Topology 5:391-423,
-        §3 — incremental k-simplex construction.
+        persistence barcodes. J. Appl. Comput. Topology 5:391-423.
     """
     if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
         raise ValueError(
             f"distances must be (n, n); got {tuple(distances.shape)}"
         )
-    if max_dim < 0:
-        raise ValueError(f"max_dim must be >= 0, got {max_dim}")
-
-    n = distances.shape[0]
-    device = distances.device
-
-    # Adjacency: edge (i, j) exists iff i < j and d(i,j) <= max_radius.
-    # Strictly upper-triangular to avoid double-counting.
-    adj_mask = (distances <= max_radius) & (
-        torch.arange(n, device=device).unsqueeze(0)
-        < torch.arange(n, device=device).unsqueeze(1)
+    tables = _rips_tables(
+        distances.unsqueeze(0), max_radius, max_dim, candidate_tile_size,
     )
-
-    simplices_by_dim: dict[int, torch.Tensor] = {}
-
-    # Dim 0 — every vertex is a 0-simplex.
-    simplices_by_dim[0] = torch.arange(
-        n, dtype=torch.int64, device=device,
-    ).unsqueeze(-1)
-
-    if max_dim >= 1:
-        # Dim 1 — edges from the adjacency mask.
-        ij = torch.argwhere(adj_mask)
-        # Sort each row so vertex tuples are canonical [smaller, larger].
-        edges = torch.minimum(ij[:, 0:1], ij[:, 1:2])
-        edges = torch.cat([edges, torch.maximum(ij[:, 0:1], ij[:, 1:2])], dim=1)
-        # Lexsort the edges so the simplex table has a deterministic order.
-        edges = _lex_sort_rows(edges)
-        simplices_by_dim[1] = edges
-
-    # Build higher-dim simplices incrementally: a (k+1)-simplex exists
-    # iff every (k+1)-vertex subset's pairwise distances are <= max_radius.
-    # We enumerate combinations of the existing edge set's vertices,
-    # filtering by the adjacency mask. This is the same algorithm used by
-    # ripser's incremental builder, simplified for v1.
-    if max_dim >= 2:
-        # 1-neighborhood per vertex: which vertices it's connected to.
-        # Encode as a list of sorted neighbors per vertex.
-        neighbors: list[list[int]] = [[] for _ in range(n)]
-        edges_list = simplices_by_dim[1].tolist()
-        for v0, v1 in edges_list:
-            neighbors[v0].append(v1)
-
-        for k in range(2, max_dim + 1):
-            new_simplices: list[list[int]] = []
-            # For each (k-1)-simplex, attempt to extend by every vertex
-            # that's a neighbor of all of its vertices.
-            prev = simplices_by_dim[k - 1].tolist()
-            for prev_simplex in prev:
-                last_vertex = prev_simplex[-1]
-                # Candidates: vertices > last_vertex that are neighbors
-                # of every vertex in prev_simplex.
-                candidate_set = set(
-                    v for v in neighbors[prev_simplex[0]] if v > last_vertex
-                )
-                for v in prev_simplex[1:]:
-                    candidate_set &= set(neighbors[v])
-                for v in sorted(candidate_set):
-                    new_simplices.append(prev_simplex + [v])
-            if new_simplices:
-                simplices_by_dim[k] = torch.tensor(
-                    new_simplices, dtype=torch.int64, device=device,
-                )
-            else:
-                # No k-simplices at this scale; stop.
-                break
-
     return SparseSimplicialComplex(
-        simplices_by_dim=simplices_by_dim,
-        n_vertices=n,
-        device=device,
+        simplices_by_dim={dim: table for dim, (_, table) in tables.items()},
+        n_vertices=distances.shape[-1], device=distances.device,
     )
 
 
-@with_provenance(
-    "holonomy_lib.simplicial.vietoris_rips_dense", op_version="0.1",
-)
 def vietoris_rips_dense(
     distances: torch.Tensor,
     max_radius: float,
     max_dim: int,
-    dtype: torch.dtype = torch.float64,
+    dtype: torch.dtype | None = None,
+    *,
+    candidate_tile_size: int = VR_CANDIDATE_TILE_DEFAULT,
 ) -> DenseSimplicialComplex:
-    """Batched Vietoris-Rips construction.
+    """Batched Vietoris-Rips construction with padded simplex tables.
 
     Args:
-      distances: `(B, n, n)` symmetric distance matrices.
+      distances: `(B, n, n)` symmetric real distance matrices.
       max_radius: include pairs with `d <= max_radius`.
-      max_dim: build simplices up to dim `max_dim`.
-      dtype: float dtype for the resulting complex's boundary returns.
+      max_dim: build tables through this dimension, including empty ones.
+      dtype: boundary-operator dtype; defaults to the distances' dtype.
+      candidate_tile_size: maximum number of simplex-extension candidates
+        evaluated at once. It bounds temporary storage, not output size.
 
     Returns:
-      `DenseSimplicialComplex` with per-batch padded simplex tables.
+      A complex with per-batch padded simplex tables on the input device.
+      Empty batches retain all requested dimensions.
 
-    Implementation: builds a `SparseSimplicialComplex` per batch element
-    (via `vietoris_rips_sparse`), then pads to the max simplex count
-    per dimension and stacks. Simple and clear; for very large `B` or
-    very large `n` a vectorized batched build would help, but isn't
-    needed at v1 sizes.
+    Notes:
+      Batch members share tensor candidate evaluation and packing. Only
+      dimensions and memory tiles are traversed in Python. Dimension
+      progression is sequential because extensions require their parents.
 
     References:
       Hausmann, J.-C. (1995). On the Vietoris-Rips complexes and a
@@ -173,58 +202,42 @@ def vietoris_rips_dense(
       Bauer, U. (2021). Ripser: efficient computation of Vietoris-Rips
         persistence barcodes. J. Appl. Comput. Topology 5:391-423.
     """
-    if distances.ndim != 3 or distances.shape[-1] != distances.shape[-2]:
-        raise ValueError(
-            f"distances must be (B, n, n); got {tuple(distances.shape)}"
-        )
-    B = distances.shape[0]
+    tables = _rips_tables(distances, max_radius, max_dim, candidate_tile_size)
+    batch_size = distances.shape[0]
     device = distances.device
-
-    sparse_complexes = [
-        vietoris_rips_sparse(distances[b], max_radius, max_dim)
-        for b in range(B)
-    ]
-
-    # Find the max simplex count per dimension across batches.
-    all_dims = set()
-    for sc in sparse_complexes:
-        all_dims.update(sc.simplices_by_dim.keys())
-
     simplices_by_dim: dict[int, torch.Tensor] = {}
     valid_mask: dict[int, torch.Tensor] = {}
-
-    for k in sorted(all_dims):
-        n_k_max = max(
-            sc.simplices_by_dim[k].shape[0] if k in sc.simplices_by_dim else 0
-            for sc in sparse_complexes
-        )
-        d = k + 1  # vertices per k-simplex
+    for dim, (batches, table) in tables.items():
+        counts = torch.bincount(batches, minlength=batch_size)
+        # The padded width is the largest count over batch members, which only
+        # the data can tell us. int() syncs the device once per dimension
+        # before the output table is allocated.
+        width = int(counts.max()) if batch_size else 0
+        # Every member has exactly n vertices, so dim 0 uses n directly. That
+        # also keeps the width right when the batch is empty.
+        if dim == 0:
+            width = distances.shape[-1]
         padded = torch.full(
-            (B, n_k_max, d), -1, dtype=torch.int64, device=device,
+            (batch_size, width, dim + 1), -1,
+            dtype=torch.int64, device=device,
         )
-        mask = torch.zeros(B, n_k_max, dtype=torch.bool, device=device)
-        for b, sc in enumerate(sparse_complexes):
-            if k not in sc.simplices_by_dim:
-                continue
-            tbl = sc.simplices_by_dim[k]
-            n_k = tbl.shape[0]
-            padded[b, :n_k] = tbl
-            mask[b, :n_k] = True
-        simplices_by_dim[k] = padded
-        valid_mask[k] = mask
-
+        mask = torch.zeros(batch_size, width, dtype=torch.bool, device=device)
+        # Tables are sorted by batch id, so member b's rows are contiguous and
+        # start at offsets[b]. columns is each row's slot inside its member's
+        # padded block.
+        offsets = counts.cumsum(0) - counts
+        columns = torch.arange(table.shape[0], device=device) - offsets[batches]
+        padded[batches, columns] = table
+        mask[batches, columns] = True
+        simplices_by_dim[dim] = padded
+        valid_mask[dim] = mask
     return DenseSimplicialComplex(
-        simplices_by_dim=simplices_by_dim,
-        valid_mask=valid_mask,
-        n_vertices=distances.shape[-1],
-        device=device,
-        dtype=dtype,
+        simplices_by_dim=simplices_by_dim, valid_mask=valid_mask,
+        n_vertices=distances.shape[-1], device=device,
+        dtype=distances.dtype if dtype is None else dtype,
     )
 
 
-@with_provenance(
-    "holonomy_lib.simplicial.pairwise_distances", op_version="0.1",
-)
 def pairwise_distances(points: torch.Tensor) -> torch.Tensor:
     """Pairwise Euclidean distances.
 
@@ -232,7 +245,11 @@ def pairwise_distances(points: torch.Tensor) -> torch.Tensor:
       points: `(n, d)` or `(B, n, d)`.
 
     Returns:
-      `(n, n)` or `(B, n, n)` distance matrix.
+      `(n, n)` or `(B, n, n)` distance matrix on the input device and dtype.
+
+    Notes:
+      Half and bfloat16 inputs use float32 intermediates because cdist's
+      direct CPU kernel does not support these dtypes.
 
     References:
       Standard Euclidean distance. See e.g. Hartle, J. B. (2003),
@@ -244,21 +261,17 @@ def pairwise_distances(points: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"points must be (n, d) or (B, n, d); got {tuple(points.shape)}"
         )
-    # Broadcast via `None`-indexing so the audit sees structural-shape
-    # operations rather than literal axis arguments. `[..., :, None, :]`
-    # inserts a singleton between the point and feature dims; this
-    # works uniformly for both 2-D (n, d) and 3-D (B, n, d) inputs.
-    diff = points[..., :, None, :] - points[..., None, :, :]
-    return diff.norm(dim=-1)
-
-
-def _lex_sort_rows(t: torch.Tensor) -> torch.Tensor:
-    """Sort rows of a 2-D tensor lexicographically (column 0, then 1, …)."""
-    if t.shape[0] <= 1:
-        return t
-    # Stable-sort by last column up to first, so primary key is first col.
-    out = t
-    for col in range(t.shape[1] - 1, -1, -1):
-        idx = torch.argsort(out[:, col], stable=True)
-        out = out[idx]
-    return out
+    if not points.is_floating_point():
+        raise ValueError("points must have a real floating dtype")
+    # cdist's CPU kernel only accepts float32/float64. Evaluate low-precision
+    # inputs in float32 and return their original dtype on the same device.
+    working = (
+        points.float() if points.dtype in (torch.float16, torch.bfloat16) else points
+    )
+    # The direct kernel avoids the cancellation in the matrix-multiplication
+    # identity ||p||^2 + ||q||^2 - 2 p.q, which loses digits for nearly
+    # coincident points. Those small distances are the first edges the
+    # filtration adds.
+    return torch.cdist(
+        working, working, compute_mode="donot_use_mm_for_euclid_dist",
+    ).to(points.dtype)

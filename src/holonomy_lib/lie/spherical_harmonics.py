@@ -1,35 +1,36 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Real spherical harmonics Y_lm on the unit 2-sphere, closed form
 for l ≤ 4.
 
 Real spherical harmonics are the orthonormal basis for square-
 integrable functions on `S² ⊂ R³` that diagonalizes the Laplace-
-Beltrami operator on the sphere. Each `Y_lm` is a homogeneous-degree-l
-polynomial in `(x, y, z)` restricted to `‖r‖ = 1`; there are `2l + 1`
+Beltrami operator on the sphere. On the sphere, each `Y_lm` agrees with
+a homogeneous polynomial of degree l in `(x, y, z)`. There are `2l + 1`
 of them at each `l`, indexed by `m ∈ {−l, …, l}`. The total at
 truncation `l_max` is `(l_max + 1)²` components.
 
-In equivariant deep learning these are the natural basis for
-SO(3)-equivariant features on the sphere (or any function of a
-direction vector). They are the steerable filters of e3nn and of
-SE(3)-Transformer; their tensor products via Clebsch-Gordan
-coefficients give the building blocks of SO(3)-equivariant
-networks.
+In equivariant deep learning these serve as the spherical features that
+rotate in a known way under SO(3). e3nn and SE(3)-Transformer use them
+as steerable filters, and Clebsch-Gordan coefficients are what combine
+different degrees into equivariant products.
 
-This module returns the orthonormal Condon-Shortley-free convention
-(positive prefactors, no `(−1)^m` phase). Inputs are direction
-vectors `(..., 3)`; the function normalizes to unit norm internally
-so callers can pass unnormalized vectors.
+The basis is orthonormal over the sphere and uses the Condon-Shortley-free
+convention: every prefactor is positive, with no `(−1)^m` phase. Inputs
+are direction vectors `(..., 3)`; the function normalizes to unit norm
+internally, so callers can pass unnormalized vectors.
 
 References:
-  Wikipedia, "Real spherical harmonics" — the explicit formulas
+  Wikipedia, "Real spherical harmonics": the explicit formulas
     transcribed here are the standard tesseral/sectoral basis.
   Edmonds (1957), §2.5.
   Geiger, M., Smidt, T. (2022). e3nn: Euclidean neural networks.
     arXiv:2207.09453. The modern implementation in geometric
-    deep learning; conventions match.
+    deep learning. To compare with e3nn.o3.spherical_harmonics, pass
+    directions[..., [1, 2, 0]], normalize=True, normalization="integral".
+    e3nn uses Cartesian order (x, y, z) at degree one; this basis uses
+    (y, z, x). See https://docs.e3nn.org/en/stable/api/o3/o3_sh.html.
 """
 
 from __future__ import annotations
@@ -38,15 +39,9 @@ import math
 
 import torch
 
-from holonomy_lib.provenance import with_provenance
-
-
 _SUPPORTED_L_MAX: int = 4
 
 
-@with_provenance(
-    "holonomy_lib.lie.real_spherical_harmonics", op_version="0.1",
-)
 def real_spherical_harmonics(
     directions: torch.Tensor, l_max: int = 2,
 ) -> torch.Tensor:
@@ -65,18 +60,18 @@ def real_spherical_harmonics(
     Args:
       directions: `(..., 3)` direction vectors. Need not be unit; the
         function normalizes internally.
-      l_max: highest degree to compute. Must be in `[0, 4]` for v1;
-        higher degrees require a recurrence relation that is not
-        implemented yet.
+      l_max: highest degree to compute. Must be in `[0, 4]`. Higher
+        degrees need the associated-Legendre recurrence, which is not
+        implemented.
 
     Returns:
       `(..., (l_max + 1)²)` real spherical harmonic values.
 
     References:
-      Wikipedia, "Table of spherical harmonics" — real form.
+      Wikipedia, "Table of spherical harmonics": real form.
       Edmonds (1957), §2.5.
     """
-    if directions.shape[-1] != 3:
+    if directions.ndim < 1 or directions.shape[-1] != 3:
         raise ValueError(
             f"directions must end with dim 3; got shape="
             f"{tuple(directions.shape)}"
@@ -85,9 +80,12 @@ def real_spherical_harmonics(
         raise ValueError(
             f"l_max must be in [0, {_SUPPORTED_L_MAX}]; got l_max={l_max}. "
             f"Higher degrees need the associated-Legendre recurrence "
-            f"(planned for v0.2)."
+            f"(not implemented)."
         )
 
+    # The clamp keeps a zero direction from dividing by zero. It then stays
+    # the zero vector, and the polynomials evaluated there are not meaningful
+    # SH values.
     floor = torch.finfo(directions.dtype).tiny
     norm = torch.linalg.norm(directions, dim=-1, keepdim=True).clamp(min=floor)
     unit = directions / norm
@@ -96,10 +94,13 @@ def real_spherical_harmonics(
     components: list[torch.Tensor] = []
 
     # ----- l = 0 -----
-    # Y_{0,0} = 0.5 · sqrt(1/π)
+    # Y_{0,0} = 0.5 · sqrt(1/π). full_like keeps the batch shape, dtype and
+    # device of x, so the constant stacks with the other components.
     y00 = torch.full_like(x, 0.5 * math.sqrt(1.0 / math.pi))
     components.append(y00)
 
+    # Each block below adds one degree. Returning early for a smaller l_max
+    # means the higher blocks never run.
     if l_max < 1:
         return torch.stack(components, dim=-1)
 

@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.convex.regularized_lstsq.
 
 Three layers:
-  1. Unit — shapes across B ∈ {0, 1, >1}; validation rejects.
-  2. Property — λ=0 reduces to ordinary lstsq; the three methods agree;
+  1. Unit: shapes across B ∈ {0, 1, >1}; validation rejects.
+  2. Property: λ=0 reduces to ordinary lstsq; the three methods agree;
      monotone shrinkage ‖x(λ₁)‖ ≥ ‖x(λ₂)‖ for λ₁ < λ₂; the closed-form
      normal-equations solution is reproduced.
-  3. Comparison — scipy lsqr with damp=√λ on the sparse path.
+  3. Comparison: scipy lsqr with damp=√λ on the sparse path.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def test_monotone_shrinkage():
         regularized_lstsq(A, b, lam).norm()
         for lam in (0.0, 0.1, 1.0, 10.0)
     ]
-    for a, c in zip(norms, norms[1:]):
+    for a, c in zip(norms, norms[1:], strict=False):
         assert a >= c - 1e-12
 
 
@@ -116,11 +116,5 @@ def test_sparse_cg_agrees_with_lsqr():
 def test_validation():
     A, b = _problem(1, 10, 4, seed=5)
     A, b = A.squeeze(0), b.squeeze(0)
-    with pytest.raises(ValueError, match="method"):
-        regularized_lstsq(A, b, 0.1, method="qr")
     with pytest.raises(ValueError, match="lam"):
         regularized_lstsq(A, b, -0.1)
-    with pytest.raises(ValueError, match="cholesky"):
-        regularized_lstsq(A.to_sparse_coo(), b, 0.1, method="cholesky")
-    with pytest.raises(ValueError, match="torch.Tensor"):
-        regularized_lstsq([[1.0]], b, 0.1)

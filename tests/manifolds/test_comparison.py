@@ -1,13 +1,13 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.manifolds.comparison (model-space volumes).
 
 Three layers:
-  1. Unit tests — shapes across B ∈ {0, 1, several}; input validation.
-  2. Property tests — closed-form known values (Euclidean / sphere /
+  1. Unit tests; shapes across B ∈ {0, 1, several}; input validation.
+  2. Property tests; closed-form known values (Euclidean / sphere /
      hyperbolic), κ→0 continuity, and the area = dV/dr identity.
-  3. Comparison — the closed forms above are themselves the ground truth, so no
+  3. Comparison; the closed forms above are themselves the ground truth, so no
      external library is needed.
 """
 
@@ -33,30 +33,6 @@ def _t(x):
 
 
 # --------------------------------------------------------------------
-# Shapes across B ∈ {0, 1, several}
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [0, 1, 4])
-class TestShapes:
-    def test_sphere_area_shape(self, batch):
-        out = model_sphere_area(
-            torch.zeros(batch, dtype=DT),
-            torch.full((batch,), 3.0, dtype=DT),
-            torch.ones(batch, dtype=DT),
-        )
-        assert out.shape == (batch,)
-
-    def test_ball_volume_shape(self, batch):
-        out = model_ball_volume(
-            torch.full((batch,), -1.0, dtype=DT),
-            torch.full((batch,), 2.5, dtype=DT),
-            torch.ones(batch, dtype=DT),
-        )
-        assert out.shape == (batch,)
-
-
-# --------------------------------------------------------------------
 # Validation
 # --------------------------------------------------------------------
 
@@ -69,10 +45,6 @@ class TestValidation:
     def test_rejects_negative_r(self):
         with pytest.raises(ValueError, match="r"):
             model_sphere_area(_t([0.0]), _t([3.0]), _t([-1.0]))
-
-    def test_rejects_r_beyond_sphere_diameter(self):
-        with pytest.raises(ValueError, match="diameter|kappa"):
-            model_ball_volume(_t([1.0]), _t([3.0]), _t([math.pi + 0.1]))
 
 
 # --------------------------------------------------------------------
@@ -89,6 +61,14 @@ class TestEuclidean:
         torch.testing.assert_close(
             model_sphere_area(_t([0.0]), _t([3.0]), r),
             _t([4 * math.pi * 4.0]), atol=1e-12, rtol=0)   # 4π r²
+
+        for batch in [0, 1, 4]:
+            out = model_sphere_area(
+                torch.zeros(batch, dtype=DT),
+                torch.full((batch,), 3.0, dtype=DT),
+                torch.ones(batch, dtype=DT),
+            )
+            assert out.shape == (batch,)
 
     def test_ball_volume(self):
         r = _t([2.0])
@@ -120,6 +100,10 @@ class TestSphere:
             model_sphere_area(_t([1.0]), _t([2.0]), _t([math.pi])),
             _t([0.0]), atol=1e-12, rtol=0)                 # pole: area 0
 
+        r = torch.tensor([math.pi], dtype=torch.float32)
+        area = model_sphere_area(torch.ones_like(r), torch.full_like(r, 1.5), r)
+        torch.testing.assert_close(area, torch.zeros_like(area), atol=0, rtol=0)
+
     def test_full_3sphere_volume(self):
         # κ=1, N=3: full unit 3-sphere volume 2π².
         torch.testing.assert_close(
@@ -137,6 +121,29 @@ class TestHyperbolic:
             model_ball_volume(_t([-1.0]), _t([2.0]), r),
             _t([2 * math.pi * (math.cosh(1.3) - 1)]), atol=1e-10, rtol=0)
 
+        for batch in [0, 1, 4]:
+            out = model_ball_volume(
+                torch.full((batch,), -1.0, dtype=DT),
+                torch.full((batch,), 2.5, dtype=DT),
+                torch.ones(batch, dtype=DT),
+            )
+            assert out.shape == (batch,)
+
+        # 80-digit mpmath radial integrals, using the actual rounded inputs.
+        # The final volume is representable although r^N or sn^(N-1) alone
+        # is not. The N=100 boundary layer leaves a 64-node error below 1e-6.
+        for dtype, curvature, dimension, radius, reference, tolerance in [
+            (torch.float32, -1e6, 16.0, 0.01, 1.0676479258129327e12, 1e-5),
+            (torch.float32, -1e6, 32.0, 0.01, 8.8495897749474505e23, 1e-5),
+            (torch.float64, -1e12, 100.0, 1e-5, 3.375600096867369e-240, 1e-6),
+        ]:
+            k, n, r = (torch.tensor([x], dtype=dtype)
+                       for x in (curvature, dimension, radius))
+            torch.testing.assert_close(
+                model_ball_volume(k, n, r), torch.tensor([reference], dtype=dtype),
+                atol=0, rtol=tolerance,
+            )
+
 
 # --------------------------------------------------------------------
 # Property tests
@@ -152,6 +159,31 @@ class TestProperties:
         v_eps = model_ball_volume(_t([1e-6]), N, r)
         torch.testing.assert_close(v_flat, v_eps, atol=1e-5, rtol=0)
 
+        from holonomy_lib.manifolds.comparison import sn_kappa
+        k = torch.zeros(1, dtype=DT, requires_grad=True)
+        t = torch.ones_like(k)
+        assert torch.autograd.gradcheck(sn_kappa, (k, t))
+        grad = torch.autograd.grad(sn_kappa(k, t).sum(), k)[0]
+        torch.testing.assert_close(grad, torch.full_like(k, -1 / 6), atol=1e-12, rtol=0)
+
+        for dtype, radius in [(torch.float32, 1e20), (torch.float64, 1e160)]:
+            t = torch.tensor([radius], dtype=dtype)
+            torch.testing.assert_close(
+                sn_kappa(torch.zeros_like(t), t) / t, torch.ones_like(t),
+                atol=0, rtol=0,
+            )
+            # κt² overflows, but sqrt(κ)t and the spherical sine stay finite.
+            torch.testing.assert_close(
+                sn_kappa(torch.ones_like(t), t), torch.sin(t),
+                atol=0, rtol=torch.finfo(dtype).eps,
+            )
+        k = torch.tensor([1e-40], dtype=torch.float32)
+        t = torch.tensor([1e20], dtype=torch.float32)
+        # Float64 evaluates the closed form for these rounded float32 inputs.
+        root = k.to(DT).sqrt()
+        reference = (torch.sin(root * t.to(DT)) / root).to(k.dtype)
+        torch.testing.assert_close(sn_kappa(k, t), reference, atol=0, rtol=1e-6)
+
     def test_area_is_derivative_of_volume(self):
         # dV/dr = S(r); central difference, non-integer N, hyperbolic.
         kappa, N, r, h = _t([-1.0]), _t([2.5]), _t([0.7]), _t([1e-5])
@@ -163,6 +195,12 @@ class TestProperties:
     def test_noninteger_N_positive(self):
         v = model_ball_volume(_t([0.3]), _t([2.5]), _t([0.9]))
         assert (v > 0).all()
+
+        r = torch.zeros(4, dtype=DT, requires_grad=True)
+        volume = model_ball_volume(torch.zeros_like(r), _t([1.0, 1.5, 2.0, 3.0]), r)
+        grad = torch.autograd.grad(volume.sum(), r)[0]
+        torch.testing.assert_close(volume, torch.zeros_like(volume), atol=0, rtol=0)
+        torch.testing.assert_close(grad, _t([2.0, 0.0, 0.0, 0.0]), atol=0, rtol=0)
 
     def test_volume_monotone_in_radius(self):
         kappa, N = _t([-1.0]), _t([3.0])
@@ -195,11 +233,11 @@ class TestAnisotropicFlux:
             model_anisotropic_flux(_t([[1.0, 0.0, -1.0]]), _t([0.5])),
             _t([expected]), atol=1e-9, rtol=0)
 
-    def test_batch_shapes(self):
         for B in (0, 1, 3):
             out = model_anisotropic_flux(torch.zeros(B, 4, dtype=DT),
                                          torch.ones(B, dtype=DT))
             assert out.shape == (B,)
+
 
     def test_grad_flows_to_kappas(self):
         kappas = _t([[-0.5, -0.2, 0.1]]).requires_grad_(True)

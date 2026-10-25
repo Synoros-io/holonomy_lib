@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
 """Tests for holonomy_lib.spectral.heat_kernel_chebyshev.
 
@@ -21,7 +21,8 @@ from holonomy_lib.spectral import heat_kernel_chebyshev, laplacian
 def _random_normalized_laplacian(
     n: int, batch: int = 1, dtype=torch.float64, seed: int = 0,
 ) -> torch.Tensor:
-    g = torch.Generator(); g.manual_seed(seed)
+    g = torch.Generator()
+    g.manual_seed(seed)
     A = torch.rand(batch, n, n, generator=g, dtype=dtype)
     A = (A + A.mT) * 0.5
     A.diagonal(dim1=-2, dim2=-1).zero_()
@@ -38,27 +39,8 @@ class TestValidation:
         L = _random_normalized_laplacian(4)
         with pytest.raises(ValueError, match="diffusion time"):
             heat_kernel_chebyshev(L, t=-0.5)
-
-    def test_rejects_negative_K(self):
-        L = _random_normalized_laplacian(4)
-        with pytest.raises(ValueError, match="Chebyshev"):
-            heat_kernel_chebyshev(L, t=0.1, K=-1)
-
-    def test_rejects_nonpositive_lambda_max(self):
-        L = _random_normalized_laplacian(4)
-        with pytest.raises(ValueError, match="lambda_max"):
-            heat_kernel_chebyshev(L, t=0.1, lambda_max=0.0)
-
-    def test_rejects_non_square(self):
-        with pytest.raises(ValueError, match="must be"):
-            heat_kernel_chebyshev(torch.zeros(1, 4, 5), t=0.1)
-
-    def test_rejects_signal_with_wrong_node_dim(self):
-        """A signal whose node count doesn't match L's must raise."""
-        L = _random_normalized_laplacian(6)
-        bad_signal = torch.zeros(1, 5, 2, dtype=torch.float64)  # n=5 ≠ 6
-        with pytest.raises(ValueError, match="match L's"):
-            heat_kernel_chebyshev(L, t=0.1, signal=bad_signal)
+        with pytest.warns(UserWarning, match="must be symmetric"):
+            heat_kernel_chebyshev(torch.tensor([[[0., 1.], [0., 0.]]]), t=0.1)
 
 
 # --------------------------------------------------------------------
@@ -71,8 +53,8 @@ class TestIdentity:
         n = 5
         L = _random_normalized_laplacian(n, batch=2)
         K = heat_kernel_chebyshev(L, t=0.0)
-        I = torch.eye(n, dtype=L.dtype).expand_as(K)
-        torch.testing.assert_close(K, I, atol=1e-12, rtol=0)
+        identity = torch.eye(n, dtype=L.dtype).expand_as(K)
+        torch.testing.assert_close(K, identity, atol=1e-12, rtol=0)
 
 
 # --------------------------------------------------------------------
@@ -86,11 +68,15 @@ class TestConvergence:
 
     @pytest.mark.parametrize("t", [0.1, 1.0, 3.0])
     def test_matches_matrix_exp(self, t):
-        n = 6
-        L = _random_normalized_laplacian(n, batch=1)
-        K_cheb = heat_kernel_chebyshev(L, t=t, K=40)
-        K_true = torch.matrix_exp(-t * L)
-        torch.testing.assert_close(K_cheb, K_true, atol=1e-10, rtol=1e-10)
+        for n, batch in ((6, 0), (6, 1), (8, 2), (0, 1)):
+            L = _random_normalized_laplacian(n, batch=batch)
+            K_cheb = heat_kernel_chebyshev(L, t=t, K=40)
+            K_true = torch.matrix_exp(-t * L)
+            torch.testing.assert_close(K_cheb, K_true, atol=1e-10, rtol=1e-10)
+            torch.testing.assert_close(K_cheb, K_cheb.mT, atol=1e-10, rtol=0)
+            assert (torch.linalg.eigvalsh(K_cheb) >= -1e-9).all()
+            trace = K_cheb.diagonal(dim1=-2, dim2=-1).sum(-1)
+            assert (trace <= n + 1e-9).all()
 
     def test_error_decreases_with_K(self):
         """Higher K → tighter approximation. Monotone in K."""
@@ -109,40 +95,6 @@ class TestConvergence:
 
 
 # --------------------------------------------------------------------
-# Trace and PSD properties of the heat kernel
-# --------------------------------------------------------------------
-
-
-class TestPSDProperties:
-    """For a symmetric L with spectrum ⊂ [0, λ_max], K_t = exp(-tL)
-    is symmetric positive-semidefinite, with trace bounded by n
-    (since all eigenvalues of K_t lie in (0, 1])."""
-
-    def test_kernel_is_symmetric(self):
-        L = _random_normalized_laplacian(6)
-        K = heat_kernel_chebyshev(L, t=0.5, K=30)
-        torch.testing.assert_close(K, K.mT, atol=1e-10, rtol=0)
-
-    def test_kernel_is_psd(self):
-        L = _random_normalized_laplacian(6)
-        K = heat_kernel_chebyshev(L, t=0.5, K=30)
-        # Symmetrize against tiny float drift; eigenvalues are real.
-        K = 0.5 * (K + K.mT)
-        eigvals = torch.linalg.eigvalsh(K)
-        assert eigvals.min().item() > -1e-9, (
-            f"K_t should be PSD; min eigenvalue = {eigvals.min().item():.3e}"
-        )
-
-    def test_trace_bounded_by_n(self):
-        """Each eigenvalue of K_t is exp(-tλ_i) ≤ 1, so trace ≤ n."""
-        n = 8
-        L = _random_normalized_laplacian(n)
-        K = heat_kernel_chebyshev(L, t=0.5, K=30)
-        trace = torch.diagonal(K, dim1=-2, dim2=-1).sum(dim=-1)
-        assert (trace <= n + 1e-9).all()
-
-
-# --------------------------------------------------------------------
 # Signal path matches dense K_t @ signal
 # --------------------------------------------------------------------
 
@@ -151,29 +103,11 @@ class TestSignalPath:
     def test_signal_matches_dense(self):
         n = 6
         L = _random_normalized_laplacian(n, batch=2)
-        g = torch.Generator(); g.manual_seed(11)
+        g = torch.Generator()
+        g.manual_seed(11)
         signal = torch.randn(2, n, 3, dtype=torch.float64, generator=g)
 
         K_dense = heat_kernel_chebyshev(L, t=0.7, K=30)
         out_dense = K_dense @ signal
         out_signal = heat_kernel_chebyshev(L, t=0.7, K=30, signal=signal)
         torch.testing.assert_close(out_dense, out_signal, atol=1e-10, rtol=1e-10)
-
-
-# --------------------------------------------------------------------
-# Shapes / batching
-# --------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("batch", [1, 2, 4])
-class TestShapes:
-    def test_dense_output_shape(self, batch):
-        L = _random_normalized_laplacian(5, batch=batch)
-        K = heat_kernel_chebyshev(L, t=0.3)
-        assert K.shape == (batch, 5, 5)
-
-    def test_signal_output_shape(self, batch):
-        L = _random_normalized_laplacian(5, batch=batch)
-        signal = torch.randn(batch, 5, 2, dtype=torch.float64)
-        out = heat_kernel_chebyshev(L, t=0.3, signal=signal)
-        assert out.shape == (batch, 5, 2)

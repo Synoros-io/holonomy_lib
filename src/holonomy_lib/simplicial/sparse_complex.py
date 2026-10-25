@@ -1,7 +1,7 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Synoros
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Copyright 2026 Synoros
 
-"""SparseSimplicialComplex — single-instance simplicial complex with
+"""SparseSimplicialComplex : single-instance simplicial complex with
 sparse-CSC boundary operators.
 
 Used by persistent homology (where the matrix-reduction kernel walks
@@ -15,7 +15,7 @@ class once per point cloud). For batched small complexes, use
 
 References:
   Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd
-    ed. SIAM. §3.4 — CSR and CSC formats.
+    ed. SIAM. §3.4 : CSR and CSC formats.
   Edelsbrunner, H., Letscher, D., Zomorodian, A. (2002). Topological
     persistence and simplification. Discrete & Computational Geometry
     28:511-533. Original sparse-boundary reduction algorithm.
@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from holonomy_lib.simplicial._face_lookup import build_simplex_index
+from holonomy_lib.simplicial._face_lookup import enumerate_faces, lookup_rows
 
 if TYPE_CHECKING:
     from holonomy_lib.simplicial.complex import DenseSimplicialComplex
@@ -51,9 +51,11 @@ class SparseSimplicialComplex:
 
     @property
     def max_dim(self) -> int:
+        """Highest dimension with a table, including an empty table."""
         return max(self.simplices_by_dim) if self.simplices_by_dim else -1
 
     def n_simplices(self, k: int) -> int:
+        """Number of k-simplices. Returns 0 when there is no table for dimension k."""
         if k not in self.simplices_by_dim:
             return 0
         return self.simplices_by_dim[k].shape[0]
@@ -70,9 +72,18 @@ class SparseSimplicialComplex:
           k: simplex dimension. `k = 0` returns an empty `(0, n_0)`
             sparse tensor (vertices have empty boundary).
           dtype: float dtype for the matrix values.
+
+        References:
+          Munkres, J. R. (1984). Elements of Algebraic Topology, §1.
+
+        Notes:
+          Assumes the complex is closed under faces. A face missing from
+          the (k-1) table raises ValueError from the lookup.
         """
         if k == 0:
             n_0 = self.n_simplices(0)
+            # No row indices and every column pointer is 0, so each of the
+            # n_0 columns is empty.
             return torch.sparse_csc_tensor(
                 ccol_indices=torch.zeros(n_0 + 1, dtype=torch.int64,
                                           device=self.device),
@@ -92,40 +103,14 @@ class SparseSimplicialComplex:
         n_k = k_simplices.shape[0]
         n_prev = prev_simplices.shape[0]
 
-        # Build the face-lookup index once.
-        prev_index = build_simplex_index(prev_simplices)
+        faces, signs = enumerate_faces(k_simplices)
+        rows = lookup_rows(prev_simplices, faces.reshape(-1, k))
+        cols = torch.arange(n_k, device=self.device).repeat_interleave(k + 1)
+        vals = signs.to(dtype).repeat(n_k)
 
-        # Each k-simplex contributes (k+1) entries to the boundary matrix.
-        # Collect as COO arrays, then convert to CSC at the end.
-        n_entries = n_k * (k + 1)
-        rows = torch.empty(n_entries, dtype=torch.int64, device=self.device)
-        cols = torch.empty(n_entries, dtype=torch.int64, device=self.device)
-        vals = torch.empty(n_entries, dtype=dtype, device=self.device)
-
-        entry = 0
-        for j in range(n_k):
-            simplex = k_simplices[j]
-            for i in range(k + 1):
-                mask = torch.ones(
-                    k + 1, dtype=torch.bool, device=simplex.device,
-                )
-                mask[i] = False
-                face = simplex[mask]
-                key = tuple(face.tolist())
-                if key not in prev_index:
-                    raise ValueError(
-                        f"boundary(k={k}): face {key} of simplex "
-                        f"{tuple(simplex.tolist())} not found in dim-{k - 1} "
-                        f"simplices. The complex is malformed: every face "
-                        f"of every k-simplex must appear as a (k-1)-simplex."
-                    )
-                rows[entry] = prev_index[key]
-                cols[entry] = j
-                vals[entry] = 1.0 if (i % 2 == 0) else -1.0
-                entry += 1
-
-        # COO → CSC. PyTorch's sparse_coo_tensor builder is the
-        # simplest path; we coalesce + cast to CSC.
+        # Build the entries as COO, which takes (row, column) pairs directly.
+        # coalesce sorts them by row then column, and to_sparse_csc then
+        # compresses the column indices into the CSC layout.
         coo = torch.sparse_coo_tensor(
             indices=torch.stack([rows, cols]),
             values=vals,
@@ -135,7 +120,7 @@ class SparseSimplicialComplex:
 
     def to_dense(
         self, dtype: torch.dtype = torch.float64,
-    ) -> "DenseSimplicialComplex":
+    ) -> DenseSimplicialComplex:
         """Convert to a batched-with-B=1 dense complex.
 
         Args:
@@ -147,6 +132,7 @@ class SparseSimplicialComplex:
         valid_masks: dict[int, torch.Tensor] = {}
         for k, table in self.simplices_by_dim.items():
             dense_simplices[k] = table.unsqueeze(0)         # (1, n_k, k+1)
+            # A single complex has no padding, so every row is a real simplex.
             valid_masks[k] = torch.ones(
                 1, table.shape[0], dtype=torch.bool, device=self.device,
             )
