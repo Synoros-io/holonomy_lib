@@ -91,7 +91,7 @@ def make_ground_truth(seed: int, n_per_region: int = 30, dim: int = 3,
     # Pairwise distances (N, N): broadcast x[i], x[j], κ[i], κ[j].
     idx_i = torch.arange(n_nodes).unsqueeze(1).expand(n_nodes, n_nodes)
     idx_j = torch.arange(n_nodes).unsqueeze(0).expand(n_nodes, n_nodes)
-    D_true = mfd_truth.distance(
+    D_true = mfd_truth.dissimilarity(
         X_true[idx_i.reshape(-1)], kappa_true[idx_i.reshape(-1)],
         X_true[idx_j.reshape(-1)], kappa_true[idx_j.reshape(-1)],
     ).reshape(n_nodes, n_nodes)
@@ -254,7 +254,7 @@ def train_continuous_kappa(n_nodes, D_true, dim, n_epochs, pairs_per_epoch,
     for epoch in range(n_epochs):
         opt.zero_grad()
         i, j = _sample_pairs(n_nodes, pairs_per_epoch, g, device)
-        d_pred = mfd.distance(coords[i], kappa_field[i], coords[j], kappa_field[j])
+        d_pred = mfd.dissimilarity(coords[i], kappa_field[i], coords[j], kappa_field[j])
         d_target = D[i, j]
         loss = ((d_pred - d_target) ** 2).mean() + 5.0 * _coord_barrier(coords)
         loss.backward()
@@ -265,7 +265,7 @@ def train_continuous_kappa(n_nodes, D_true, dim, n_epochs, pairs_per_epoch,
     with torch.no_grad():
         idx_i = torch.arange(n_nodes, device=device).unsqueeze(1).expand(n_nodes, n_nodes)
         idx_j = torch.arange(n_nodes, device=device).unsqueeze(0).expand(n_nodes, n_nodes)
-        D_pred = mfd.distance(
+        D_pred = mfd.dissimilarity(
             coords[idx_i.reshape(-1)], kappa_field[idx_i.reshape(-1)],
             coords[idx_j.reshape(-1)], kappa_field[idx_j.reshape(-1)],
         ).reshape(n_nodes, n_nodes)

@@ -38,7 +38,6 @@ from typing import Any
 import torch
 
 from holonomy_lib._graph_utils import drop_self_loops
-from holonomy_lib.optimization import RiemannianSGD
 
 # Preserve the existing finite work budget for this experimental optimizer.
 EIGENMAPS_MAX_STEPS_DEFAULT = 200
@@ -142,7 +141,6 @@ def hyperbolic_laplacian_eigenmaps(
         embedding = init.clone()
 
     embedding = embedding.to(device=adjacency.device, dtype=adjacency.dtype)
-    opt = RiemannianSGD(manifold, lr=lr)
 
     # Average each node's logarithms over its neighbors. Dropping loops
     # first keeps them from diluting the update through the degree.
@@ -164,20 +162,21 @@ def hyperbolic_laplacian_eigenmaps(
             emb_j.reshape(B * N * N, D),
         ).reshape(B, N, N, D)
 
-        # Ambient gradient on each node i: −2 Σ_j A_{ij} · log_{Y_i}(Y_j),
-        # normalized by deg(i) so the per-step magnitude is the
-        # *average* log-direction toward neighbors (degree-invariant).
-        ambient_grad = -2.0 * (
+        # Gradient on each node i: −2 Σ_j A_{ij} · log_{Y_i}(Y_j), normalized
+        # by deg(i) so the per-step magnitude is the *average* log-direction
+        # toward neighbors (degree-invariant). Log maps are tangent vectors,
+        # so this is already a Riemannian gradient: it must not go through
+        # the optimizer's Euclidean-to-Riemannian conversion.
+        riemannian_grad = -2.0 * (
             adjacency.unsqueeze(-1) * log_ij
         ).sum(dim=2) / degree_safe   # (B, N, D)
 
-        # RSGD treats the leading axis as the batch axis; we flatten
-        # (B, N) → BN so each node is an independent optimization
-        # point (the manifold projection/retraction is point-wise).
-        embedding = opt.step(
-            embedding.reshape(B * N, D),
-            ambient_grad.reshape(B * N, D),
-        ).reshape(B, N, D)
+        # Flatten (B, N) → BN so each node is an independent point (the
+        # manifold projection and retraction are point-wise), then take
+        # the step: project −lr · grad onto the tangent space and retract.
+        points = embedding.reshape(B * N, D)
+        step = manifold.projection(points, -lr * riemannian_grad.reshape(B * N, D))
+        embedding = manifold.retraction(points, step).reshape(B, N, D)
 
     # Non-finite iterates are unusable. Include the work budget and
     # graph size so the caller can identify the divergent call.
