@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings as python_warnings
+
 import torch
 
 from holonomy_lib import discrete_geometry, spectral
@@ -18,11 +20,13 @@ from .common import (
     number,
 )
 
-# Small initial flow, leaving room for the user to increase the step budget.
-DEFAULT_FLOW_STEPS = 6
-DEFAULT_SURGERY_PERIOD = 2
-DEFAULT_SURGERY_THRESHOLD = 1.3
-DEFAULT_FLOW_DT = 0.5
+# Claude's 2026-10-25 sweep on the corrected library: unweighted karate, CPU,
+# float64. This setting gives components 21/13 and four faction mismatches.
+# It is an example for this graph, not a community-detection guarantee.
+DEFAULT_FLOW_STEPS = 20
+DEFAULT_SURGERY_PERIOD = 10
+DEFAULT_SURGERY_THRESHOLD = 1.5
+DEFAULT_FLOW_DT = 1.0
 MAX_SURGERY_THRESHOLD = 10.0
 # With the library's default K=30, keep the heat slider in a modest t range.
 MIN_HEAT_TIME = 0.01
@@ -200,22 +204,41 @@ def compute(request: Request) -> Request:
             raise ValueError(
                 f"choose a longer surgery period: at most {MAX_FLOW_FRAMES} frames"
             )
+        flow_plan = [0, *frame_steps]
+        # A browser can request each cumulative frame separately and show progress
+        # between requests. Ordinary direct callers still receive the whole run.
+        if "frame_step" in request:
+            frame_step = integer(request, "frame_step", 0, 0, steps)
+            if frame_step not in flow_plan:
+                raise ValueError("frame_step must be a planned cumulative flow step")
+            frame_steps = [frame_step] if frame_step else []
+        complete = bool(frame_steps and frame_steps[-1] == steps)
         frames = [adjacency[0]]
+        flow_notices: list[str] = []
         for step in frame_steps:
-            frames.append(
-                context.call(
-                    discrete_geometry.ricci_flow_with_surgery,
-                    adjacency,
-                    n_steps=step,
-                    surgery_period=period,
-                    surgery_threshold=threshold,
-                    dt=dt,
-                )[0]
-            )
+            with python_warnings.catch_warnings(record=True) as notices:
+                python_warnings.simplefilter("always", UserWarning)
+                frames.append(
+                    context.call(
+                        discrete_geometry.ricci_flow_with_surgery,
+                        adjacency,
+                        n_steps=step,
+                        surgery_period=period,
+                        surgery_threshold=threshold,
+                        dt=dt,
+                    )[0]
+                )
+            # Keep solver notices visible in the response rather than leaving
+            # them only in the terminal while the browser reports a partition.
+            flow_notices.extend(str(notice.message) for notice in notices)
         final_labels, final_sizes = components(frames[-1])
         result.update(
             frames=torch.stack(frames),
             frame_steps=[0, *frame_steps],
+            flow_plan=flow_plan,
+            flow_complete=complete,
+            flow_warning_count=len(flow_notices),
+            flow_last_warning=flow_notices[-1] if flow_notices else None,
             final_labels=final_labels,
             final_sizes=final_sizes,
             flow_method=(
@@ -235,7 +258,7 @@ def compute(request: Request) -> Request:
                 else None
             )
             result["faction_note"] = (
-                "Best label assignment against the observed post-split clubs."
+                "Faction labels are exchanged to minimize the mismatch count."
                 if len(final_sizes) == 2
                 else "Wrong-side count requires exactly two final components; "
                 "this flow did not produce two."

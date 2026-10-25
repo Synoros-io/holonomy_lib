@@ -1,14 +1,15 @@
-import {VIEW, $, fmt, node, table, metrics, parameters, section, CanvasView, color, diverging, sequential, community} from './view.js';
+import {VIEW, $, fmt, node, table, metrics, parameters, section, CanvasView, color, curvatureScale, curvatureColor, sequential, community} from './view.js';
 import {spectrumChart, topologyCharts, batchCharts} from './charts.js';
+import {relaxLayout} from './layout.js';
 
 const SCENES = {
-  graphs: {title:'Graphs', description:'Inspect local curvature, diffusion and connectivity on a real graph. Positions are the two non-trivial Laplacian eigenvectors.', view:'Spectral embedding', hint:'Click a node to choose the source'},
+  graphs: {title:'Graphs', description:'Positions start from the two non-trivial Laplacian eigenvectors and are relaxed for legibility. Layout is presentation, not a computed result; overlays and values come from the library.', view:'Spectral + relaxed · presentation', hint:'Hover for labels; click to choose the source'},
   curvature: {title:'Curvature', description:'Move continuously between hyperbolic, flat and spherical charts. All geodesics and distances come from the κ-stereographic manifold.', view:'κ-stereographic chart', hint:'Click to add points; click points to select a pair'},
   topology: {title:'Topology', description:'A point cloud, its Vietoris–Rips filtration, and the persistence of components and loops. ε is the maximum edge length, in coordinate units.', view:'Vietoris–Rips complex', hint:'Click to add a point'},
   batching: {title:'Batching', description:'Measure the library at different batch sizes, with a warm-up before each shape. Persistence reduction is sequential per batch member and uses CPU bookkeeping, so it is expected to scale differently.', view:'Synchronized wall-time measurements', hint:'CPU and available GPU'},
 };
 let config, active = 'graphs', revision = 0, pending = false, busy = false, debounce, playTimer;
-const state = Object.fromEntries(Object.keys(SCENES).map(key => [key,{params:{},data:null,points:[],selected:[],event:0,epsilon:0,frame:0,transition:1}]));
+const state = Object.fromEntries(Object.keys(SCENES).map(key => [key,{params:{},data:null,points:[],selected:[],event:0,epsilon:0,frame:0,transition:1,hover:null,layout:'relaxed',layoutKey:null,relaxed:null}]));
 const view = new CanvasView($('canvas'));
 
 async function api(name, request) {
@@ -57,6 +58,7 @@ function buildControls() {
       ['karate',"Zachary’s karate club"],['sbm','Stochastic block model'],['barbell','Barbell'],
       ['cliques','Ring of cliques'],['geometric','Random geometric'],['custom','Paste edge list'],
     ],p.graph));
+    append(select('_layout','Layout',[['relaxed','Spectral + relaxed'],['spectral','Spectral only']],current.layout));
     if(['sbm','geometric','custom'].includes(p.graph)) append(numeric('nodes','Nodes',p.nodes,1,limits.nodes));
     if(p.graph==='sbm') append(numeric('blocks','Blocks',p.blocks,1,p.nodes),group(numeric('p_in','p within',p.p_in,0,1,'any'),numeric('p_out','p between',p.p_out,0,1,'any')));
     if(['barbell','cliques'].includes(p.graph)) append(numeric('clique_size','Nodes per clique',p.clique_size,2,Math.floor(limits.nodes/2)));
@@ -125,6 +127,36 @@ function setBusy(value) {
   $('status-state').textContent=value?'Computing…':'Ready'; $('controls').setAttribute('aria-busy',String(value));
 }
 function schedule() { revision++; pending=true; void drain(); }
+function flowProgress(message) {
+  $('busy-note').textContent=message; $('status-state').textContent=message;
+}
+async function computeFlow(request, version) {
+  // A frame is a cumulative rerun, never a continuation of the last adjacency.
+  // Separate requests make completed frames visible without a streaming protocol.
+  let result=await api('graphs',{...request,frame_step:0});
+  const steps=result.flow_plan.slice(1), current=state.graphs;
+  const publish=()=>{
+    current.data=result; current.frame=result.frames.length-1; current.transition=1;
+    render();
+    $('status-device').textContent=`${result.device} · ${result.dtype}`;
+    $('status-time').textContent=`Library calls: ${fmt(result.elapsed_ms)} ms`;
+  };
+  if(version!==revision) return result;
+  publish();
+  for (const [index,step] of steps.entries()) {
+    flowProgress(`Frame ${index+1}/${steps.length} · step ${step}/${steps.at(-1)}`);
+    const next=await api('graphs',{...request,frame_step:step});
+    if(version!==revision) return next;
+    result={...next,coordinates:result.coordinates,
+      frames:[...result.frames,next.frames.at(-1)],
+      frame_steps:[...result.frame_steps,step],
+      flow_warning_count:result.flow_warning_count+next.flow_warning_count,
+      flow_last_warning:next.flow_last_warning||result.flow_last_warning,
+      elapsed_ms:result.elapsed_ms+next.elapsed_ms,calls:[...result.calls,...next.calls]};
+    publish();
+  }
+  return result;
+}
 async function drain() {
   // Serialize compute requests, and never replace newer controls with a stale
   // response. Aborting a fetch would not cancel the underlying torch operation.
@@ -135,11 +167,18 @@ async function drain() {
     const scene=active, version=revision;
     try {
       error();
-      const response=await api(scene,requestBody(scene));
+      const request=requestBody(scene);
+      const response=scene==='graphs' && request.overlay==='flow'
+        ? await computeFlow(request,version) : await api(scene,request);
       if(version!==revision) continue;
-      const current=state[scene]; current.data=response;
-      if(scene==='topology') { current.points=response.points; current.event=0; current.epsilon=0; }
-      if(scene==='graphs') { current.frame=0; current.transition=1; }
+      const current=state[scene], requestKey=JSON.stringify(request);
+      current.data=response;
+      if(scene==='topology') {
+        current.points=response.points;
+        if(current.requestKey!==requestKey) { current.event=response.initial_event; current.epsilon=response.initial_epsilon; }
+      }
+      current.requestKey=requestKey;
+      if(scene==='graphs') { current.frame=response.frames?response.frames.length-1:0; current.transition=1; }
       buildControls(); render();
       $('status-device').textContent=`${response.device} · ${response.dtype}`;
       $('status-time').textContent=`Library calls: ${fmt(response.elapsed_ms)} ms`;
@@ -159,28 +198,40 @@ function activate(scene) {
   buildControls(); render(); schedule();
 }
 function legendText(text) { $('legend').replaceChildren(node('span',text)); }
-function legendRange(label,range,sequentialColor=false) {
-  $('legend').replaceChildren(node('span',label),node('span',fmt(range[0])),node('span',null,{class:`gradient ${sequentialColor?'sequential':''}`}),node('span',fmt(range[1])));
+function legendRange(label,range,kind='diverging') {
+  $('legend').replaceChildren(node('span',label),node('span',fmt(range[0])),node('span',null,{class:`gradient ${kind}`}),node('span',fmt(range[1])));
+}
+function graphPositions(data,current) {
+  if(current.layout==='spectral') return data.coordinates;
+  const key=JSON.stringify([data.coordinates,data.edges]);
+  if(current.layoutKey!==key) {
+    current.relaxed=relaxLayout(data.coordinates,data.edges); current.layoutKey=key;
+  }
+  return current.relaxed;
 }
 function drawGraph(data,current) {
-  view.begin(data.coordinates);
+  const positions=graphPositions(data,current);
+  view.begin(positions);
+  $('view-label').textContent=current.layout==='relaxed'?'Spectral + relaxed · presentation':'Spectral only';
+  const scale=data.edge_values?curvatureScale(data.range):null;
   const frame=data.frames?.[current.frame], previous=data.frames?.[Math.max(0,current.frame-1)];
   data.edges.forEach(([a,b],index)=>{
     let alpha=1, stroke=color('edge');
-    if(data.edge_values) stroke=data.edge_values[index]==null?color('muted'):diverging(data.edge_values[index],data.range);
+    if(data.edge_values) stroke=curvatureColor(data.edge_values[index],scale);
     if(frame) {
       const was=previous[a][b]>0, now=frame[a][b]>0;
       alpha=now?1:was?1-current.transition:0;
     }
-    view.path([data.coordinates[a],data.coordinates[b]],stroke,VIEW.lineWidth,alpha);
+    view.path([positions[a],positions[b]],stroke,VIEW.edgeWidth,alpha);
   });
   const finite=data.node_values?.filter(Number.isFinite) || [], range=finite.length?[Math.min(...finite),Math.max(...finite)]:[0,0];
-  data.coordinates.forEach((point,index)=>{
+  positions.forEach((point,index)=>{
     const fill=data.node_values?sequential(data.node_values[index],range):frame && current.frame===data.frames.length-1?community(data.final_labels[index]):color('node');
-    view.dot(point,fill,index,data.node_values && data.node_values[index]==null,index===data.source && ['heat','resistance'].includes(data.overlay)?VIEW.nodeRadius*1.5:VIEW.nodeRadius);
+    view.dot(point,fill,null,data.node_values && data.node_values[index]==null,index===data.source && ['heat','resistance'].includes(data.overlay)?VIEW.graphNodeRadius*1.5:VIEW.graphNodeRadius);
   });
-  if(data.edge_values) legendRange('Edge curvature (dimensionless)',data.range);
-  else if(data.node_values) { legendRange(data.value_label,range,true); if(data.node_values.includes(null)) $('legend').append(node('span','Hollow = ∞ / unavailable')); }
+  view.graphLabels(positions,[current.hover,data.source]);
+  if(data.edge_values) legendRange(`Curvature (dimensionless) · ${scale.note}`,scale.range,scale.kind);
+  else if(data.node_values) { legendRange(data.value_label,range,'sequential'); if(data.node_values.includes(null)) $('legend').append(node('span','Hollow = ∞ / unavailable')); }
   else if(frame) legendText(`Step ${data.frame_steps[current.frame]} · final colors identify connected components`);
   else legendText('Unweighted node markers · edge weights in the details panel');
 }
@@ -189,8 +240,13 @@ function graphDetails(data,current) {
   const details=$('details'); details.replaceChildren(metrics([['nodes',data.nodes],['edges',data.edges.length]]));
   details.append(section('Connectivity',node('p',`Component sizes: ${data.component_sizes.join(', ')}. λ₂ = ${fmt(data.spectral_gap)}.`)));
   if(data.frames) {
-    details.append(section('Final flow components',node('p',data.final_sizes.join(', '))),node('p',data.flow_method));
-    if(data.faction_note) details.append(section('Observed karate split',node('p',`Wrong-side nodes: ${data.faction_wrong_side??'not a two-way partition'}. ${data.faction_note}`)));
+    details.append(section(data.flow_complete?'Final flow components':'Current flow components',node('p',`Component sizes: ${data.final_sizes.join(', ')}.`)),node('p',data.flow_method));
+    if(data.flow_complete && data.faction_note) details.append(section('Observed karate split',node('p',`Wrong-side nodes: ${data.faction_wrong_side??'not a two-way partition'}. ${data.faction_note}`)));
+    if(data.flow_warning_count) {
+      const notices=node('details');
+      notices.append(node('summary',`Solver warnings: ${data.flow_warning_count}`),node('p',data.flow_last_warning));
+      details.append(notices);
+    }
   }
   if(data.node_values) details.append(section('Values by node',table(['Node','Value'],data.node_values.map((value,index)=>[index,value]))));
   else details.append(section('Values by edge',table(['Edge','Weight',...(data.edge_values?['κ']:[])],data.edges.map(([a,b],index)=>[`${a} ↔ ${b}`,data.weights[index],...(data.edge_values?[data.edge_values[index]]:[])]))));
@@ -273,6 +329,7 @@ function batchingDetails(data) {
 function render() {
   const current=state[active], data=current.data;
   document.querySelector('.visual-panel').classList.toggle('batch-mode',active==='batching');
+  document.querySelector('.visual-panel').classList.toggle('topology-mode',active==='topology');
   $('data-table').hidden=active!=='batching'||!data;
   $('warnings').replaceChildren(); $('empty').hidden=Boolean(data);
   if(!data) { view.begin([]); $('charts').replaceChildren(); $('details').replaceChildren(); $('legend').replaceChildren(); $('playback').hidden=true; $('empty').textContent='Waiting for the library…'; return; }
@@ -296,7 +353,7 @@ function addPoint(point) {
 $('canvas').addEventListener('click',event=>{
   const current=state[active], data=current.data; if(!data) return;
   if(active==='graphs') {
-    const index=view.nearest(event,data.coordinates); if(index==null) return;
+    const index=view.nearest(event,graphPositions(data,current)); if(index==null) return;
     current.params.source=index; if(!['heat','resistance'].includes(current.params.overlay)) current.params.overlay='heat';
     buildControls(); schedule();
   } else if(active==='curvature') {
@@ -308,6 +365,14 @@ $('canvas').addEventListener('click',event=>{
       buildControls(); schedule();
     }
   } else if(active==='topology') addPoint(view.inverse(view.click(event)));
+});
+$('canvas').addEventListener('pointermove',event=>{
+  if(active!=='graphs'||!state.graphs.data) return;
+  const current=state.graphs, next=view.nearest(event,graphPositions(current.data,current));
+  if(current.hover!==next) { current.hover=next; drawGraph(current.data,current); }
+});
+$('canvas').addEventListener('pointerleave',()=>{
+  if(active==='graphs'&&state.graphs.data) { state.graphs.hover=null; drawGraph(state.graphs.data,state.graphs); }
 });
 $('controls').addEventListener('submit',event=>{event.preventDefault();if($('controls').reportValidity()){readControls();schedule();}});
 $('controls').addEventListener('input',event=>{
@@ -325,7 +390,9 @@ $('controls').addEventListener('input',event=>{
   clearTimeout(debounce); debounce=setTimeout(schedule,VIEW.debounceMs);
 });
 $('controls').addEventListener('change',event=>{
-  const input=event.target; if(!input.name||input.name.startsWith('_')||input.type==='range') return;
+  const input=event.target;
+  if(input.name==='_layout') { state.graphs.layout=input.value; if(state.graphs.data) drawGraph(state.graphs.data,state.graphs); return; }
+  if(!input.name||input.name.startsWith('_')||input.type==='range') return;
   readControls();
   if(active==='graphs' && ['graph','nodes','clique_size','cliques','edges'].includes(input.name)) state.graphs.params.source=0;
   if(active==='batching' && input.name==='primitive' && state.batching.params.primitive==='persistence') state.batching.params.size=Math.min(state.batching.params.size,config.limits.persistence_size);
@@ -349,7 +416,7 @@ try {
   state.batching.params={primitive:'heat',size:d.size,repeats:d.repeats,seed:d.seed};
   // The URL hash names the scene (#topology), so a scene can be linked to and
   // back/forward move between scenes. Unknown hashes fall back to graphs.
-  const fromHash=()=>{ const name=location.hash.slice(1); return name in SCENES ? name : 'graphs'; };
+  const fromHash=()=>{ const name=location.hash.slice(1); return Object.hasOwn(SCENES,name) ? name : 'graphs'; };
   addEventListener('hashchange',()=>{ if(fromHash()!==active) activate(fromHash()); });
   activate(fromHash());
 } catch(reason) { error(reason.message); $('status-state').textContent='Connection failed'; }

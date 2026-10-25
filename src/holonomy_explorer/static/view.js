@@ -1,9 +1,11 @@
+import {LABELS, placeLabels} from './layout.js';
+
 // Drawing constants are screen-space choices; mathematical data comes from Python.
 export const VIEW = Object.freeze({
-  padding: 38, nodeRadius: 6, hitRadius: 15, labelOffset: 12,
-  fontSize: 11, lineWidth: 1.5, gridWidth: 0.7, flowMs: 900,
+  padding: 38, nodeRadius: 6, graphNodeRadius: 5, hitRadius: 15, labelOffset: 12,
+  fontSize: 11, lineWidth: 1.5, edgeWidth: 0.9, gridWidth: 0.7, flowMs: 900,
   chartWidth: 540, chartHeight: 200, chartPadding: 38,
-  maxBarcodeHeight: 620, barcodeRow: 9, figureExtent: 1.3,
+  barcodeRow: 7, barcodePadding: 24, chartInset: 14, diagramHeight: 180, figureExtent: 1.3,
   debounceMs: 180, transitionMs: 500, triangleOpacity: 0.035,
 });
 export const $ = (id) => document.getElementById(id);
@@ -54,14 +56,29 @@ export class CanvasView {
       xmin = Math.min(...points.map(p => p[0])); xmax = Math.max(...points.map(p => p[0]));
       ymin = Math.min(...points.map(p => p[1])); ymax = Math.max(...points.map(p => p[1]));
     }
-    // A zero-span embedding is still drawable. It stays coincident, rather than
-    // inventing a force layout that would no longer be the library's output.
+    // Spectral-only mode preserves coincident points. Relaxation, when selected,
+    // happens separately and never changes the coordinates returned by Python.
     const span = Math.max(xmax - xmin, ymax - ymin) || 1;
     const scale = (Math.min(width, height) - 2 * VIEW.padding) / span;
     const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
     this.map = ([x,y]) => [width / 2 + (x-cx)*scale, height / 2 - (y-cy)*scale];
     this.inverse = ([x,y]) => [(x-width/2)/scale+cx, -(y-height/2)/scale+cy];
     this.ctx.font = `${VIEW.fontSize}px system-ui, sans-serif`;
+    this.width=width; this.height=height;
+  }
+  graphLabels(points, priority) {
+    const positions = points.map(point=>this.map(point)), ctx=this.ctx;
+    const labels = placeLabels(positions,text=>ctx.measureText(text).width,this.width,this.height,VIEW.graphNodeRadius*1.5,priority);
+    for (const label of labels) {
+      const [x,y]=positions[label.index];
+      ctx.beginPath(); ctx.moveTo(x,y);
+      ctx.lineTo(Math.max(label.x,Math.min(x,label.x+label.width)),Math.max(label.y,Math.min(y,label.y+label.height)));
+      ctx.strokeStyle=color('edge'); ctx.lineWidth=VIEW.gridWidth; ctx.stroke();
+      ctx.fillStyle=color('surface'); ctx.fillRect(label.x,label.y,label.width,label.height);
+      ctx.fillStyle=color('ink'); ctx.textBaseline='top';
+      ctx.fillText(label.text,label.x+LABELS.padding,label.y+LABELS.padding);
+    }
+    ctx.textBaseline='alphabetic';
   }
   path(points, stroke = color('edge'), width = VIEW.lineWidth, alpha = 1, fill = false) {
     const ctx = this.ctx; ctx.beginPath(); let begun = false;
@@ -104,6 +121,22 @@ export function blend(a,b,t) {
 export function diverging(value, range) {
   const span = Math.max(Math.abs(range[0]),Math.abs(range[1])) || 1;
   return blend(color('neutral'), color(value < 0 ? 'negative' : 'positive'), Math.abs(value)/span);
+}
+export function curvatureScale(range) {
+  if(range[0]===0 && range[1]===0) return {range,kind:'zero',note:'zero curvature'};
+  if (range[0]<0 && range[1]>0) {
+    const extent=Math.max(Math.abs(range[0]),Math.abs(range[1]));
+    return {range:[-extent,extent],kind:'diverging',note:'diverging, centered at 0'};
+  }
+  return {range,kind:range[1]<=0?'negative':'positive',note:'sequential'};
+}
+export function curvatureColor(value, scale) {
+  if (value==null) return color('muted');
+  if (value===0) return color('neutral');
+  if (scale.kind==='diverging') return diverging(value,scale.range);
+  const [low,high]=scale.range;
+  const fraction=high===low?1:scale.kind==='negative'?(high-value)/(high-low):(value-low)/(high-low);
+  return blend(color('neutral'),color(scale.kind),fraction);
 }
 export function sequential(value, range) {
   if (value == null) return color('muted');

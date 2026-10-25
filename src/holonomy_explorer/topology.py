@@ -72,6 +72,21 @@ def compute(request: Request) -> Request:
         ],
         -1,
     )
+    finite_h1 = bars[1][torch.isfinite(bars[1][:, 1])]
+    lifetimes = finite_h1[:, 1] - finite_h1[:, 0]
+    finite_h0_deaths = bars[0][torch.isfinite(bars[0][:, 1]), 1]
+    if lifetimes.numel() and bool((lifetimes > 0).any()):
+        # Start inside the longest-lived finite loop, not at an empty complex.
+        longest = finite_h1[lifetimes.argmax()]
+        initial_epsilon = longest[0] + (longest[1] - longest[0]) / 2
+        initial_reason = "Midpoint of the most persistent finite H1 interval"
+    elif finite_h0_deaths.numel():
+        initial_epsilon = finite_h0_deaths.quantile(0.5)
+        initial_reason = "Median finite H0 death"
+    else:
+        initial_epsilon = context.tensor(0)
+        initial_reason = "No finite intervals; starting at zero"
+    initial_event = torch.searchsorted(events, initial_epsilon, right=True) - 1
     reference = reference_check(context)
     warnings = (
         []
@@ -92,6 +107,9 @@ def compute(request: Request) -> Request:
         triangle_radii=triangle_radii,
         events=events,
         betti=betti,
+        initial_epsilon=initial_epsilon,
+        initial_event=initial_event,
+        initial_reason=initial_reason,
         edge_counts=(edge_radii[None] <= events[:, None]).sum(-1),
         triangle_counts=(triangle_radii[None] <= events[:, None]).sum(-1),
         reference_check=reference,

@@ -8,15 +8,14 @@ function svgNode(tag, attributes = {}, text = null) {
   if (text != null) element.textContent = text;
   return element;
 }
-function chart(title, height = VIEW.chartHeight) {
+function chart(title, height = VIEW.chartHeight, width = VIEW.chartWidth) {
   const wrapper = node('div', null, {class:'chart'});
-  const svg = svgNode('svg', {viewBox:`0 0 ${VIEW.chartWidth} ${height}`, role:'img', 'aria-label':title});
+  const svg = svgNode('svg', {viewBox:`0 0 ${width} ${height}`, role:'img', 'aria-label':title});
   wrapper.append(node('h2',title),svg); return [wrapper,svg];
 }
 function line(svg,x1,y1,x2,y2,cls = 'axis') { svg.append(svgNode('line',{x1,y1,x2,y2,class:cls})); }
 function text(svg,x,y,value,anchor = 'middle') { svg.append(svgNode('text',{x,y,'text-anchor':anchor},value)); }
-function axis(svg, xmax, ymax, height = VIEW.chartHeight) {
-  const p = VIEW.chartPadding, w = VIEW.chartWidth;
+function axis(svg, xmax, ymax, height = VIEW.chartHeight, w = VIEW.chartWidth, p = VIEW.chartPadding) {
   const x = value => p+value/xmax*(w-2*p), y = value => height-p-value/ymax*(height-2*p);
   line(svg,p,p,p,height-p); line(svg,p,height-p,w-p,height-p);
   for (let i=0;i<=CHART.tickCount;i++) {
@@ -40,30 +39,45 @@ export function spectrumChart(data) {
 export function topologyCharts(data, epsilon) {
   const result = document.createDocumentFragment();
   const flattened = data.bars.flatMap((bars,dim) => bars.map(bar => ({bar,dim})));
-  const height = Math.max(VIEW.chartHeight,Math.min(VIEW.maxBarcodeHeight,flattened.length*VIEW.barcodeRow+2*VIEW.chartPadding));
-  const [barcode,svg] = chart('Persistence barcode · [birth, death) · → survives to infinity',height);
-  const max = data.events.at(-1) || 1, p = VIEW.chartPadding;
-  const x = value => p+value/max*(VIEW.chartWidth-2*p);
-  const row = (height-2*p)/Math.max(1,flattened.length);
+  // At a tied birth, longer intervals come first. Infinite bars sort before
+  // finite ones without subtracting Infinity from Infinity in the comparator.
+  flattened.sort((left,right)=>{
+    const birth=left.bar[0]-right.bar[0];
+    if(birth) return birth;
+    const leftDeath=left.bar[1]??Infinity, rightDeath=right.bar[1]??Infinity;
+    if(leftDeath!==rightDeath) return leftDeath>rightDeath?-1:1;
+    return left.dim-right.dim;
+  });
+  const p=VIEW.barcodePadding, height=Math.max(1,flattened.length)*VIEW.barcodeRow+2*p;
+  // Match plot coordinates to CSS pixels. A wide viewport must not multiply the
+  // row heights and push the persistence diagram several screens downward.
+  const width=Math.max(VIEW.chartWidth,document.getElementById('charts').clientWidth-2*VIEW.chartInset);
+  const [barcode,svg] = chart(`Persistence barcode · ${flattened.length} intervals · birth, then longest first · → ∞`,height,width);
+  const scroll=node('div',null,{class:'barcode-scroll',tabindex:'0','aria-label':'Persistence barcode; scroll for additional intervals'});
+  svg.setAttribute('height',height); scroll.append(svg); barcode.append(scroll);
+  const max = data.events.at(-1) || 1;
+  const x = value => p+value/max*(width-2*p);
+  const row = VIEW.barcodeRow;
   flattened.forEach(({bar:[birth,death],dim},index) => {
     const y = p+(index+0.5)*row;
     const active = birth <= epsilon && (death == null || epsilon < death);
     line(svg,x(birth),y,x(death ?? max),y,`bar ${dim ? 'h1' : ''} ${active ? 'active' : ''}`);
     if (death == null) {
       const tip = x(max), a = CHART.arrowSize;
-      svg.append(svgNode('path',{d:`M${tip-a},${y-a} L${tip},${y} L${tip-a},${y+a}`,fill:'none',stroke:color(dim ? 'positive':'accent')}));
+      svg.append(svgNode('path',{d:`M${tip-a},${y-a} L${tip},${y} L${tip-a},${y+a}`,fill:'none',class:`bar ${dim?'h1':''} ${active?'active':''}`}));
     }
   });
   line(svg,x(epsilon),p,x(epsilon),height-p,'plot-line');
   [0,max/2,max].forEach(value => text(svg,x(value),height-p+CHART.labelBaseline,fmt(value)));
-  const [diagram,plot] = chart('Persistence diagram · x: birth ε · y: death ε · top row: ∞');
-  const [px,py] = axis(plot,max,max);
+  const [diagram,plot] = chart('Persistence diagram · x: birth ε · y: death ε · top row: ∞',VIEW.diagramHeight,width);
+  plot.setAttribute('height',VIEW.diagramHeight);
+  const [px,py] = axis(plot,max,max,VIEW.diagramHeight,width,p);
   line(plot,px(0),py(0),px(max),py(max));
   flattened.forEach(({bar:[birth,death],dim}) => {
     const y = death == null ? p/2 : py(death);
     plot.append(svgNode('circle',{cx:px(birth),cy:y,r:CHART.pointRadius,class:dim?'h1-point':'point'}));
   });
-  text(plot,VIEW.chartWidth-p,p/2-5,'∞');
+  text(plot,width-p,p/2-5,'∞');
   result.append(barcode,diagram); return result;
 }
 function logChart(rows, perItem) {
