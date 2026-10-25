@@ -3,13 +3,13 @@
 
 """Tests for holonomy_lib.discrete_geometry.ricci.ollivier_ricci_curvature.
 
-Sinkhorn introduces a small entropic bias on W_1, so closed-form
-expectations are checked with a tolerance commensurate with the default
-regularization (~1%). Tighter checks use `reg=0.005` to push the bias
-down further.
+Closed forms check transport values; distinct batches check support gathering.
+Finite budgets must warn when either transport marginal is still infeasible.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import pytest
 import torch
@@ -69,7 +69,7 @@ class TestClosedForms:
         """
         for n in [3, 4, 5, 6]:
             A = _complete_graph(n)
-            kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
+            kappa = ollivier_ricci_curvature(A)
             torch.testing.assert_close(kappa, kappa.mT, atol=1e-6, rtol=0)
             # At alpha=1 each measure is an exact Dirac mass. Introducing
             # small probabilities at absent support would perturb this.
@@ -82,7 +82,7 @@ class TestClosedForms:
             off_diag = kappa[0, i, j]
             torch.testing.assert_close(
                 off_diag, torch.full_like(off_diag, expected),
-                atol=0.02, rtol=0,
+                atol=1e-8, rtol=0,
             ), f"K_{n}: expected κ={expected}, got {off_diag}"
 
     def test_path_interior_edge_is_flat(self):
@@ -90,9 +90,9 @@ class TestClosedForms:
         (paths are "flat"; neither positively nor negatively curved).
         """
         A = _path_graph(7)  # 0—1—2—3—4—5—6; edge (3, 4) is interior
-        kappa = ollivier_ricci_curvature(A, alpha=0.0, reg=0.005, n_iter=300)
+        kappa = ollivier_ricci_curvature(A)
         # Edge (3, 4) is the most-interior, fully symmetric
-        assert abs(kappa[0, 3, 4].item()) < 0.05
+        assert abs(kappa[0, 3, 4].item()) < 1e-8
 
     def test_diagonal_is_one(self):
         """κ(x, x) = 1 by convention (W_1(δ_x, δ_x) = 0, d=0 vacuous)."""
@@ -107,7 +107,7 @@ class TestClosedForms:
 
 
     def test_symmetric_weighted_with_generous_budget(self):
-        """Converged weighted results agree across pair order and budgets."""
+        """Weighted transport is feasible, exact on the triangle, and batched."""
         n = 5
         g = torch.Generator()
         g.manual_seed(7)
@@ -117,24 +117,39 @@ class TestClosedForms:
         kappa = ollivier_ricci_curvature(
             A, alpha=0.0, reg=0.01, n_iter=5000, tol=1e-12,
         )
-        # Symmetry now at machine precision (well past the 1.75e-2
-        # plateau observed at n_iter=200).
         torch.testing.assert_close(kappa, kappa.mT, atol=1e-8, rtol=0)
-        approximate = ollivier_ricci_curvature(
-            A, alpha=0.0, reg=0.01, n_iter=200,
+        # Distinct neighborhoods exercise padding and gathered costs. Repeating
+        # the same graph would miss a batch mixup or a padded-cost scale leak.
+        batch = torch.cat((A, _path_graph(n), _complete_graph(n)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            batched = ollivier_ricci_curvature(batch)
+            singletons = torch.cat([
+                ollivier_ricci_curvature(graph.unsqueeze(0)) for graph in batch
+            ])
+            low_precision = ollivier_ricci_curvature(batch.float())
+        torch.testing.assert_close(batched, singletons, atol=1e-10, rtol=0)
+        torch.testing.assert_close(
+            batched, low_precision.double(), atol=1e-5, rtol=0,
         )
-        torch.testing.assert_close(approximate, approximate.mT, atol=0.05, rtol=0)
 
         # Exact transport for this weighted triangle gives kappa(1,2)=1/6.
-        # The short budget is infeasible and must report its marginal error.
+        # Defaults must solve it; a deliberately exhausted budget must warn.
         triangle = torch.tensor(
             [[[0., 1., 4.], [1., 0., 2.], [4., 2., 0.]]], dtype=torch.float64,
         )
-        with pytest.warns(UserWarning, match="marginal error 0.333333"):
-            ollivier_ricci_curvature(triangle)
+        with pytest.warns(UserWarning, match="marginal error"):
+            ollivier_ricci_curvature(triangle, n_iter=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            default = ollivier_ricci_curvature(triangle)
+        torch.testing.assert_close(
+            default[0, [1, 2], [2, 1]],
+            torch.full((2,), 1 / 6, dtype=default.dtype), atol=1e-8, rtol=0,
+        )
         for cadence in (1, 8):
             result = ollivier_ricci_curvature(
-                triangle, n_iter=1000, sync_every=cadence,
+                triangle, n_iter=1000, sync_every=cadence, tol=1e-10,
             )
             torch.testing.assert_close(
                 result[0, [1, 2], [2, 1]],

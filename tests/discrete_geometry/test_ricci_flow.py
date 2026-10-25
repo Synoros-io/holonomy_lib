@@ -16,6 +16,7 @@ import torch
 
 from holonomy_lib.discrete_geometry import (
     discrete_ricci_flow,
+    ollivier_ricci_curvature,
     ricci_flow_with_surgery,
 )
 
@@ -114,6 +115,12 @@ class TestFlowDynamics:
         A = _two_cliques_with_bridge(cluster_size=4)
         bridge = (3, 4)  # the bridge edge
         intra = (0, 1)   # an intra-clique edge
+
+        # Solving only existing edge pairs must give the same update as
+        # using the public all-pairs curvature on this nonuniform graph.
+        expected = A * (1 - 0.5 * ollivier_ricci_curvature(A))
+        actual = discrete_ricci_flow(A, n_steps=1, dt=0.5, normalize=False)
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=0)
 
         out = discrete_ricci_flow(A, n_steps=2, dt=0.5, normalize=True)
         torch.testing.assert_close(out, out.mT, atol=1e-9, rtol=0)
