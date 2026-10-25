@@ -87,9 +87,10 @@ def fisher_information_categorical(p: torch.Tensor) -> torch.Tensor:
     # library-wide convention `numerical_floor_convention` in
     # notes/magic_numbers.md, not a per-call knob. Keeping p in the interior
     # is the caller's job; a clamped entry gives a large but finite value.
-    # float16 cannot represent 1e-9 (it rounds to 0), so the clamp does
-    # nothing there and 1/p is inf at p = 0.
-    p_safe = p.clamp(min=1e-9)
+    # float16 cannot represent 1e-9 (it rounds to 0), so the floor is raised
+    # to the dtype's smallest normal number when that is larger. Every other
+    # float dtype keeps the 1e-9 convention.
+    p_safe = p.clamp(min=max(1e-9, torch.finfo(p.dtype).tiny))
     inv_p = torch.reciprocal(p_safe)
     return torch.diag_embed(inv_p)
 

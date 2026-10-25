@@ -97,6 +97,19 @@ def _sym_matvec(A: Operator) -> Callable[[torch.Tensor], torch.Tensor]:
     return lambda v: (A @ v.unsqueeze(-1)).squeeze(-1)
 
 
+def _operator_is_batched(A: object) -> bool:
+    """True when A is a dense tensor with its own leading batch axis.
+
+    Input: the operator handed to `cg` or `lsqr` (dense tensor, sparse
+    matrix, or callable). Output: whether it carries a batch axis. Sparse
+    matrices are always one 2-D matrix and callables don't say, so both
+    count as unbatched. This decides whether a lone `b` may be squeezed
+    back to `(n,)`: with a batched A of size 1 it must not be, or the output
+    shape would depend on the batch size.
+    """
+    return isinstance(A, torch.Tensor) and A.layout == torch.strided and A.ndim > 2
+
+
 def _normalize_rhs(b: torch.Tensor) -> tuple[torch.Tensor, bool]:
     """`(n,) → (1, n)` with a flag to squeeze the output back."""
     if b.ndim == 1:
@@ -195,13 +208,15 @@ def cg(
     sides are scaled before iteration to avoid overflow in inner products.
 
     Returns:
-      `x` with `b`'s shape. Warns (`UserWarning`) if any batch element
+      `x` with `b`'s shape, except that a lone `b` with a batched dense A
+      returns `(B, n)`. Warns (`UserWarning`) if any batch element
       has not met the tolerance at `maxiter`, or a nonfinite iterate occurs.
 
     References:
       Hestenes-Stiefel (1952); Saad (2003) §6.7, §6.11.
     """
     b2, squeeze = _normalize_rhs(b)
+    squeeze = squeeze and not _operator_is_batched(A)
     B, n = b2.shape
     matvec = _sym_matvec(A)
     if isinstance(A, torch.Tensor) and A.shape[-1] != n:
@@ -269,13 +284,15 @@ def cg(
         finite = (torch.isfinite(candidate).all(dim=-1)
                   & torch.isfinite(r_new).all(dim=-1) & torch.isfinite(pAp))
         # pAp <= 0 means A is not positive definite along p, or roundoff has
-        # gotten there first, so CG cannot continue for this member. The x update
-        # below still runs for it, so the returned iterate includes that bad step.
-        # The warning covers this case.
-        failed = failed | (active & (~finite | (pAp <= 0)))
-        x = torch.where(active.unsqueeze(-1), candidate, x)
-        r = torch.where(active.unsqueeze(-1), r_new, r)
-        done = done | (active & ~failed & (_safe_norm(r) <= target))
+        # gotten there first, so CG cannot continue for this member. Its step is
+        # thrown away, so a failed member keeps its last good iterate instead of
+        # one moved along a direction CG cannot trust. The warning still fires.
+        failed_now = active & (~finite | (pAp <= 0))
+        failed = failed | failed_now
+        step_ok = active & ~failed_now
+        x = torch.where(step_ok.unsqueeze(-1), candidate, x)
+        r = torch.where(step_ok.unsqueeze(-1), r_new, r)
+        done = done | (step_ok & (_safe_norm(r) <= target))
         z = _precondition(r)
         rz_new = (r * z).sum(dim=-1)
         denominator = torch.where(rz != 0, rz, torch.ones_like(rz))
@@ -389,7 +406,7 @@ def lsqr(
     Batch members that converge stop updating their solution.
 
     Returns:
-      `x`: `(B, n)` (or `(n,)` for unbatched `b`). Warns
+      `x`: `(B, n)`, or `(n,)` when both `b` and A are unbatched. Warns
       (`UserWarning`) if any batch element met neither stopping test
       at `maxiter`, or a nonfinite iterate occurs.
 
@@ -399,6 +416,7 @@ def lsqr(
         `scipy.sparse.linalg.lsqr` (tests).
     """
     b2, squeeze = _normalize_rhs(b)
+    squeeze = squeeze and not _operator_is_batched(A)
     B = b2.shape[0]
     _, _, m, n = _lsqr_matvecs(A)
     if b2.shape[-1] != m:

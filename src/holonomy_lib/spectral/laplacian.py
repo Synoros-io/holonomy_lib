@@ -249,7 +249,7 @@ def _check_square_with_batch(A: torch.Tensor) -> None:
     """
     if A.ndim < 2:
         raise ValueError(
-            f"A must have at least one batch dim and be square (..., n, n); "
+            f"A must have at least two dims and be square (..., n, n); "
             f"got A.shape={tuple(A.shape)}"
         )
     if A.shape[-1] != A.shape[-2]:
@@ -356,9 +356,8 @@ def _sparse_DminusA(
     A_noloop: torch.Tensor,
     d_diag: torch.Tensor,
     A_value_scale: torch.Tensor | None = None,
-    diag_sign: float = 1.0,
 ) -> torch.Tensor:
-    """Build a sparse-COO Laplacian of the form `diag_sign · diag(d) − S · A`.
+    """Build a sparse-COO Laplacian of the form `diag(d) − S · A`.
 
     Args:
       A_noloop: coalesced sparse-COO `(n, n)` with the diagonal already
@@ -368,9 +367,8 @@ def _sparse_DminusA(
         elementwise into `A_noloop.values()` before the `−` step.
         Used by the normalized variants to apply `D^{−1/2} · A · D^{−1/2}`
         or `D^{−1} · A` row/col scalings.
-      diag_sign: scalar multiplied into `d_diag`. Every caller leaves it
-        at `+1`: the unnormalized forms pass the degree as `d_diag`, the
-        normalized forms pass ones so the diagonal term is the identity.
+      The unnormalized forms pass the degree as `d_diag`; the normalized
+      forms pass ones so the diagonal term is the identity.
 
     Returns:
       Coalesced sparse-COO `(n, n)`.
@@ -380,7 +378,7 @@ def _sparse_DminusA(
 
     # Row and column indices both run over 0..n-1, which is the diagonal.
     diag_indices = torch.arange(n, device=device).unsqueeze(0).expand(2, n)
-    diag_values = diag_sign * d_diag
+    diag_values = d_diag
 
     # Stack the diagonal and the negated off-diagonal entries into one COO
     # list. The caller removed the stored diagonal, so no index appears twice

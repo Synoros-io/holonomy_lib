@@ -126,8 +126,10 @@ def regularized_lstsq(
             )
         n = A.shape[-1]
         # A lone right-hand side (m,) is lifted to (1, m) so the batched code
-        # below handles it. The batch axis is dropped again at the return.
-        squeeze = b.ndim == 1
+        # below handles it. The batch axis is dropped again at the return, but
+        # only when A is unbatched too: a batched A of size 1 has to keep its
+        # batch axis, or the output shape would depend on the batch size.
+        squeeze = b.ndim == 1 and A.ndim == 2
         b2 = b.unsqueeze(0) if squeeze else b
         gram = A.mT @ A                                   # (..., n, n)
         eye = torch.eye(n, dtype=A.dtype, device=A.device)
@@ -173,8 +175,10 @@ def regularized_lstsq(
             return (A.mT @ u.unsqueeze(-1)).squeeze(-1)
 
     # A lone b is lifted to (1, m) and squeezed back at the end, as in the
-    # cholesky path. The right-hand side of the normal equations is Aᵀb.
-    squeeze = b.ndim == 1
+    # cholesky path, again only when A has no batch axis of its own. Sparse A
+    # is always a single 2-D matrix. The right-hand side of the normal
+    # equations is Aᵀb.
+    squeeze = b.ndim == 1 and A.ndim == 2
     b2 = b.unsqueeze(0) if squeeze else b
     x = cg(normal_op, rproject(b2), rtol=rtol, maxiter=maxiter)
     return x.squeeze(0) if squeeze else x

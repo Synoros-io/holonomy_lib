@@ -312,9 +312,17 @@ def random_so3(
     # generator must be on the matching device: if the caller wants
     # GPU sampling, they must pass a CUDA generator.
     target_device = torch.device(device)
-    if generator is not None and generator.device != target_device:
+    # A CUDA generator reports `cuda` with no index, so compare the device
+    # type, and the index only when both sides name one.
+    generator_device = None if generator is None else generator.device
+    if generator_device is not None and (
+        generator_device.type != target_device.type
+        or (generator_device.index is not None
+            and target_device.index is not None
+            and generator_device.index != target_device.index)
+    ):
         raise ValueError(
-            f"generator is on {generator.device} but device={target_device} "
+            f"generator is on {generator_device} but device={target_device} "
             f"was requested; pass a generator on the target device or omit "
             f"`generator` to use the default"
         )

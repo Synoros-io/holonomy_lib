@@ -95,7 +95,8 @@ def lanczos_eigsh(
     n = A.shape[-1]
     if not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= n:
         raise ValueError(f"k must satisfy 1 <= k <= n={n}; got k={k}")
-    if not isinstance(oversample, int) or oversample < 0:
+    if (not isinstance(oversample, int) or isinstance(oversample, bool)
+            or oversample < 0):
         raise ValueError("oversample must be a nonnegative integer")
     if which not in ("LA", "SA"):
         raise ValueError("which must be 'LA' or 'SA'")
@@ -103,7 +104,7 @@ def lanczos_eigsh(
         raise ValueError("sigma must be finite and is only meaningful with which='SA'")
     if n_iter is None:
         n_iter = k + oversample
-    if not isinstance(n_iter, int) or n_iter < k:
+    if not isinstance(n_iter, int) or isinstance(n_iter, bool) or n_iter < k:
         raise ValueError(f"n_iter must be an integer >= k={k}")
     # The default, or an explicit n_iter, can exceed n. Clamping after the
     # k check keeps n_iter >= k, since k <= n. A clamped n_iter == n routes
@@ -165,9 +166,13 @@ def _warn_asymmetric(A: torch.Tensor) -> None:
         tolerance = A.shape[-1] * torch.finfo(A.dtype).eps * scale
         symmetric = bool((difference.abs() <= tolerance).all())
     else:
-        # Dense path uses torch.allclose's default tolerances (rtol 1e-5,
-        # atol 1e-8), which are looser than the sparse tolerance above.
-        symmetric = torch.allclose(A, A.mT)
+        # Same rule as the sparse path, per batch member: roundoff in a row of
+        # n terms is about n * eps * (largest entry), so anything bigger than
+        # that is real asymmetry. Each member uses its own scale so one large
+        # matrix doesn't hide asymmetry in a small one.
+        scale = A.abs().amax(dim=(-2, -1), keepdim=True)
+        tolerance = A.shape[-1] * torch.finfo(A.dtype).eps * scale
+        symmetric = bool(((A - A.mT).abs() <= tolerance).all())
     if not symmetric:
         warnings.warn(
             "symmetric eigensolver received asymmetric A", UserWarning, stacklevel=2

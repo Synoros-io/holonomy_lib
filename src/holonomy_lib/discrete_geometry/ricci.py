@@ -246,7 +246,7 @@ def discrete_ricci_flow(
         # creates an edge. An edge whose weight reaches zero stays gone.
         edge_mask = (W > 0).to(W.dtype)
         update = (1.0 - dt * kappa) * edge_mask
-        W = W * update + W * (1.0 - edge_mask)
+        W = W * update
         # kappa <= 1 always (W_1 is non-negative), so the multiplier
         # 1 - dt * kappa can only go negative when dt > 1. A negative length has
         # no meaning, so the clamp sets that edge to zero.
@@ -354,7 +354,7 @@ def ricci_flow_with_surgery(
         )
         edge_mask = (W > 0).to(W.dtype)
         update = (1.0 - dt * kappa) * edge_mask
-        W = W * update + W * (1.0 - edge_mask)
+        W = W * update
         W = W.clamp(min=0)
         W = 0.5 * (W + W.mT)
         if normalize:

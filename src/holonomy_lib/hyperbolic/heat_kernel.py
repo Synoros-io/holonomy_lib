@@ -551,7 +551,7 @@ def hyperbolic_heat_kernel(
       distances: non-negative geodesic distance(s). Any shape, must
         be broadcastable with `t`.
       manifold: a manifold object exposing `.n` (intrinsic dim) and
-        `.k` (sectional curvature, expected `k < 0`).
+        `.k` (sectional curvature, must be `k < 0`; ValueError otherwise).
       n_quad: number of Gauss–Legendre nodes for the quadrature: the n=2
         integral and the even-dimension descent. Default 32; cataloged as
         `HEAT_KERNEL_QUADRATURE_NODES`.
@@ -579,11 +579,18 @@ def hyperbolic_heat_kernel(
       Grigor'yan–Noguchi (1998); Anker–Ostellari (2003).
     """
     n = manifold.n
+    # The closed forms are for hyperbolic space only. Taking abs(k) would
+    # quietly turn a sphere (k > 0) into a hyperbolic answer, and k = 0 gives
+    # t_unit = 0, so both are rejected up front.
+    if not manifold.k < 0:
+        raise ValueError(
+            f"hyperbolic_heat_kernel needs curvature k < 0; got k={manifold.k}"
+        )
     abs_k = abs(manifold.k)
 
     # Curvature scaling: convert to unit-curvature arguments, evaluate,
-    # then rescale the output by |k|^{n/2}. abs(k) only takes the magnitude,
-    # so k must be negative here; a k >= 0 is not checked.
+    # then rescale the output by |k|^{n/2}. k < 0 was checked above, so abs(k)
+    # is just -k.
     t_unit = abs_k * t
     sqrt_abs_k = math.sqrt(abs_k)
     d_unit = sqrt_abs_k * distances
