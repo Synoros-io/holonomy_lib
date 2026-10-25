@@ -63,8 +63,8 @@ h1 { margin: 0; font-size: 29px; line-height: 1.3; letter-spacing: -.8px; font-w
 .visual-panel, .details, .data-table { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; min-width: 0; }
 .visual-toolbar { display: flex; justify-content: space-between; padding: 13px 16px; border-bottom: 1px solid var(--border); gap: 12px; font-size: 12px; }
 #hint { color: var(--muted); text-align: right; font-size: 11px; }
-.canvas-wrap { height: clamp(280px, 32vh, 400px); position: relative; }
-.topology-mode .canvas-wrap { height: clamp(220px, 26vh, 320px); }
+.canvas-wrap { height: clamp(420px, 58vh, 720px); position: relative; }
+.topology-mode .canvas-wrap { height: clamp(360px, 48vh, 560px); }
 canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
 #empty[hidden], [hidden] { display: none !important; }
