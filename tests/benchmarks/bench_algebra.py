@@ -4,8 +4,8 @@
 """Benchmarks for holonomy_lib.algebra.
 
 Cases:
-  truncated_svd (exact mode)        — sizes m × n, target rank r.
-  truncated_svd (randomized mode)   — sizes m × n, target rank r,
+  truncated_svd (exact mode): sizes m × n, target rank r.
+  truncated_svd (randomized mode): sizes m × n, target rank r,
                                        oversample=5, n_iter=2.
 
 Sizes span "small enough to be a hot inner-loop primitive" (50×50) to
@@ -17,10 +17,22 @@ from __future__ import annotations
 
 import torch
 
-from holonomy_lib.algebra import truncated_svd
+from holonomy_lib.algebra import lanczos_eigsh, truncated_svd
 from tests.benchmarks.harness import Bench
 
 bench = Bench("algebra")
+
+# Keep the existing independent starting-vector stream for the Lanczos cases.
+LANCZOS_SEED = 1
+
+
+def _solver_generator(device: torch.device) -> torch.Generator | None:
+    """Seed the device doing Lanczos draws, which happen inside the solver."""
+    if device.type == "mps":
+        # MPS exposes seeding for its default stream, not a public Generator.
+        torch.mps.manual_seed(LANCZOS_SEED)
+        return None
+    return torch.Generator(device=device).manual_seed(LANCZOS_SEED)
 
 
 def _make_M(size, device, dtype):
@@ -74,18 +86,17 @@ bench.case(
 
 # ----------------- Lanczos top-k -----------------
 
-from holonomy_lib.algebra import lanczos_eigsh
-
 
 def _setup_lanczos(size, device, dtype):
     """Symmetric A for Lanczos benchmarking."""
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     A = torch.randn(size["B"], size["n"], size["n"], generator=g, dtype=dtype)
     A = 0.5 * (A + A.mT)
     A = A.to(device)
     k = size["k"]
     n_iter = size.get("n_iter", None)
-    gen = torch.Generator(device="cpu"); gen.manual_seed(1)
+    gen = _solver_generator(A.device)
     def fn():
         return lanczos_eigsh(A, k=k, n_iter=n_iter, generator=gen)
     return fn
@@ -93,7 +104,8 @@ def _setup_lanczos(size, device, dtype):
 
 def _setup_dense_eigh(size, device, dtype):
     """Reference: full eigendecomposition. Useful for comparison."""
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     A = torch.randn(size["B"], size["n"], size["n"], generator=g, dtype=dtype)
     A = 0.5 * (A + A.mT)
     A = A.to(device)
@@ -133,7 +145,8 @@ bench.case("dense_eigh_reference", _setup_dense_eigh, _dense_eigh_sizes,
 def _setup_lanczos_sa(size, device, dtype):
     """Symmetric Positive Definite A so σ=0 is a clean negative shift
     below the smallest eigenvalue."""
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     n = size["n"]
     X = torch.randn(size["B"], n, n, generator=g, dtype=dtype)
     A = torch.matmul(X, X.mT) + n * torch.eye(n, dtype=dtype)
@@ -141,7 +154,7 @@ def _setup_lanczos_sa(size, device, dtype):
     k = size["k"]
     n_iter = size.get("n_iter", None)
     sigma = size.get("sigma", 0.0)
-    gen = torch.Generator(device="cpu"); gen.manual_seed(1)
+    gen = _solver_generator(A.device)
     def fn():
         return lanczos_eigsh(
             A, k=k, n_iter=n_iter, which="SA", sigma=sigma, generator=gen,

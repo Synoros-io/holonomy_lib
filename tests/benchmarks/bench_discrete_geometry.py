@@ -3,10 +3,10 @@
 
 """Benchmarks for holonomy_lib.discrete_geometry (Ollivier + flow + surgery).
 
-The Ollivier curvature is THE bottleneck: O(B·n³·n_iter) for Sinkhorn
-with a materialized (B, n², n) pair structure. The flow primitives
-call Ollivier repeatedly, multiplying the cost. We sweep small n only
-on first pass; once memory tiling lands we'll expand.
+Ollivier curvature uses tiled Sinkhorn solves. The flow primitives call
+Ollivier repeatedly, multiplying the cost. These cases retain small graph
+sizes and fixed iteration budgets; nonconvergence warnings remain in the
+results and do not imply that a timing measures a converged solve.
 """
 
 from __future__ import annotations
@@ -28,7 +28,8 @@ bench = Bench("discrete_geometry")
 def _make_adj(size, device, dtype):
     n = size["n"]
     B = size["B"]
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     # Erdős–Rényi-like random weighted graph
     A = (torch.rand(B, n, n, generator=g, dtype=dtype) * (
         torch.rand(B, n, n, generator=g, dtype=dtype) < 0.4
@@ -103,7 +104,8 @@ def _setup_forman_simple(size, device, dtype):
 
 
 def _setup_forman_augmented(size, device, dtype):
-    A = _make_adj(size, device, dtype)
+    # The augmented formula assumes unit edge and triangular-face weights.
+    A = (_make_adj(size, device, dtype) > 0).to(dtype)
     def fn():
         return forman_ricci_augmented(A)
     return fn
@@ -120,5 +122,5 @@ _forman_sizes = [
 bench.case("forman_ricci_simple", _setup_forman_simple, _forman_sizes,
             notes="Combinatorial Forman-Ricci; O(B*n^2). No OT solve.")
 bench.case("forman_ricci_augmented", _setup_forman_augmented, _forman_sizes,
-            notes="Augmented form adds the +3*#triangles term; "
+            notes="Unweighted augmented form adds the +3*#triangles term; "
                   "triangle-count matmul makes this O(B*n^3).")

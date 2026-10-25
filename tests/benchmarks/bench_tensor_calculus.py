@@ -21,7 +21,8 @@ bench = Bench("tensor_calculus")
 def _make_T(size, device, dtype):
     dims = size["dims"]            # tuple of tensor-mode dims
     B = size["B"]
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     return torch.randn(B, *dims, generator=g, dtype=dtype).to(device)
 
 
@@ -38,7 +39,8 @@ def _setup_mode_product(size, device, dtype):
     axis = size["axis"]
     j = size["j"]
     n_axis = T.shape[axis]
-    g = torch.Generator(device="cpu"); g.manual_seed(1)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(1)
     A = torch.randn(T.shape[0], j, n_axis, generator=g, dtype=dtype).to(device)
     def fn():
         return mode_product(T, A, axis=axis)

@@ -15,8 +15,11 @@ import torch
 
 from holonomy_lib.info_geometry import (
     bregman_divergence,
+    fisher_information_categorical,
+    fisher_information_gaussian_mean,
     kl_divergence_categorical,
     kl_divergence_gaussian,
+    natural_gradient,
 )
 from tests.benchmarks.harness import Bench
 
@@ -24,7 +27,8 @@ bench = Bench("info_geometry")
 
 
 def _seeded(seed: int) -> torch.Generator:
-    g = torch.Generator(device="cpu"); g.manual_seed(seed)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
     return g
 
 
@@ -47,7 +51,8 @@ def _setup_kl_categorical(size, device, dtype):
     p = p / p.sum(dim=-1, keepdim=True)
     q = torch.rand(size["B"], size["k"], generator=_seeded(1), dtype=dtype)
     q = q / q.sum(dim=-1, keepdim=True)
-    p = p.to(device); q = q.to(device)
+    p = p.to(device)
+    q = q.to(device)
     def fn():
         return kl_divergence_categorical(p, q)
     return fn
@@ -101,13 +106,6 @@ bench.case("kl_divergence_gaussian", _setup_kl_gaussian, _kl_gaussian_sizes,
 
 
 # ----------------- Fisher metric + natural gradient (roadmap #3) -----------------
-
-from holonomy_lib.info_geometry import (
-    fisher_information_categorical,
-    fisher_information_gaussian_mean,
-    natural_gradient,
-)
-
 
 def _setup_fisher_categorical(size, device, dtype):
     p = torch.rand(size["B"], size["k"], generator=_seeded(0), dtype=dtype) + 0.1

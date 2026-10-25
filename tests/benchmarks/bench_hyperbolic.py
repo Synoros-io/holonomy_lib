@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright 2026 Synoros
 
-"""Benchmarks for holonomy_lib.hyperbolic graph ops.
+"""Benchmarks for hyperbolic means and experimental graph embeddings.
 
-The bottleneck for substrate-scale training is
-`hyperbolic_laplacian_eigenmaps` — it scales O(B·N²·D·max_steps) per
-call, so the wall-clock matters for any real graph (N ≥ a few
-hundred). Cases:
-
-  - laplacian_eigenmaps on N ∈ {50, 200, 500} (dense random graph
-    at edge-prob 0.3) — the regime where the old `lr=0.05` overflow
-    surfaced, and where the degree-normalization fix needs to keep
-    runtime sane.
-  - frechet_mean on N ∈ {50, 500, 5000} points — pure batched
-    log/exp; reasonable cost characterization.
-
-These complement the unit tests by giving a wall-clock baseline at
-scales the unit suite can't touch (large N would blow up the test
-runtime).
+The eigenmaps case calls holonomy_lib.experimental. Its attraction-only
+objective admits collapsed components, so runtime is not evidence of
+embedding quality. It sweeps dense graphs with N in {50, 200, 500}.
+The frechet_mean case sweeps N in {50, 500, 5000} points.
 """
 
 from __future__ import annotations
@@ -83,9 +72,9 @@ _frechet_sizes = [
 
 bench.case(
     "hyperbolic_laplacian_eigenmaps", _setup_laplacian_eigenmaps, _lap_sizes,
-    notes=("RSGD on Σ A_ij d²(Y_i, Y_j) with degree normalization. "
-           "Per-step cost is O(N² · D); 50 steps × 500² × 5 = 6e6 flops "
-           "of exp/log/distance per step."),
+    notes=("Experimental attraction-only RSGD with degree normalization; "
+           "collapsed components minimize the objective. "
+           "Timing only, not embedding quality; O(B*N²*D) per step."),
 )
 bench.case(
     "frechet_mean", _setup_frechet_mean, _frechet_sizes,

@@ -11,7 +11,7 @@ The torch backend is NOT a custom CUDA kernel; it's a same-algorithm
 port to torch ops so the reduction can stay on whatever device the
 filtration lives on. For typical small inputs CPython sets are
 competitive or faster (tight C ops). The crossover, if any, is at
-sizes large enough that vectorized `unique` beats hashing — these
+sizes large enough that vectorized `unique` beats hashing; these
 benchmarks measure that.
 """
 
@@ -28,7 +28,8 @@ bench = Bench("topology")
 
 
 def _seeded(seed: int) -> torch.Generator:
-    g = torch.Generator(device="cpu"); g.manual_seed(seed)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
     return g
 
 

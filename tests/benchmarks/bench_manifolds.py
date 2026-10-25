@@ -7,14 +7,14 @@ The manifold methods are the inner-loop ops of any Riemannian
 optimizer, so per-call latency matters. Cases:
 
   FixedRankManifold:
-    projection      — given a point and an ambient direction, project.
-    retraction      — currently full SVD; we want this faster.
-    inner / norm    — should be near-zero overhead.
+    projection: given a point and an ambient direction, project.
+    retraction: currently full SVD; we want this faster.
+    inner / norm: should be near-zero overhead.
 
   SPDManifold:
-    exp / log / distance  — all do eigh; cache opportunities.
-    inner                  — two solves; possibly Cholesky-based.
-    is_spd                 — eigh + reductions.
+    exp / log / distance: all do eigh; cache opportunities.
+    inner: two solves; possibly Cholesky-based.
+    is_spd: eigh + reductions.
 """
 
 from __future__ import annotations
@@ -34,10 +34,9 @@ def _setup_fr_projection(size, device, dtype):
     mfd = FixedRankManifold(
         m=size["m"], n=size["n"], r=size["r"], device=device, dtype=dtype,
     )
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     pt = mfd.random_point(batch_size=size["B"], generator=g)
-    # Move to device
-    pt = tuple(t.to(device) for t in pt)
     Z = torch.randn(size["B"], size["m"], size["n"], generator=g,
                      dtype=dtype).to(device)
     def fn():
@@ -49,9 +48,9 @@ def _setup_fr_retraction(size, device, dtype):
     mfd = FixedRankManifold(
         m=size["m"], n=size["n"], r=size["r"], device=device, dtype=dtype,
     )
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     pt = mfd.random_point(batch_size=size["B"], generator=g)
-    pt = tuple(t.to(device) for t in pt)
     tangent = mfd.projection(
         pt, torch.randn(size["B"], size["m"], size["n"], generator=g,
                           dtype=dtype).to(device),
@@ -65,9 +64,9 @@ def _setup_fr_inner(size, device, dtype):
     mfd = FixedRankManifold(
         m=size["m"], n=size["n"], r=size["r"], device=device, dtype=dtype,
     )
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     pt = mfd.random_point(batch_size=size["B"], generator=g)
-    pt = tuple(t.to(device) for t in pt)
     A = torch.randn(size["B"], size["m"], size["n"], generator=g,
                      dtype=dtype).to(device)
     B = torch.randn(size["B"], size["m"], size["n"], generator=g,
@@ -101,7 +100,7 @@ bench.case(
 # ----------------- SPD -----------------
 
 def _well_conditioned_spd(n, B, device, dtype, generator):
-    """Wishart + ε·I — keeps eigh stable across float32/64 for the
+    """Wishart + ε·I keeps eigh stable across float32/64 for the
     benchmark inputs. Identity scale is `n` (≈ trace of A Aᵀ for unit
     Wishart) so the condition number stays bounded.
     """
@@ -113,7 +112,8 @@ def _well_conditioned_spd(n, B, device, dtype, generator):
 
 def _setup_spd_exp(size, device, dtype):
     mfd = SPDManifold(n=size["n"], device=device, dtype=dtype)
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     S = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     V = 0.5 * (
         torch.randn(size["B"], size["n"], size["n"], generator=g,
@@ -127,7 +127,8 @@ def _setup_spd_exp(size, device, dtype):
 
 def _setup_spd_log(size, device, dtype):
     mfd = SPDManifold(n=size["n"], device=device, dtype=dtype)
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     S = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     T = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     def fn():
@@ -137,7 +138,8 @@ def _setup_spd_log(size, device, dtype):
 
 def _setup_spd_distance(size, device, dtype):
     mfd = SPDManifold(n=size["n"], device=device, dtype=dtype)
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     S = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     T = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     def fn():
@@ -147,7 +149,8 @@ def _setup_spd_distance(size, device, dtype):
 
 def _setup_spd_inner(size, device, dtype):
     mfd = SPDManifold(n=size["n"], device=device, dtype=dtype)
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     S = _well_conditioned_spd(size["n"], size["B"], device, dtype, g)
     U = 0.5 * (
         torch.randn(size["B"], size["n"], size["n"], generator=g,
@@ -174,7 +177,8 @@ _spd_sizes = [
 
 bench.case(
     "SPD.exp", _setup_spd_exp, _spd_sizes,
-    notes="exp_S(V) = S^{1/2} expm(S^{-1/2} V S^{-1/2}) S^{1/2}; one eigh + matrix_exp.",
+    notes="exp_S(V) = S^{1/2} expm(S^{-1/2} V S^{-1/2}) S^{1/2}; "
+          "one eigh + matrix_exp.",
 )
 bench.case(
     "SPD.log", _setup_spd_log, _spd_sizes,
@@ -193,7 +197,8 @@ bench.case(
 # ----------------- comparison (model-space volumes) -----------------
 
 def _setup_ball_volume(size, device, dtype):
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     # kappa in [-1, 1] keeps the spherical diameter bound pi/sqrt(kappa)
     # above the r < 1 samples for every element.
     kappa = (2.0 * torch.rand(size["B"], generator=g, dtype=dtype) - 1.0).to(device)

@@ -29,14 +29,21 @@ from tests.benchmarks.harness import Bench
 
 bench = Bench("spectral")
 
+# Preserve the original signed-graph workload: negate 30% of undirected edges.
+SIGNED_EDGE_PROBABILITY = 0.3
+
 
 def _make_adj(size, device, dtype, signed=False):
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     A = torch.rand(size["B"], size["n"], size["n"], generator=g, dtype=dtype)
     A = (A + A.mT) * 0.5
     if signed:
         # Add some negative weights for signed Laplacian benchmarks.
-        mask = torch.rand_like(A) < 0.3
+        # Both directions of an edge need the same sign for a symmetric input.
+        mask = torch.rand(A.shape, generator=g, device=g.device, dtype=dtype)
+        mask = (mask < SIGNED_EDGE_PROBABILITY).triu(diagonal=1)
+        mask = mask | mask.mT
         A = torch.where(mask, -A, A)
     A.diagonal(dim1=-2, dim2=-1).zero_()
     return A.to(device)
@@ -111,7 +118,8 @@ def _make_directed_adj(size, device, dtype):
     """Asymmetric weighted adjacency for the magnetic-Laplacian
     benchmarks; the asymmetry is what the phase factor actually
     interacts with."""
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     A = torch.rand(size["B"], size["n"], size["n"], generator=g, dtype=dtype)
     A.diagonal(dim1=-2, dim2=-1).zero_()
     return A.to(device)
@@ -165,7 +173,8 @@ def _setup_heat_kernel_dense(size, device, dtype):
 def _setup_heat_kernel_signal(size, device, dtype):
     A = _make_adj(size, device, dtype)
     L = _L.symmetric_normalized(A)
-    g = torch.Generator(device="cpu"); g.manual_seed(1)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(1)
     signal = torch.randn(
         size["B"], size["n"], size["k_signal"], generator=g, dtype=dtype,
     ).to(device)
@@ -216,7 +225,8 @@ _resistance_sizes = [
 
 bench.case("effective_resistance", _setup_effective_resistance,
             _resistance_sizes,
-            notes="Pairwise R via Moore-Penrose pseudoinverse; dense eigh + outer product.")
+            notes="Pairwise R via Moore-Penrose pseudoinverse; "
+                  "dense eigh + outer product.")
 
 
 # ----------------- diffusion map -----------------
@@ -224,20 +234,21 @@ bench.case("effective_resistance", _setup_effective_resistance,
 def _setup_diffusion_map(size, device, dtype):
     A = _make_adj(size, device, dtype)
     k = size["k"]
-    t = size.get("t", 1.0)
+    t = size.get("t", 1)
     def fn():
         return diffusion_map(A, k=k, t=t)
     return fn
 
 
 _diffusion_sizes = [
-    {"B": 1, "n": 64,   "k": 8,  "t": 1.0},
-    {"B": 1, "n": 256,  "k": 16, "t": 1.0},
-    {"B": 1, "n": 1024, "k": 32, "t": 1.0},
+    {"B": 1, "n": 64,   "k": 8,  "t": 1},
+    {"B": 1, "n": 256,  "k": 16, "t": 1},
+    {"B": 1, "n": 1024, "k": 32, "t": 1},
 ]
 
 bench.case("diffusion_map", _setup_diffusion_map, _diffusion_sizes,
-            notes="Coifman-Lafon embedding; dominated by the eigh in laplacian_eigenmaps.")
+            notes="Coifman-Lafon embedding with integer diffusion time; "
+                  "dense symmetric eigendecomposition.")
 
 
 # ----------------- sign-magnetic Laplacian (roadmap #1) -----------------
@@ -245,10 +256,12 @@ bench.case("diffusion_map", _setup_diffusion_map, _diffusion_sizes,
 def _make_signed_directed_adj(size, device, dtype):
     """Signed-directed adjacency. Half the edges get sign-flipped to
     break the gauge-equivalence with the plain magnetic Laplacian."""
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     A = torch.rand(size["B"], size["n"], size["n"], generator=g, dtype=dtype)
     signs = torch.where(
-        torch.rand_like(A) < 0.5, torch.ones_like(A), -torch.ones_like(A),
+        torch.rand(A.shape, generator=g, device=g.device, dtype=dtype) < 0.5,
+        torch.ones_like(A), -torch.ones_like(A),
     )
     A = A * signs
     A.diagonal(dim1=-2, dim2=-1).zero_()
@@ -273,7 +286,8 @@ def _setup_sign_magnetic_sym_norm(size, device, dtype):
 
 bench.case("magnetic.sign_magnetic_combinatorial",
             _setup_sign_magnetic_combinatorial, _magnetic_sizes,
-            notes="Signed-directed Hermitian Laplacian; one extra abs() vs plain magnetic.")
+            notes="Signed-directed Hermitian Laplacian; "
+                  "one extra abs() vs plain magnetic.")
 bench.case("magnetic.sign_magnetic_symmetric_normalized",
             _setup_sign_magnetic_sym_norm, _magnetic_sizes,
             notes="Normalized signed-directed form.")
@@ -284,7 +298,8 @@ bench.case("magnetic.sign_magnetic_symmetric_normalized",
 def _make_sparse_adj(size, device, dtype):
     """Sparse symmetric adjacency on `device` with target nnz ~ size['nnz']."""
     n = size["n"]
-    g = torch.Generator(device="cpu"); g.manual_seed(0)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(0)
     dense_full = torch.rand(n, n, generator=g, dtype=dtype)
     dense_full = 0.5 * (dense_full + dense_full.mT)
     # Threshold to control density.
@@ -319,7 +334,7 @@ _sparse_sizes = [
 
 bench.case("laplacian.combinatorial_sparse",
             _setup_sparse_combinatorial, _sparse_sizes,
-            notes="Sparse-COO combinatorial Laplacian; expected to win vs dense at n ≥ ~1000.")
+            notes="Sparse-COO combinatorial Laplacian.")
 bench.case("laplacian.symmetric_normalized_sparse",
             _setup_sparse_sym_norm, _sparse_sizes,
             notes="Sparse-COO L_sym; same crossover pattern.")
