@@ -32,10 +32,9 @@ print(R.shape)        # torch.Size([2, 3, 3])
 print(R[:, 0, 2])     # tensor([2.0000, 0.6667], dtype=torch.float64)
 ```
 
-## What's in it
+## Contents
 
-[CONTENTS.md](https://github.com/Synoros-io/holonomy_lib/blob/master/CONTENTS.md) lists every function with its signature and the
-paper it implements.
+[CONTENTS.md](https://github.com/Synoros-io/holonomy_lib/blob/master/CONTENTS.md) 
 
 | Subpackage | Contents |
 |---|---|
