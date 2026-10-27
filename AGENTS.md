@@ -76,6 +76,7 @@ comes from the installed PyTorch build, not the Python version alone. Check
 - lint: `python -m ruff check src/ tests/`
 - types: `python -m mypy src/`
 - explorer: `holonomy-explorer` or `python -m holonomy_explorer`
+- release (by hand, there is no CI): `uv build`, then `uv publish` with a PyPI API token
 - GPU work: use the configured workstation GPU interpreter with `PYTHONPATH=src`;
   do not install a second PyTorch copy per worktree.
 
